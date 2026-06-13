@@ -30,8 +30,8 @@ discipliné, sur tes **projets .NET perso hébergés sur GitHub**. Inspirée de
 
 ## Installation
 
-1. **Le plugin** — `/plugin marketplace add D:\Development\Divalto\legion` (ou ton
-   repo GitHub une fois publié), puis `/plugin install legion`. Installe aussi
+1. **Le plugin** — `/plugin marketplace add mickaelfrancois/legion` (ou un chemin
+   local vers ce dépôt cloné), puis `/plugin install legion`. Installe aussi
    `dotnet-claude-kit` (sa MCP Roslyn doit être compilée — suis son README).
 2. **Python** — `python --version`.
 3. **GitHub CLI** — `gh auth login` (scope repo). Vérifie : `gh auth status`.

@@ -3,7 +3,7 @@
 > Stack d'agents Claude inspirée de [gstack](https://github.com/garrytan/gstack),
 > adaptée à un environnement **solo/indie : projets .NET perso hébergés sur GitHub**.
 >
-> Version allégée d'un plugin d'entreprise (`divalto-legion`) : on garde le squelette
+> Version allégée d'un plugin d'orchestration d'entreprise : on garde le squelette
 > d'orchestration et les garde-fous, on retire ce qui ne sert qu'en équipe (campagnes
 > US→tâches, boucle de revue PR multi-round, DAG NuGet multi-repo).
 

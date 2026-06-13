@@ -254,7 +254,7 @@ function New-ScenarioBattle($root, $index) {
     }
 
     $delivered = ($phases['deliver'].status -eq 'done')
-    $prUrl = if ($delivered) { "https://github.com/mickaelfrancois/$repo/pull/$issueNum" } else { $null }
+    $prUrl = if ($delivered) { "https://github.com/example/$repo/pull/$issueNum" } else { $null }
 
     $scale = $curIdx + 1
     $contribs = @(

@@ -54,7 +54,7 @@ Chaque fichier contient **une** entrée, pas un tableau :
 {
   "id": "2026-06-08-GH-1234",              // id de la battle (date + ticket)
   "repo": "billing-api",                    // nom court du repo
-  "repo_path": "D:/sources/billing-api",    // racine du repo (cf. §5 séparateurs)
+  "repo_path": "C:/src/billing-api",        // racine du repo (cf. §5 séparateurs)
   "ticket": "GH#1234",                      // "GH#<n>" ou slug libre ; peut être null
   "title": "Ajout endpoint facturation",    // titre lisible ; peut être null
   "profile": "feature",                     // feature | hotfix | security | spike
@@ -177,7 +177,7 @@ extrait du verdict (lu dans le `gate-*.md`) quand `battle_status == "blocked"`.
 ## 5. Pièges et conventions
 
 - **Séparateurs de chemin** : `repo_path` est stocké tel que produit par l'hôte
-  (Windows ⇒ antislashs `D:\sources\...`). Normaliser avant de composer le chemin
+  (Windows ⇒ antislashs `C:\src\...`). Normaliser avant de composer le chemin
   des artefacts ; ne pas supposer `/`.
 - **Fraîcheur** : le shard d'une battle est réécrit par un hook `PostToolUse` à
   **chaque écriture de son `battle.json`** par l'orchestrateur — donc à chaque
