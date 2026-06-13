@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# .NET (future ui/legatus)
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+
+# Battle state is per-target-repo and local — never tracked here anyway
+.legion/
+
+# OS
+Thumbs.db
+.DS_Store
