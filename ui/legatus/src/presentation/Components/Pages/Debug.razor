@@ -1,0 +1,59 @@
+@page "/debug"
+@inject FleetReader FleetReader
+
+<PageTitle>Debug — fleet.d</PageTitle>
+
+<MudText Typo="Typo.h5" GutterBottom="true">Debug — lecture de <code>fleet.d/</code></MudText>
+<MudText Typo="Typo.body2" Class="mud-text-secondary mb-2">
+    Source : <code>@LegionPaths.FleetDirectory()</code>
+</MudText>
+
+@if (_fleet is null)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else if (_fleet.Battles.Count == 0)
+{
+    <MudAlert Severity="Severity.Info">Aucune battle suivie.</MudAlert>
+}
+else
+{
+    <MudTable Items="_fleet.Battles" Dense="true" Hover="true" Bordered="true">
+        <HeaderContent>
+            <MudTh>Id</MudTh>
+            <MudTh>Repo</MudTh>
+            <MudTh>Titre / Ticket</MudTh>
+            <MudTh>Phase</MudTh>
+            <MudTh>Statut phase</MudTh>
+            <MudTh>Battle</MudTh>
+            <MudTh>Mis à jour</MudTh>
+            <MudTh>PR</MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd DataLabel="Id">@context.Id</MudTd>
+            <MudTd DataLabel="Repo">@context.Repo</MudTd>
+            <MudTd DataLabel="Titre / Ticket">@(context.Title ?? context.Ticket ?? "—")</MudTd>
+            <MudTd DataLabel="Phase">@context.Phase</MudTd>
+            <MudTd DataLabel="Statut phase">@context.Status</MudTd>
+            <MudTd DataLabel="Battle">@context.BattleStatus</MudTd>
+            <MudTd DataLabel="Mis à jour">@(context.Updated?.ToString("u") ?? "—")</MudTd>
+            <MudTd DataLabel="PR">
+                @if (context.PrUrl is { Length: > 0 } url)
+                {
+                    <MudLink Href="@url" Target="_blank">PR</MudLink>
+                }
+                else
+                {
+                    <text>—</text>
+                }
+            </MudTd>
+        </RowTemplate>
+    </MudTable>
+}
+
+@code {
+    private Fleet? _fleet;
+
+    protected override async Task OnInitializedAsync()
+        => _fleet = await FleetReader.ReadAsync();
+}

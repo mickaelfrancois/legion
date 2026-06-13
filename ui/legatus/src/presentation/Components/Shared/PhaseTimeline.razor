@@ -1,0 +1,33 @@
+@* Compact 7-phase frieze inferred from the index entry alone (current phase + its
+   status). Phases before the current one are shown done, the current one in its real
+   status color, later ones pending. The authoritative per-phase detail lives in
+   battle.json and is rendered on the battle detail page (step 4). *@
+
+<div class="d-flex align-center gap-1">
+    @foreach (var phase in Phases.Pipeline)
+    {
+        var (color, state) = Resolve(phase);
+        <MudTooltip Text="@($"{Phases.Label(phase)} — {state}")">
+            <MudIcon Icon="@(phase == Current && Status != PhaseStatus.Done ? Icons.Material.Filled.RadioButtonChecked : Icons.Material.Filled.Circle)"
+                     Color="color" Size="Size.Small" />
+        </MudTooltip>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Phase Current { get; set; }
+    [Parameter, EditorRequired] public PhaseStatus Status { get; set; }
+
+    private (Color Color, string State) Resolve(Phase phase)
+    {
+        if (phase == Current)
+            return (StatusVisuals.ColorOf(Status), StatusVisuals.Label(Status));
+
+        // Compare on pipeline position, not enum value, to stay correct if the enum is reordered.
+        var here = Phases.IndexOf(phase);
+        var current = Phases.IndexOf(Current);
+        return here < current
+            ? (Color.Success, StatusVisuals.Label(PhaseStatus.Done))
+            : (Color.Default, StatusVisuals.Label(PhaseStatus.Pending));
+    }
+}

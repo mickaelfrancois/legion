@@ -1,0 +1,163 @@
+@page "/"
+@implements IDisposable
+@inject FleetReader FleetReader
+@inject BattleReader BattleReader
+@inject FleetWatcher Watcher
+@inject NavigationManager Nav
+@inject FleetViewState State
+
+<PageTitle>Legatus</PageTitle>
+
+<div class="d-flex align-center mb-4 gap-4">
+    <MudText Typo="Typo.h5">Battles</MudText>
+    <MudSpacer />
+    <MudTextField @bind-Value="_search" Placeholder="Rechercher (repo, titre, ticket…)"
+                  Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
+                  Immediate="true" Clearable="true" Variant="Variant.Outlined"
+                  Margin="Margin.Dense" Class="mt-0" Style="max-width: 360px;" />
+    <MudSwitch @bind-Value="State.ShowHistory" Color="Color.Primary" Label="Historique" />
+</div>
+
+@if (_fleet is null)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else
+{
+    var rows = Visible().ToList();
+    if (rows.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info">
+            @(_fleet.Battles.Count == 0 ? "Aucune battle suivie." : "Aucune battle ne correspond au filtre.")
+        </MudAlert>
+    }
+    else
+    {
+        <MudTable T="FleetEntry" Items="rows" Hover="true" Dense="true" Elevation="1"
+                  Breakpoint="Breakpoint.Sm" OnRowClick="OpenBattle"
+                  RowStyle="cursor: pointer;">
+            <HeaderContent>
+                <MudTh>Repo</MudTh>
+                <MudTh>Titre / Ticket</MudTh>
+                <MudTh>Avancement</MudTh>
+                <MudTh>Statut</MudTh>
+                <MudTh Style="text-align:right">Coût</MudTh>
+                <MudTh>Skills</MudTh>
+                <MudTh>Mis à jour</MudTh>
+                <MudTh>PR</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Repo">
+                    <div class="d-flex align-center gap-1">
+                        <MudText Typo="Typo.body2">@(context.Repo ?? "—")</MudText>
+                        @if (IsRepoMissing(context))
+                        {
+                            <MudTooltip Text="Repo introuvable — l'index pointe dans le vide (/fleet prune)">
+                                <MudIcon Icon="@Icons.Material.Filled.LinkOff" Color="Color.Warning" Size="Size.Small" />
+                            </MudTooltip>
+                        }
+                    </div>
+                </MudTd>
+                <MudTd DataLabel="Titre / Ticket">
+                    <MudText Typo="Typo.body2">@(context.Title ?? context.Ticket ?? context.Id)</MudText>
+                    @if (context.Title is not null && context.Ticket is not null)
+                    {
+                        <MudText Typo="Typo.caption" Class="mud-text-secondary">@context.Ticket</MudText>
+                    }
+                </MudTd>
+                <MudTd DataLabel="Avancement">
+                    <PhaseTimeline Current="context.Phase" Status="context.Status" />
+                </MudTd>
+                <MudTd DataLabel="Statut">
+                    <StatusBadge Status="context.BattleStatus" />
+                </MudTd>
+                <MudTd DataLabel="Coût" Style="text-align:right">
+                    <MudTooltip Text="@TokenTooltip(context)">
+                        <MudText Typo="Typo.body2">@Format.Tokens(context.TokensTotal)</MudText>
+                    </MudTooltip>
+                </MudTd>
+                <MudTd DataLabel="Skills">
+                    <SkillChips Skills="context.Skills" Max="3" />
+                </MudTd>
+                <MudTd DataLabel="Mis à jour">
+                    <MudText Typo="Typo.caption">@FormatUpdated(context.Updated)</MudText>
+                </MudTd>
+                <MudTd DataLabel="PR">
+                    @if (context.PrUrl is { Length: > 0 } url)
+                    {
+                        <MudIconButton Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small"
+                                       Href="@url" Target="_blank" />
+                    }
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+    }
+}
+
+@code {
+    private Fleet? _fleet;
+    private string? _search;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _fleet = await FleetReader.ReadAsync();
+        Watcher.Changed += OnFleetChanged;
+    }
+
+    // Fired off the watcher thread; marshal back onto the circuit before touching state.
+    private void OnFleetChanged()
+        => _ = InvokeAsync(async () =>
+        {
+            _fleet = await FleetReader.ReadAsync();
+            StateHasChanged();
+        });
+
+    public void Dispose() => Watcher.Changed -= OnFleetChanged;
+
+    private void OpenBattle(TableRowClickEventArgs<FleetEntry> args)
+    {
+        if (args.Item is { Id.Length: > 0 } entry)
+            Nav.NavigateTo($"/battle/{entry.Id}");
+    }
+
+    // Default view keeps what's still live plus today's closures; the History switch adds
+    // the older closed battles. Ordering (doc §2): blocked first, then most recently updated.
+    private IEnumerable<FleetEntry> Visible() =>
+        _fleet!.Battles
+            .Where(s => State.ShowHistory || s.BattleStatus != BattleStatus.Closed || IsClosedToday(s))
+            .Where(Matches)
+            .OrderByDescending(s => s.BattleStatus == BattleStatus.Blocked)
+            .ThenByDescending(s => s.Updated ?? DateTimeOffset.MinValue);
+
+    // No closed_at field exists; Updated is bumped when /retro closes the battle, so it is
+    // the closure-time proxy. "Today" is the local calendar day.
+    private static bool IsClosedToday(FleetEntry s)
+        => s.BattleStatus == BattleStatus.Closed
+        && s.Updated?.ToLocalTime().Date == DateTime.Today;
+
+    private bool Matches(FleetEntry s)
+    {
+        if (string.IsNullOrWhiteSpace(_search))
+            return true;
+        var q = _search.Trim();
+        return Contains(s.Repo, q) || Contains(s.Title, q)
+            || Contains(s.Ticket, q) || Contains(s.Id, q);
+    }
+
+    private static bool Contains(string? value, string q)
+        => value is not null && value.Contains(q, StringComparison.OrdinalIgnoreCase);
+
+    private static string FormatUpdated(DateTimeOffset? updated)
+        => updated?.ToLocalTime().ToString("dd/MM HH:mm") ?? "—";
+
+    private bool IsRepoMissing(FleetEntry entry)
+        => entry.RepoPath is not { Length: > 0 } repoPath || !BattleReader.RepoExists(repoPath);
+
+    private static string TokenTooltip(FleetEntry entry)
+    {
+        if (entry.Tokens is not { } t)
+            return entry.TokensTotal is { } total ? $"{Format.TokensFull(total)} tokens" : "Aucun coût enregistré";
+        return $"input {Format.TokensFull(t.Input)} · output {Format.TokensFull(t.Output)} · "
+             + $"cache r/w {Format.TokensFull(t.CacheRead)}/{Format.TokensFull(t.CacheCreation)}";
+    }
+}

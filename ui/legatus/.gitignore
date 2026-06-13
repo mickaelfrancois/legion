@@ -1,0 +1,14 @@
+# .NET build output
+bin/
+obj/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+
+# Local settings
+appsettings.*.local.json
+
+# Generated test fixtures (seeded fleet shards)
+testdata/

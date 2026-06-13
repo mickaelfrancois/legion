@@ -1,0 +1,12 @@
+@* Global battle status badge. A blocked battle demands human attention (doc §2) and
+   is the only one drawn with an alert icon. *@
+
+<MudChip T="string" Size="Size.Small" Variant="Variant.Filled"
+         Color="StatusVisuals.ColorOf(Status)"
+         Icon="@(Status == BattleStatus.Blocked ? Icons.Material.Filled.Warning : null)">
+    @StatusVisuals.Label(Status)
+</MudChip>
+
+@code {
+    [Parameter, EditorRequired] public BattleStatus Status { get; set; }
+}

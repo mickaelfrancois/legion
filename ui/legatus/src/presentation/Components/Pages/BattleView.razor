@@ -1,0 +1,291 @@
+@page "/battle/{Id}"
+@implements IDisposable
+@inject FleetReader FleetReader
+@inject BattleReader BattleReader
+@inject UsageReader UsageReader
+@inject FleetWatcher Watcher
+@inject NavigationManager Nav
+
+<PageTitle>@(_entry?.Title ?? _entry?.Ticket ?? Id)</PageTitle>
+
+<MudButton StartIcon="@Icons.Material.Filled.ArrowBack" Variant="Variant.Text"
+           OnClick="@(() => Nav.NavigateTo("/"))" Class="mb-3">Battles</MudButton>
+
+@switch (_state)
+{
+    case State.Loading:
+        <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+        break;
+
+    case State.NotInIndex:
+        <MudAlert Severity="Severity.Warning">Battle <code>@Id</code> introuvable dans l'index.</MudAlert>
+        break;
+
+    case State.RepoMissing:
+        <MudAlert Severity="Severity.Error">
+            Repo introuvable : <code>@_entry?.RepoPath</code>. L'index pointe dans le vide
+            (repo déplacé ou supprimé) — un <code>/fleet prune</code> nettoiera l'entrée.
+        </MudAlert>
+        break;
+
+    case State.Loaded:
+        <MudText Typo="Typo.h5">@(_entry!.Title ?? _entry.Ticket ?? Id)</MudText>
+        <div class="d-flex align-center flex-wrap gap-3 mt-1 mb-4">
+            <MudText Typo="Typo.body2" Class="mud-text-secondary">@_entry!.Repo</MudText>
+            @if (_entry!.Ticket is { Length: > 0 } ticket)
+            {
+                <MudText Typo="Typo.body2" Class="mud-text-secondary">@ticket</MudText>
+            }
+            @if (_entry.Profile is { Length: > 0 } profile)
+            {
+                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">@profile</MudChip>
+            }
+            <StatusBadge Status="_entry.BattleStatus" />
+            @if (_entry.PrUrl is { Length: > 0 } prUrl)
+            {
+                <MudLink Href="@prUrl" Target="_blank">Pull request</MudLink>
+            }
+        </div>
+
+        @if (_entry.BattleStatus == BattleStatus.Blocked)
+        {
+            <MudAlert Severity="Severity.Error" Class="mb-4">
+                Battle bloquée — une gate a renvoyé <em>revise</em>/<em>reject</em>. Détail dans les artefacts gate ci-dessous.
+            </MudAlert>
+        }
+
+        <MudGrid>
+            <MudItem xs="12" md="4">
+                <MudPaper Class="pa-4" Elevation="1">
+                    <MudText Typo="Typo.subtitle2" Class="mb-2">Phases</MudText>
+                    <MudTimeline TimelinePosition="TimelinePosition.Start" Class="pl-0">
+                        @foreach (var phase in Phases.Pipeline)
+                        {
+                            var state = _detail?.PhaseFor(phase);
+                            var status = state?.Status ?? PhaseStatus.Pending;
+                            var selected = phase == _selectedPhase;
+                            <MudTimelineItem Color="StatusVisuals.ColorOf(status)" Size="Size.Small">
+                                <ItemContent>
+                                    <div class="phase-item @(selected ? "phase-item--selected" : "")"
+                                         @onclick="@(() => SelectPhase(phase))">
+                                        <MudText Typo="Typo.body2"><b>@Phases.Label(phase)</b></MudText>
+                                        <MudText Typo="Typo.caption" Class="mud-text-secondary">
+                                            @StatusVisuals.Label(status)
+                                        </MudText>
+                                        @if (state is { Verdict: not Verdict.Unknown } s)
+                                        {
+                                            <div class="mt-1">
+                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Filled"
+                                                         Color="StatusVisuals.ColorOf(s.Verdict)">
+                                                    @StatusVisuals.Label(s.Verdict)
+                                                </MudChip>
+                                            </div>
+                                        }
+                                    </div>
+                                </ItemContent>
+                            </MudTimelineItem>
+                        }
+                    </MudTimeline>
+                </MudPaper>
+
+                <MudPaper Class="pa-4 mt-4" Elevation="1">
+                    <MudText Typo="Typo.subtitle2" Class="mb-2">Coût &amp; skills</MudText>
+                    @if (!HasCost && AllSkills.Count == 0)
+                    {
+                        <MudText Typo="Typo.caption" Class="mud-text-secondary">Aucune donnée d'usage.</MudText>
+                    }
+                    else
+                    {
+                        <div class="d-flex align-baseline gap-2 mb-1">
+                            <MudText Typo="Typo.h6">@Format.Tokens(TotalTokens)</MudText>
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">tokens (in+out)</MudText>
+                        </div>
+                        <MudText Typo="Typo.caption" Class="mud-text-secondary d-block mb-3">
+                            input @Format.TokensFull(_cost.Input) · output @Format.TokensFull(_cost.Output)
+                            · cache r/w @Format.TokensFull(_cost.CacheRead)/@Format.TokensFull(_cost.CacheCreation)
+                        </MudText>
+
+                        @if (_usage.Count > 0)
+                        {
+                            <MudText Typo="Typo.caption" Class="mb-1"><b>Par contributeur</b></MudText>
+                            <MudSimpleTable Dense="true" Bordered="false" Striped="true" Elevation="0" Class="mb-3">
+                                <tbody>
+                                    @foreach (var line in Contributors)
+                                    {
+                                        <tr>
+                                            <td>@line.Label</td>
+                                            <td style="text-align:right">@Format.Tokens(line.Tokens)</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </MudSimpleTable>
+                        }
+
+                        <MudText Typo="Typo.caption" Class="mb-1"><b>Skills</b></MudText>
+                        <SkillChips Skills="AllSkills" />
+                    }
+                </MudPaper>
+            </MudItem>
+
+            <MudItem xs="12" md="8">
+                @if (_artifacts.Count == 0)
+                {
+                    <MudAlert Severity="Severity.Info">Aucun artefact Markdown présent pour l'instant.</MudAlert>
+                }
+                else
+                {
+                    <MudExpansionPanels MultiExpansion="true">
+                        @foreach (var artifact in _artifacts)
+                        {
+                            <MudExpansionPanel Text="@artifact.Title"
+                                               Expanded="@(artifact.Phase == _selectedPhase)"
+                                               ExpandedChanged="@(open => OnArtifactToggled(artifact.Phase, open))">
+                                <MarkdownView Markdown="@artifact.Markdown" />
+                            </MudExpansionPanel>
+                        }
+                    </MudExpansionPanels>
+                    @if (!_artifacts.Any(a => a.Phase == _selectedPhase))
+                    {
+                        <MudText Typo="Typo.caption" Class="mud-text-secondary">
+                            Aucun Markdown pour la phase @Phases.Label(_selectedPhase!.Value) — sélectionnez une autre phase.
+                        </MudText>
+                    }
+                }
+            </MudItem>
+        </MudGrid>
+        break;
+}
+
+@code {
+    [Parameter] public string Id { get; set; } = "";
+
+    private enum State { Loading, NotInIndex, RepoMissing, Loaded }
+
+    private State _state = State.Loading;
+    private FleetEntry? _entry;
+    private BattleDetail? _detail;
+    private readonly List<LoadedArtifact> _artifacts = [];
+    private IReadOnlyList<UsageRecord> _usage = [];
+
+    // The phase whose Markdown is unfolded; the others stay collapsed. Null until the
+    // first load picks the current phase; a manual click then overrides it.
+    private Phase? _selectedPhase;
+
+    private sealed record LoadedArtifact(string Title, string Markdown, Phase Phase);
+    private sealed record Contributor(string Label, long Tokens);
+
+    // Cost from usage.jsonl when present (live), else the shard's snapshot projection.
+    private TokenUsage _cost = new();
+    private long TotalTokens => _cost.Input + _cost.Output;
+    private bool HasCost => TotalTokens > 0 || _cost.CacheRead > 0 || _cost.CacheCreation > 0;
+
+    private List<string> AllSkills =>
+        (_usage.Count > 0 ? _usage.SelectMany(u => u.Skills) : _entry?.Skills ?? Enumerable.Empty<string>())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    // Token split: the main agent, then each subagent type, biggest first.
+    private List<Contributor> Contributors =>
+        _usage
+            .GroupBy(u => u.Scope == "subagent" ? (u.AgentType ?? "subagent") : "main")
+            .Select(g => new Contributor(g.Key, g.Sum(u => u.Tokens.Input + u.Tokens.Output)))
+            .OrderByDescending(c => c.Tokens)
+            .ToList();
+
+    private void ComputeCost()
+    {
+        if (_usage.Count > 0)
+        {
+            _cost = new TokenUsage
+            {
+                Input = _usage.Sum(u => u.Tokens.Input),
+                Output = _usage.Sum(u => u.Tokens.Output),
+                CacheRead = _usage.Sum(u => u.Tokens.CacheRead),
+                CacheCreation = _usage.Sum(u => u.Tokens.CacheCreation),
+            };
+        }
+        else
+        {
+            _cost = _entry?.Tokens ?? new TokenUsage();
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        Watcher.Changed += OnFleetChanged;
+    }
+
+    private async Task LoadAsync()
+    {
+        var fleet = await FleetReader.ReadAsync();
+        _entry = fleet.Battles.FirstOrDefault(s => s.Id == Id);
+
+        if (_entry?.RepoPath is not { Length: > 0 } repoPath)
+        {
+            _state = State.NotInIndex;
+            return;
+        }
+
+        if (!BattleReader.RepoExists(repoPath))
+        {
+            _state = State.RepoMissing;
+            return;
+        }
+
+        _detail = await BattleReader.ReadDetailAsync(repoPath, Id);
+
+        _artifacts.Clear();
+        foreach (var spec in Artifacts.Catalog)
+        {
+            var markdown = await BattleReader.ReadArtifactAsync(repoPath, Id, spec.FileName);
+            if (markdown is not null)
+                _artifacts.Add(new LoadedArtifact(spec.Title, markdown, spec.Phase));
+        }
+
+        _usage = await UsageReader.ReadAsync(repoPath, Id);
+        ComputeCost();
+
+        // Keep the user's pick across live reloads; only seed it the first time.
+        _selectedPhase ??= CurrentPhase();
+
+        _state = State.Loaded;
+    }
+
+    // "Current" = the phase in progress or blocked; otherwise the last completed one;
+    // otherwise the pipeline's first phase. Drives which Markdown is open on arrival.
+    private Phase CurrentPhase()
+    {
+        var current = Phases.Pipeline[0];
+        foreach (var phase in Phases.Pipeline)
+        {
+            var status = _detail?.PhaseFor(phase)?.Status ?? PhaseStatus.Pending;
+            if (status is PhaseStatus.InProgress or PhaseStatus.Blocked)
+                return phase;
+            if (status == PhaseStatus.Done)
+                current = phase;
+        }
+        return current;
+    }
+
+    private void SelectPhase(Phase phase) => _selectedPhase = phase;
+
+    // Opening a panel from its own header selects that phase too; a close is ignored so
+    // the controlled Expanded binding stays consistent with the selected phase.
+    private void OnArtifactToggled(Phase phase, bool open)
+    {
+        if (open)
+            _selectedPhase = phase;
+    }
+
+    private void OnFleetChanged()
+        => _ = InvokeAsync(async () =>
+        {
+            await LoadAsync();
+            StateHasChanged();
+        });
+
+    public void Dispose() => Watcher.Changed -= OnFleetChanged;
+}

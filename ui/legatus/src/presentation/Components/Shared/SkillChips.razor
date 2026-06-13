@@ -1,0 +1,32 @@
+@* Renders the skills used as small chips. In compact mode (lists) it shows up to Max
+   and folds the rest into a "+N" chip with a tooltip listing them. *@
+
+@if (Skills is { Count: > 0 })
+{
+    <div class="d-flex flex-wrap gap-1">
+        @foreach (var skill in Shown)
+        {
+            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default">@skill</MudChip>
+        }
+        @if (HiddenCount > 0)
+        {
+            <MudTooltip Text="@string.Join(", ", Skills.Skip(Max))">
+                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Default">+@HiddenCount</MudChip>
+            </MudTooltip>
+        }
+    </div>
+}
+else
+{
+    <MudText Typo="Typo.caption" Class="mud-text-secondary">—</MudText>
+}
+
+@code {
+    [Parameter, EditorRequired] public List<string> Skills { get; set; } = [];
+
+    // 0 = show all (detail view); >0 = cap with a +N fold (list view).
+    [Parameter] public int Max { get; set; }
+
+    private IEnumerable<string> Shown => Max > 0 ? Skills.Take(Max) : Skills;
+    private int HiddenCount => Max > 0 ? Math.Max(0, Skills.Count - Max) : 0;
+}

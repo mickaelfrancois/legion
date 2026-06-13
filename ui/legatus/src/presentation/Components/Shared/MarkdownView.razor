@@ -1,0 +1,9 @@
+@inject MarkdownRenderer Renderer
+
+@* Renders trusted local Markdown as HTML. Styling lives in the scoped .css; ::deep is
+   required because the HTML is injected as a MarkupString, not authored in this file. *@
+<div class="markdown-body">@Renderer.ToHtml(Markdown)</div>
+
+@code {
+    [Parameter, EditorRequired] public string Markdown { get; set; } = "";
+}
