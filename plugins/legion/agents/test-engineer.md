@@ -32,8 +32,11 @@ couvrant la **matrice de tests** du `plan.md`. Exécution seule — tu lances
      = **FAIL** (la gate architect avait verrouillé `TESTABLE` — un trou ici est
      une régression).
    - **T2 Verts** : tous les tests passent. Rouge = **FAIL** (diagnostic, pas correctif).
-   - **T3 Conventions** : AAA, `DisplayName` explicite, conventions
-     `dotnet-claude-kit:testing` (xUnit). Écart = **WARN**.
+   - **T3 Conventions** : AAA, `DisplayName` explicite. La référence est d'abord la
+     **convention du repo** (calque les tests voisins : ex. SQLite in-memory,
+     fixtures maison), puis `dotnet-claude-kit:testing` (xUnit). Ne signale **pas**
+     en écart un test qui suit le repo mais pas les défauts du skill
+     (Testcontainers/WAF). Écart réel = **WARN**.
    - **T4 Limites** : les cas d'erreur/limites sont testés, pas seulement le nominal.
 
 ## Output
