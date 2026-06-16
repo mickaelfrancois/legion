@@ -34,7 +34,11 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
 1. **Lire `plan.md`** et isoler la slice `slice_id` (étape + fichiers visés).
 2. **Charger les conventions** avant de produire :
    - code → `dotnet-claude-kit:clean-architecture` + `dotnet-claude-kit:modern-csharp`
-   - tests → `dotnet-claude-kit:testing` (xUnit, AAA, `DisplayName`)
+   - tests → `dotnet-claude-kit:testing` (xUnit, AAA, `DisplayName`). **Mais le repo
+     fait foi** : `Grep` les tests voisins et **calque leur convention** (ex: SQLite
+     in-memory, fixtures maison) **avant** d'appliquer les défauts génériques du
+     skill (Testcontainers, `WebApplicationFactory`) — ne les introduis pas si le
+     repo teste autrement (RETEX).
    - scaffolding initial → `dotnet-claude-kit:scaffold` si la slice crée une
      feature/projet de zéro
 3. **Vérifier le périmètre** : tout fichier que tu t'apprêtes à éditer doit être

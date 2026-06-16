@@ -114,6 +114,9 @@ run time**):
     "deliver": { "status": "pending" },
     "reflect": { "status": "pending" }
   },
+  // guard.allow = PLACEHOLDER — `/battle start` derives it from detected *.csproj
+  // dirs (e.g. ["HttpForge/**","HttpForge.Tests/**"]); src/**+tests/** matches
+  // nothing on a root-projects repo and silently blocks every builder edit.
   "guard": { "allow": ["src/**", "tests/**"], "deny": [], "careful": false },
   "delivery": { "pr_url": null }
 }

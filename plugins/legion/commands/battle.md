@@ -73,7 +73,9 @@ Arguments: `$ARGUMENTS`
    file inside** the directory: `git check-ignore -v .legion/active-battle`. If the
    file is **not** ignored, **propose adding a line `.legion/`** to the repo's
    `.gitignore` (with the user's OK). Best-effort, never blocking — the real safety
-   net is the `deliver` staging discipline (§G.2).
+   net is the `deliver` staging discipline (§G.2). **Note:** if you do add the line,
+   that edits `.gitignore` — a tracked change `deliver` must resolve explicitly
+   (§G.2), not leave dangling.
 
 3. **THINK — seed `spec.md`.** Branch on the shape of `<issue|slug>`:
 
@@ -111,6 +113,17 @@ Arguments: `$ARGUMENTS`
    and `required_gates` to `["architect","reviewer","test-engineer"]` unless the
    user states a different profile. Set `phases.think.status = "done"`, everything
    else `pending`, `phases.plan.status = "in_progress"`.
+
+   **Derive `guard.allow` from the real solution layout — never ship the
+   placeholder blind.** The schema's `["src/**","tests/**"]` is a *placeholder*: on a
+   repo whose projects sit at the root (e.g. `HttpForge/`, `HttpForge.Tests/`) it
+   matches nothing, so the guard is armed but silently blocks **every** builder edit
+   with no obvious cause. Before writing, detect the project directories
+   (`Glob '**/*.csproj'`, take their containing folders) and set `guard.allow` to
+   `["<Proj>/**", "<Proj.Tests>/**", …]`. If the placeholder globs would match no
+   path in the repo, **warn the user and propose the derived globs** rather than
+   locking a dead perimeter. (RETEX: the generic default mismatched a root-projects
+   repo on two consecutive battles — the builder would have been blocked without it.)
 
 5. **Invoke the `architect` gate** with the `Agent` tool
    (`subagent_type: architect`). Pass a self-contained prompt: the absolute path
@@ -232,6 +245,15 @@ the PR is open, hand back: the human reviews it; when stabilized,
    trust the `.legion/` ignore: as a defensive net, **unstage the battle dir
    unconditionally before committing**: `git reset -q HEAD .legion` (and verify
    with `git status` that no `.legion/` path is staged).
+
+   **Resolve the `.gitignore` change `start` may have introduced.** If §A.1 added a
+   `.legion/` line to the repo's `.gitignore`, that is a pending working-tree change
+   the issue did not ask for — and it falls **outside** the whitelist/`git reset`
+   discipline above (it is not a `.legion/` path). Decide its fate **explicitly**,
+   do not leave it dangling: either **commit it first** as a standalone
+   `chore: ignore .legion battle artifacts`, or **add `.gitignore` to the whitelist**
+   of this commit (it is repo hygiene this battle introduced). Confirm the choice
+   with the user. (RETEX: this self-induced change was ambiguous at commit time.)
 
    **`<summary>` — English, Conventional Commits format** `type(scope): subject`
    (imperative mood, no trailing period, ≤ ~70 chars). `type` ∈

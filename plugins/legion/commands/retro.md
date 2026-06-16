@@ -62,17 +62,25 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    `blocker|friction|annoyance|idea`; `area` like `gate:reviewer`, `hook:guard`,
    `command:/battle deliver`, `skill:scaffold`.
 
-4. **Persist ONE durable learning to project memory.** From the `RETEX` section,
+4. **Close the battle first** (release the guard before writing out-of-repo): set
+   `phases.reflect.status = "done"` in `battle.json` (this resyncs the fleet,
+   dropping it from the active view), and clear `.legion/active-battle` (the guard
+   relaxes — the battle is over). `retro.md` lives under `.legion/` (always
+   writable), so it is already persisted by step 3 regardless of order.
+
+   > **Order matters.** The memory write (step 5) targets `~/.claude/projects/<slug>/
+   > memory/` — **outside the repo**. `guard.py` now exempts that path, but closing
+   > the battle here first means the perimeter is already released as a second
+   > safety net (RETEX: the memory `Write` was blocked when it ran before the close
+   > with a perimeter still active).
+
+5. **Persist ONE durable learning to project memory.** From the `RETEX` section,
    pick the single most reusable, repo-agnostic insight (a recurring pitfall, a
    convention that should have been followed, a gate that keeps catching the same
    thing). Write it as a concise `project` fact in the project's Claude memory —
    **not** the whole retro. Capture rule: persist only what would change how the
    *next* battle is run; skip one-off details. If nothing meets that bar, say so
    and persist nothing.
-
-5. **Close the battle**: set `phases.reflect.status = "done"` in `battle.json`
-   (this resyncs the fleet, dropping it from the active view), and clear
-   `.legion/active-battle` (the guard relaxes — the battle is over).
 
 6. **Report**: the outcome summary, the learning persisted (or why none), and the
    path to `retro.md`. The tooling-friction notes stay in `retro.md` — review them

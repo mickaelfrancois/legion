@@ -36,8 +36,12 @@ L'orchestrateur fournit dans le prompt :
 1. **Lire `spec.md`** en entier.
 2. **Explorer l'archi existante** du repo (`Glob`/`Grep`) : couches Clean
    Architecture présentes, conventions de nommage, projets `.csproj`, points
-   d'extension. Charger au besoin `dotnet-claude-kit:clean-architecture` /
-   `dotnet-claude-kit:modern-csharp`.
+   d'extension. Si tu t'appuies sur la méthode d'un skill
+   (`dotnet-claude-kit:clean-architecture` / `:modern-csharp`), **invoque-le via
+   l'outil `Skill`** — pas seulement de mémoire : c'est ce qui charge les vraies
+   instructions **et** enregistre l'attribution dans `usage.jsonl`. Si tu raisonnes
+   purement depuis la doctrine, c'est légitime — un `skills` vide est alors normal,
+   ne charge pas un skill juste pour « cocher la case ».
 3. **Challenger le scope** via les questions forçantes ci-dessous (§ Scope
    challenge). Tout point non résolu = défaut tracé.
 4. **Si le scope tient**, produire le plan : décision d'architecture (quelles

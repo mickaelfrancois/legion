@@ -7,6 +7,9 @@ hors perimetre est **bloquee** (exit 2 + message stderr).
 Regles :
 - Pas de battle active, ou `guard.allow` vide -> exit 0 (edition libre).
 - `.legion/**` toujours autorise (etat de la battle, ecrit par l'orchestrateur).
+- Memoire projet de Claude (`~/.claude/projects/*/memory/**`) toujours autorisee :
+  le guard regit le perimetre d'ecriture *du repo*, pas l'infra memoire de Claude
+  (ou /retro persiste une learning durable, parfois perimetre encore actif).
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -99,6 +102,27 @@ def _relative(repo_root: Path, file_path: str) -> str | None:
     return rel
 
 
+def _is_claude_memory(file_path: str) -> bool:
+    """True si file_path vise la memoire projet de Claude (exempte du guard).
+
+    **Ancre sur le home reel** (`~/.claude/projects/<slug>/memory/...`). Un prefixe
+    wildcard (`**/.claude/.../memory/**`) exempterait n'importe quel chemin se
+    *terminant* par ce motif — y compris un `<repo>/.../.claude/projects/x/memory/x`
+    fabrique dans le repo — et trouerait le guard. `relative_to` leve si le chemin
+    n'est pas reellement sous le home, ce qui ferme le contournement.
+
+    Exemption ciblee (pas tout `~/.claude/**`) : un builder qui derape ne touche ni
+    `settings.json` ni une autre infra Claude, seulement le dossier memoire.
+    """
+    try:
+        abs_path = Path(file_path).expanduser().resolve()
+        rel = abs_path.relative_to(Path.home().resolve() / ".claude" / "projects")
+    except (ValueError, OSError):
+        return False
+    parts = rel.parts  # attendu : <slug>/memory/<...>
+    return len(parts) >= 3 and parts[1] == "memory"
+
+
 def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     """Retourne (exit_code, message). exit 2 = blocage."""
     if data.get("tool_name") not in WRITE_TOOLS:
@@ -114,6 +138,9 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     file_path = (data.get("tool_input") or {}).get("file_path", "")
     if not file_path:
         return 0, ""
+
+    if _is_claude_memory(file_path):
+        return 0, ""  # memoire de Claude : hors perimetre repo, jamais bloquee
 
     rel = _relative(repo_root, file_path)
     if rel is None:
@@ -169,6 +196,14 @@ def _self_test() -> int:
     assert _matches("a/b.cs", ["a/*.cs"])
     assert not _matches("a/b/c.cs", ["a/*.cs"])  # * ne franchit pas le slash
     assert _matches(".legion/battles/x/battle.json", ALWAYS_ALLOW)
+    # memoire de Claude : exemptee, mais ANCREE sur le home reel (pas un suffixe wildcard)
+    assert _is_claude_memory(str(Path.home() / ".claude/projects/p/memory/x.md"))
+    assert _is_claude_memory(str(Path.home() / ".claude/projects/p/memory/sub/x.md"))
+    assert not _is_claude_memory(str(Path.home() / ".claude/projects/p/other/x.md"))
+    assert not _is_claude_memory(str(Path.home() / ".claude/settings.json"))
+    # contournement par suffixe (chemin hors home se terminant par le motif) -> bloque
+    assert not _is_claude_memory("C:/repo/.claude/projects/x/memory/evil.sh")
+    assert not _is_claude_memory("C:/repo/src/Foo.cs")
     # decision : pas de write tool -> 0
     assert _decide({"tool_name": "Bash"}, Path.cwd())[0] == 0
     print("OK: guard self-test passed", file=sys.stderr)
