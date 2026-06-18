@@ -1,0 +1,109 @@
+@page "/retex"
+@implements IDisposable
+@inject RetexJournalReader RetexJournalReader
+@inject FleetWatcher Watcher
+@inject FleetViewState State
+
+<PageTitle>Backlog outillage — Legatus</PageTitle>
+
+<div class="d-flex align-center mb-4 gap-4">
+    <MudText Typo="Typo.h5">Backlog outillage</MudText>
+    <MudSpacer />
+    <MudSwitch @bind-Value="State.ShowResolvedRetex" Color="Color.Primary" Label="Résolus" />
+</div>
+
+@if (_entries is null)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else
+{
+    var groups = Grouped().ToList();
+    if (groups.Count == 0)
+    {
+        <MudAlert Severity="Severity.Success">
+            Aucune friction outillage à afficher — la boucle d'amélioration est à jour.
+        </MudAlert>
+    }
+    else
+    {
+        @foreach (var g in groups)
+        {
+            <MudPaper Class="pa-4 mb-4" Elevation="1">
+                <MudText Typo="Typo.subtitle1" Class="mb-3">@g.Key (@g.Count())</MudText>
+                @foreach (var e in g)
+                {
+                    <div class="mb-3 @(e.IsResolved ? "mud-text-disabled" : "")">
+                        <div class="d-flex align-center flex-wrap gap-2 mb-1">
+                            @if (e.Severity is { Length: > 0 } sev)
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Color="StatusVisuals.RetexColor(sev)">@sev</MudChip>
+                            }
+                            @if (e.Area is { Length: > 0 } area)
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@area</MudText>
+                            }
+                            @if (e.IsResolved)
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Success"
+                                         Icon="@Icons.Material.Filled.Check">résolu</MudChip>
+                            }
+                            <MudSpacer />
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary" Style="font-family:monospace">@e.Id</MudText>
+                        </div>
+                        <MudText Typo="Typo.body2">@e.Observation</MudText>
+                        @if (e.Suggestion is { Length: > 0 } suggestion)
+                        {
+                            <MudText Typo="Typo.body2" Class="mud-text-secondary">→ @suggestion</MudText>
+                        }
+                        @{
+                            var src = string.Join(" · ", new[] { e.Battle, e.Repo }.Where(x => !string.IsNullOrWhiteSpace(x)));
+                        }
+                        @if (src.Length > 0)
+                        {
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary d-block mt-1">@src</MudText>
+                        }
+                    </div>
+                }
+            </MudPaper>
+        }
+    }
+}
+
+@code {
+    private IReadOnlyList<RetexJournalEntry>? _entries;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _entries = await RetexJournalReader.ReadAsync();
+        Watcher.Changed += OnChanged;
+    }
+
+    private void OnChanged()
+        => _ = InvokeAsync(async () =>
+        {
+            _entries = await RetexJournalReader.ReadAsync();
+            StateHasChanged();
+        });
+
+    public void Dispose() => Watcher.Changed -= OnChanged;
+
+    // Group by plugin (name asc); within a group, most severe first, then newest. The
+    // Résolus switch decides whether tombstoned entries are included at all.
+    private IEnumerable<IGrouping<string, RetexJournalEntry>> Grouped() =>
+        _entries!
+            .Where(e => State.ShowResolvedRetex || !e.IsResolved)
+            .OrderBy(e => SeverityRank(e.Severity))
+            .ThenByDescending(e => e.Ts, StringComparer.Ordinal)
+            .GroupBy(e => e.Plugin ?? "?")
+            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
+
+    private static int SeverityRank(string? severity) => severity?.ToLowerInvariant() switch
+    {
+        "blocker" => 0,
+        "friction" => 1,
+        "annoyance" => 2,
+        "idea" => 3,
+        _ => 99,
+    };
+}

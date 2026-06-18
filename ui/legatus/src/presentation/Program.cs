@@ -11,6 +11,7 @@ builder.Services.AddMudServices();
 builder.Services.AddSingleton<FleetReader>();
 builder.Services.AddSingleton<BattleReader>();
 builder.Services.AddSingleton<UsageReader>();
+builder.Services.AddSingleton<RetexJournalReader>();
 builder.Services.AddSingleton<MarkdownRenderer>();
 builder.Services.AddSingleton<FleetWatcher>();
 builder.Services.AddScoped<FleetViewState>();
