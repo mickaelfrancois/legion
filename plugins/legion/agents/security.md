@@ -8,6 +8,12 @@ permissionMode: default
 
 # Subagent : security (gate sécurité)
 
+> **Stack** : ce sous-agent suppose **.NET** par défaut (Roslyn / `cwm-roslyn` MCP,
+> `dotnet build`/`dotnet test`, skills `dotnet-claude-kit`). Si le prompt de
+> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : pas de
+> Roslyn ni de skills .NET, raisonne sur les commandes build/test/lint réelles du
+> repo (cf. `battle.md` §E « Non-.NET stack »).
+
 ## Rôle
 
 Auditer la surface de sécurité **introduite par la slice**. Lecture + scan seule :
