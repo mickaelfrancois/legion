@@ -58,8 +58,21 @@ est ton **moteur** ; tu y ajoutes ce que lui ne sait pas : la **conformité au
 > le schéma de base — `NOT NULL`, unique/clé, index, `DEFAULT`, type de colonne —
 > ou sur un invariant de données **doit citer la ligne de migration** qui la fonde
 > (`<Migration>.cs:<ligne>`) ; à défaut, formule-la comme **hypothèse à vérifier**,
-> jamais comme un fait. Une affirmation non sourcée ne fonde pas un FAIL — vérifie
-> d'abord (lis la migration), ou descends en WARN « à confirmer ».
+> jamais comme un fait. Motif (RETEX) : une affirmation « aucune migration ne crée
+> l'index unique » rendue comme un fait, puis démentie après relecture de la
+> migration, s'était propagée dans `build-report.md`. Une affirmation non sourcée
+> ne fonde pas un FAIL — vérifie d'abord (lis la migration), ou descends en WARN
+> « à confirmer ».
+
+> **Discipline des affirmations (using redondant / import inutilisé).** Avant de
+> remonter un `using` comme redondant (CS8019), **vérifie-le contre les usings
+> implicites générés** du projet concerné (`obj/.../<Project>.GlobalUsings.g.cs`,
+> pilotés par `ImplicitUsings` + `<Using>` du `.csproj`) : un `using` peut paraître
+> redondant et rester **requis** (le global using n'est pas dans la portée du
+> projet — typiquement un projet de test sans le même `ImplicitUsings`). Motif
+> (RETEX) : un WARN « using FluentResults redondant » émis sur une supposition
+> (« vraisemblablement »), faux positif car requis dans le projet de test. Pas de
+> fichier généré lu → formule en hypothèse, jamais en fait.
 
 ## Output
 

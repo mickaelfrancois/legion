@@ -7,6 +7,9 @@ hors perimetre est **bloquee** (exit 2 + message stderr).
 Regles :
 - Pas de battle active, ou `guard.allow` vide -> exit 0 (edition libre).
 - `.legion/**` toujours autorise (etat de la battle, ecrit par l'orchestrateur).
+- `.gitignore` (racine) toujours autorise : la preflight de `start` propose d'y
+  ajouter `.legion/` (mise en place de l'orchestrateur) ; cette exception garantit
+  que l'edition passe meme si un perimetre est actif (sinon : no-op silencieux).
 - Memoire projet de Claude (`~/.claude/projects/*/memory/**`) toujours autorisee :
   le guard regit le perimetre d'ecriture *du repo*, pas l'infra memoire de Claude
   (ou /retro persiste une learning durable, parfois perimetre encore actif).
@@ -33,7 +36,7 @@ from pathlib import Path
 ACTIVE_POINTER = Path(".legion/active-battle")
 BATTLES_DIR = Path(".legion/battles")
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit")
-ALWAYS_ALLOW = (".legion/**",)  # l'etat de la battle reste ecrivable sous freeze
+ALWAYS_ALLOW = (".legion/**", ".gitignore")  # etat de la battle + .gitignore (setup orchestrateur)
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -196,6 +199,8 @@ def _self_test() -> int:
     assert _matches("a/b.cs", ["a/*.cs"])
     assert not _matches("a/b/c.cs", ["a/*.cs"])  # * ne franchit pas le slash
     assert _matches(".legion/battles/x/battle.json", ALWAYS_ALLOW)
+    assert _matches(".gitignore", ALWAYS_ALLOW)            # setup orchestrateur, sous freeze
+    assert not _matches("src/x/.gitignore", ALWAYS_ALLOW)  # ancre : seul le .gitignore racine
     # memoire de Claude : exemptee, mais ANCREE sur le home reel (pas un suffixe wildcard)
     assert _is_claude_memory(str(Path.home() / ".claude/projects/p/memory/x.md"))
     assert _is_claude_memory(str(Path.home() / ".claude/projects/p/memory/sub/x.md"))

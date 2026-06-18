@@ -68,6 +68,14 @@ Arguments: `$ARGUMENTS`
    `.legion/active-battle` — this pointer is what the `guard.py` / `careful.py`
    hooks read to know which battle is active.
 
+   **Mark THINK in progress first** (same discipline as BUILD, §D): immediately
+   write a minimal `battle.json` with `phases.think.status = "in_progress"` (id,
+   ticket if known, the default `profile`/`required_gates` — refined at step 4).
+   Seeding `spec.md` can be long (reading the issue, exploring code to scope it);
+   until `battle.json` exists, `.legion/active-battle` points at an empty dir and
+   `/fleet` (or a resumed session) sees nothing in progress. The battle must never
+   be statusless once started.
+
    **Ensure `.legion/` is git-ignored**: battle artifacts are **local**, never
    committed (the durable trace lives in the PR + issue). Verify the ignore **on a
    file inside** the directory: `git check-ignore -v .legion/active-battle`. If the
@@ -108,10 +116,11 @@ Arguments: `$ARGUMENTS`
    (identifiers & file names stay English). If the seeded content is thin,
    ask the user to fill the gaps before locking the plan.
 
-4. **Write `battle.json`** following the schema **inlined in the `battle-workflow`
-   doctrine** (State layout) — already in context. Default `profile` to `feature`
-   and `required_gates` to `["architect","reviewer","test-engineer"]` unless the
-   user states a different profile. Set `phases.think.status = "done"`, everything
+4. **Complete `battle.json`** (the minimal one from step 2) following the schema
+   **inlined in the `battle-workflow` doctrine** (State layout) — already in context.
+   Default `profile` to `feature` and `required_gates` to
+   `["architect","reviewer","test-engineer"]` unless the user states a different
+   profile. Flip `phases.think.status` from `in_progress` to `done`, everything
    else `pending`, `phases.plan.status = "in_progress"`.
 
    **Derive `guard.allow` from the real solution layout — never ship the
@@ -210,14 +219,22 @@ Precondition: `phases.build.status == "done"`. Each gate is a **read-only/
 execute-only** subagent: it **returns** a verdict and its artifact content; you
 persist it. Apply this shared loop for each gate, in order
 `reviewer → test-engineer → security`, skipping any gate not in
-`battle.json.required_gates`:
+`battle.json.required_gates`.
+
+The gate identifier (used for `subagent_type` and `required_gates`) is **not**
+the phase key written to `battle.json.phases`. Map gate → phase key before
+persisting: `reviewer → review`, `test-engineer → test`, `security → security`.
+Writing under the gate name (`phases.reviewer`/`phases.test-engineer`) is a bug —
+the UI reads the canonical keys `review`/`test` and would show the phase as
+pending even though the gate ran.
 
 1. **Invoke** the gate via `Agent` (`subagent_type`: `reviewer` |
    `test-engineer` | `security`). Self-contained prompt: battle dir, the upstream
    artifacts it needs (`build-report.md`, `plan.md`, touched files), repo root.
 2. **Persist** the returned content to its artifact (`gate-review.md` /
-   `gate-test.md` / `gate-security.md`) and record `phases.<gate>.verdict` +
-   `status` in `battle.json`.
+   `gate-test.md` / `gate-security.md`) and record `phases.<phase-key>.verdict` +
+   `status` in `battle.json` (using the phase key from the mapping above, e.g. the
+   `reviewer` gate writes `phases.review`).
 3. **Branch on the verdict** (cascade):
    - `accept` / `accept_with_opportunity` → `status = "done"`, continue to the
      next gate. Log any opportunity.
@@ -234,6 +251,38 @@ Precondition: every required review/test/security gate `done`. This step **write
 and pushes** — it runs with **confirmation before push/PR** (user decision). Once
 the PR is open, hand back: the human reviews it; when stabilized,
 `/legion:retro` closes the battle.
+
+0. **Pre-branch safety nets.** Before branching, two checks:
+
+   a. **Base freshness** — the gates must have judged the base you actually ship.
+      Fetch and compare HEAD against the remote default branch: `git fetch origin`,
+      then `git rev-list --count HEAD..origin/<default>` (resolve `<default>` via
+      `git symbolic-ref refs/remotes/origin/HEAD`, fallback
+      `gh repo view --json defaultBranchRef`). **> 0 → the local base is behind
+      origin** (work already merged elsewhere under another SHA, or a dependency/SDK
+      migration you don't have locally): **stop, integrate first** (rebase or merge
+      origin), then **re-run BUILD + the review/test gates on the updated base**
+      before delivering. A rebase changes what ships, so gate verdicts on the stale
+      base do **not** carry over. (RETEX: a base behind origin's default was only
+      caught at deliver, after the gates had validated a base that wasn't shipped.)
+
+   b. **Empty remote** — the flow assumes the remote already has a base branch.
+      Check `git ls-remote --heads origin` — **no heads** means an uninitialized
+      repo. Delivering a feature branch into it makes that branch the **default**,
+      so the PR's source == target → `gh pr create` fails (HTTP 400), no PR
+      possible. If the remote is empty, **stop the normal flow** and offer a choice
+      (do **not** branch yet):
+      - **Bootstrap a base** — create an initial commit (empty is fine) on the
+        default branch, push it (`git push -u origin <default>`) so it becomes the
+        default, then replant the feature work on `<me>/<token>` and continue from
+        step 1.
+      - **Import directly on the default branch** — push the work as the default
+        branch (no PR for this first drop; the repo gets its history). Subsequent
+        battles deliver normally.
+
+      **Do not script the default-branch switch** — flipping a repo's default
+      branch is a **repo-admin UI action** on GitHub; surface it to the user rather
+      than attempting it by script.
 
 1. **Branch name** — `<me>/<token>`: `<me>` from `git config user.email` (local
    part before `@`; fallback `user.name`), `<token>` from `battle.json.ticket`
