@@ -57,6 +57,31 @@ Arguments: `$ARGUMENTS`
   `UnicodeEncodeError`. Optionally set **`PYTHONUTF8=1`** for the session so all
   Python uses UTF-8 stdio.
 
+### §A.preflight — detect the stack (.NET by default)
+
+This plugin is built for **.NET** battles: the gates assume Roslyn (the
+`cwm-roslyn-navigator` MCP), `dotnet build` / `dotnet test`, and the
+`dotnet-claude-kit` skills. That is the default and needs no extra step. But a repo
+may not be .NET (RETEX: a non-.NET battle had to neutralize these assumptions by
+hand in every gate prompt). **Detect once per session** and record the result in
+`battle.json.stack` (written at §A.1) for the gates and `deliver`:
+
+- **.NET** — a `*.csproj` / `*.sln` exists at or under the repo root. Proceed as
+  documented. **But if no `*.sln` exists** (csproj-only repo, e.g. a single
+  service): `dotnet build` / `dotnet test` run from the repo root then fail with
+  *"Specify which project or solution file to use"*. Record the explicit target(s)
+  in `battle.json.stack` (`build_target` = the buildable csproj or a directory
+  holding exactly one; `test_target` = the test csproj) so the BUILD step (§D) and
+  the test gate (§E) pass them explicitly instead of relying on a solution. With a
+  `.sln` present, leave both `null` (commands run from the root unchanged).
+- **Non-.NET** — no `*.csproj`/`*.sln`, but a `package.json` / `tsconfig.json`
+  (Node/TS), `pyproject.toml`, `go.mod`, `Cargo.toml`, … is present. Flag the
+  battle **non-.NET** (`stack.kind`) and apply the **Non-.NET stack** rules in §E
+  for every gate.
+
+If both are absent or it is ambiguous, **ask the user** which stack applies. Note
+the detected stack at the top of `spec.md` so a resumed session inherits it.
+
 ### §A.1 — per-battle flow
 
 1. **Derive the battle id** as `<YYYY-MM-DD>-<token>` using today's date and the
@@ -184,13 +209,15 @@ and a resumed session see work happening. You will reclassify it at the end.
 same conventions as the `builder` agent: load `dotnet-claude-kit:clean-architecture`
 + `dotnet-claude-kit:modern-csharp` (code) and `dotnet-claude-kit:testing` (tests);
 `dotnet-claude-kit:scaffold` for from-scratch scaffolding. Verify with
-`dotnet build` from the current directory; **note the warning count** from the
-build summary. For `all`, build **each slice in order**, collecting a
-`{ slice_id, build_ok, warnings }` per slice. Write `build-report.md`.
+`dotnet build` from the current directory (or `dotnet build <stack.build_target>`
+when `battle.json.stack.build_target` is set — repo without a `.sln`); **note the
+warning count** from the build summary. For `all`, build **each slice in order**,
+collecting a `{ slice_id, build_ok, warnings }` per slice. Write `build-report.md`.
 
 **Mode — `--auto`.** Delegate to the `builder` agent via the `Agent` tool
 (`subagent_type: builder`). Pass a self-contained prompt: battle dir, `plan.md`
-path, `slice_id`, and the `guard.allow` globs from `battle.json`. For `all`,
+path, `slice_id`, the `guard.allow` globs from `battle.json`, and — when set —
+`stack.build_target` (the explicit build target for a repo without a `.sln`). For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep
 dependent slices sequential. Collect each
 `{ slice_id, build_ok, warnings, files_touched }`.
@@ -230,7 +257,9 @@ pending even though the gate ran.
 
 1. **Invoke** the gate via `Agent` (`subagent_type`: `reviewer` |
    `test-engineer` | `security`). Self-contained prompt: battle dir, the upstream
-   artifacts it needs (`build-report.md`, `plan.md`, touched files), repo root.
+   artifacts it needs (`build-report.md`, `plan.md`, touched files), repo root. For
+   `test-engineer`, also pass `stack.test_target` when set (repo without a `.sln`)
+   so `dotnet test` targets the test project explicitly.
 2. **Persist** the returned content to its artifact (`gate-review.md` /
    `gate-test.md` / `gate-security.md`) and record `phases.<phase-key>.verdict` +
    `status` in `battle.json` (using the phase key from the mapping above, e.g. the
@@ -244,6 +273,27 @@ pending even though the gate ran.
 
 When all required review/test/security gates are `done`, announce readiness for
 DELIVER.
+
+### Non-.NET stack — gate adaptation
+
+When the battle is flagged **non-.NET** (§A.preflight stack detection), the default
+.NET assumptions do not hold. For **every** gate prompt (here in §E and the
+`architect` gate in §A.1), make the deviation explicit so the subagent does not
+fall back to .NET tooling:
+
+- **Drop the .NET tooling assumptions** from the prompt: no Roslyn / `cwm-roslyn`
+  MCP, no `dotnet build` / `dotnet test`. State the repo's **actual** build/test/lint
+  commands instead (read them from `package.json` scripts, `Makefile`, CI config —
+  whatever the repo uses) and pass them in the prompt.
+- **Tell the subagent not to load `dotnet-claude-kit` skills** (RETEX: subagents
+  loaded .NET skills for lack of an equivalent). Instruct it to reason from the
+  repo's own conventions and the generic review/test lenses, not a .NET ruleset.
+- **Keep the verdict contract unchanged** (`accept` / `accept_with_opportunity` /
+  `revise` / `reject`) — only the *toolchain* the gate reasons over changes, not the
+  cascade or how you persist it.
+
+The orchestrator owns this: the agents default to .NET; it is the gate prompt that
+carries the non-.NET deviation per battle.
 
 ## §G — deliver (branch, commit, push, PR) — final step
 

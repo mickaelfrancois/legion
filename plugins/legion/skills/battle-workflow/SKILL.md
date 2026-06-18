@@ -118,6 +118,7 @@ run time**):
   // dirs (e.g. ["HttpForge/**","HttpForge.Tests/**"]); src/**+tests/** matches
   // nothing on a root-projects repo and silently blocks every builder edit.
   "guard": { "allow": ["src/**", "tests/**"], "deny": [], "careful": false },
+  "stack": { "kind": ".net", "build_target": null, "test_target": null },  // *_target: explicit csproj when the repo has NO .sln; null ⇒ run dotnet from root
   "delivery": { "pr_url": null }
 }
 ```

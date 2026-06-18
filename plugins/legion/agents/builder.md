@@ -8,6 +8,12 @@ permissionMode: default
 
 # Subagent : builder (producteur BUILD)
 
+> **Stack** : ce sous-agent suppose **.NET** par défaut (Roslyn / `cwm-roslyn` MCP,
+> `dotnet build`/`dotnet test`, skills `dotnet-claude-kit`). Si le prompt de
+> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : pas de
+> Roslyn ni de skills .NET, raisonne sur les commandes build/test/lint réelles du
+> repo (cf. `battle.md` §E « Non-.NET stack »).
+
 ## Rôle
 
 Coder **une** slice du `plan.md` verrouillé par l'`architect`. Tu es le **seul**
@@ -28,6 +34,8 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
 2. **Chemin de `plan.md`** (décision d'archi + slices + matrice de tests)
 3. **`slice_id`** : la slice précise à coder (ex: `slice-2`)
 4. **Périmètre guard** : globs autorisés en écriture (`guard.allow`)
+5. **Cible build** (optionnel) : chemin de projet à builder quand le repo n'a pas
+   de `.sln` (`battle.json.stack.build_target`). Absent ⇒ build depuis la racine.
 
 ## Procédure
 
@@ -48,8 +56,9 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    classe, noms explicites. Écrire aussi les tests de la matrice couvrant cette
    slice.
 5. **Vérifier le build localement** (depuis le répertoire courant, jamais de
-   `cd`) : `dotnet build`. Politique d'erreur → § Self-correction. **Relever le
-   nombre de warnings** du résumé final (`N Warning(s)`).
+   `cd`) : `dotnet build` (ou `dotnet build <cible build>` si l'orchestrateur l'a
+   fournie — repo sans `.sln`). Politique d'erreur → § Self-correction. **Relever
+   le nombre de warnings** du résumé final (`N Warning(s)`).
 6. **Rédiger `build-report.md`** dans le dossier de la battle (dont le compte de
    warnings).
 
