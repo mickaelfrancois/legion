@@ -1,6 +1,6 @@
 ---
-description: Orchestrate a legion battle (start | build | review | test | deliver | resume | status). Creates per-repo battle state, runs the gate pipeline, persists artifacts.
-argument-hint: start <issue|slug> | build [slice|all] [--auto] | review | test | deliver | resume <battle-id> | status
+description: Orchestrate a legion battle (start | build | review | test | deliver | address | resume | status). Creates per-repo battle state, runs the gate pipeline, persists artifacts.
+argument-hint: start <issue|slug> | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status
 ---
 
 You are the **battle orchestrator** of `legion`. Load the `battle-workflow` skill
@@ -23,6 +23,7 @@ Arguments: `$ARGUMENTS`
 - `build [slice|all] [--auto]` → §D
 - `review` / `test` → §E (review gate, then test gate, then security if required)
 - `deliver` → §G (branch, commit, push, PR linked to the issue)
+- `address` → §H (handle human PR review comments — repeatable, post-deliver)
 - `resume <battle-id>` → §B
 - `status` (or empty) → §C
 
@@ -299,7 +300,8 @@ carries the non-.NET deviation per battle.
 
 Precondition: every required review/test/security gate `done`. This step **writes
 and pushes** — it runs with **confirmation before push/PR** (user decision). Once
-the PR is open, hand back: the human reviews it; when stabilized,
+the PR is open, hand back: the human reviews it. New review comments are handled by
+`/legion:battle address` (§H, repeatable); when the PR is stabilized,
 `/legion:retro` closes the battle.
 
 0. **Pre-branch safety nets.** Before branching, two checks:
@@ -400,8 +402,109 @@ the PR is open, hand back: the human reviews it; when stabilized,
    failure → **warn and continue**: the PR is already created.
 
 7. **Close the phase** — set `phases.deliver.status = "done"` in `battle.json`
-   (record `delivery.pr_url`). Report the PR URL; suggest `/legion:retro` once the
-   PR is stabilized.
+   (record `delivery.pr_url`). Report the PR URL; if the PR draws review comments,
+   point to `/legion:battle address` (§H); suggest `/legion:retro` once the PR is
+   stabilized.
+
+## §H — address (handle PR review comments) — repeatable, post-deliver
+
+Precondition: `delivery.pr_url` is set **and** the PR is still open. Resolve the PR
+number `<n>` from the `pr_url` tail and check `gh pr view <n> --json state -q .state`
+== `OPEN`. If `MERGED`/`CLOSED`, or there is no `pr_url` → refuse (nothing to
+address, or deliver hasn't happened).
+
+This phase is **optional and repeatable**: the human may comment in several waves.
+Each run is a **round** (`phases.address.round`, incremented). All battle-state
+writes stay yours; `pr-triage` only returns. Battle artifacts live under `.legion/`
+(git-ignored), so the temp files below are never committed.
+
+Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWithOwner`.
+
+1. **Fetch active threads.** GitHub exposes review-thread resolution **only via
+   GraphQL** (the REST API does not return `isResolved`):
+
+   ```bash
+   gh api graphql -F owner=<owner> -F repo=<repo> -F number=<n> -f query='
+     query($owner:String!,$repo:String!,$number:Int!){
+       repository(owner:$owner,name:$repo){ pullRequest(number:$number){
+         reviewThreads(first:100){ nodes{
+           id isResolved isOutdated
+           comments(first:50){ nodes{ databaseId author{login} body path line } } } } } } }'
+   ```
+
+   **Keep only actionable threads**: `isResolved == false` **and** carrying ≥1 human
+   comment (real author + body; skip bot/automation authors and empty system
+   threads). For each kept thread record `{ thread_id: <node id>, file: <path>,
+   line, comments:[{id: <databaseId>, author, content}] }` and write the list to
+   `.legion/battles/<id>/_threads.json`. **Empty list** → announce "no active review
+   comment" and **stop**.
+
+2. **Triage.** Invoke the `pr-triage` gate via `Agent` (`subagent_type: pr-triage`).
+   Self-contained prompt: `plan.md` path, `_threads.json` path, battle dir, repo
+   root, the PR branch `<me>/<token>`. It **returns** a `TRIAGE:` JSON block + the
+   `pr-feedback.md` content. **Persist** `pr-feedback.md` (append this round if the
+   file already exists), set `phases.address = { "status": "in_progress", "round":
+   <n> }`, and parse the `TRIAGE` JSON to route.
+
+3. **Apply, thread by thread** (JSON order). `target: none` threads produce **no**
+   code — reply only (step 7).
+   - **`target: builder`** → code the fix (inline by default, or delegate to the
+     `builder` via `--auto`), **inside `guard.allow`**. Then **one commit per
+     thread** — stage the code/test changes only (never `git add -A`; defensive
+     `git reset -q HEAD .legion` first):
+     ```bash
+     git commit -m "fix(review): <summary>"
+     ```
+     Capture the short SHA (`git rev-parse --short HEAD`) for the reply + artifact.
+   - **`target: architect`** → re-judge via the `architect` gate (§A.1 step 5). On
+     `revise`/`reject`, update `plan.md`, then the `builder` applies → commit.
+   - **Re-gate by blast radius** (`requires_regate`): for `code-logic` / `test`
+     threads, re-run the **§E** cascade (`reviewer` then `test-engineer`) **on the
+     fix**. A `revise` loops back to BUILD (fix, re-commit) before the thread may be
+     resolved. `code-trivial` skips the re-gate.
+
+4. **Update `pr-feedback.md`** — fill each thread's **Commit** (SHA) and target
+   **Resolution**.
+
+5. **CONFIRM (outward effects).** Show the user, for this round: the commits created
+   (SHA + message), and per thread the reply to be posted + whether the thread will
+   be resolved. **Wait for explicit OK.** For any `disagreement` → resolve-as-wontFix,
+   require **per-thread** confirmation — never close a disagreement without the
+   user's agreement.
+
+6. **Push**: `git push origin <me>/<token>` (the commits join the existing PR).
+
+7. **Reply + resolve** each thread via `gh api graphql` (**best-effort per thread**:
+   one failure does not abort the others — warn and continue):
+   - reply = `reply_fr` + (if a commit) ` « Corrigé en <sha>. »` :
+     ```bash
+     gh api graphql -F tid=<thread_id> -F body='<reply>' -f query='
+       mutation($tid:ID!,$body:String!){
+         addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$tid, body:$body}){ comment{ id } } }'
+     ```
+   - **resolution** — GitHub has no `fixed`/`wontFix` distinction: a thread is
+     resolved or not (the label is kept only in `pr-feedback.md` + `battle.json`):
+     - actionable **fixed**, or a confirmed **`disagreement`** (wontFix) → resolve:
+       ```bash
+       gh api graphql -F tid=<thread_id> -f query='
+         mutation($tid:ID!){ resolveReviewThread(input:{threadId:$tid}){ thread{ isResolved } } }'
+       ```
+     - `question` → **do not** resolve (leave it `active`; the author decides).
+
+   **Verify each resolution actually applied** (RETEX). Re-run the step-1 query and
+   confirm each thread's real `isResolved` matches the intended resolution. Persist
+   (step 8) the **observed** status, never the value you meant to write. Any
+   mismatch → re-issue the resolve (or surface it to the user); do not mark the
+   round `done` while a thread you meant to close is still unresolved server-side.
+
+8. **Persist `battle.json`** — `phases.address = { "status": "done", "round": <n>,
+   "threads": [ { "id", "target", "kind", "commit": "<sha|null>",
+   "resolution": "fixed|active|wontFix" } ] }` using the **re-fetched** statuses from
+   step 7. Delete the temp file (`_threads.json`).
+
+9. **Report** — threads handled / resolved / left open, commits pushed, and the
+   reminder: new comments → re-run `/legion:battle address` (next round). Once the
+   PR is merged/stabilized, `/legion:retro` closes the battle.
 
 ## Guardrails
 

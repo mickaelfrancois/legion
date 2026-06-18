@@ -5,7 +5,8 @@
 >
 > Version allégée d'un plugin d'orchestration d'entreprise : on garde le squelette
 > d'orchestration et les garde-fous, on retire ce qui ne sert qu'en équipe (campagnes
-> US→tâches, boucle de revue PR multi-round, DAG NuGet multi-repo).
+> US→tâches, DAG NuGet multi-repo). On garde en revanche une **boucle de revue PR**
+> mono-repo, légère, branchée sur `gh` (phase ADDRESS, §11).
 
 ---
 
@@ -28,7 +29,7 @@ l'**invoque** — il ne la duplique pas. Sa valeur propre est la *coordination*.
 | Terme | Définition |
 |---|---|
 | **Battle** | Unité de travail bout-en-bout sur **une** feature/issue, dans **un** repo. Possède un identifiant et un dossier d'état. |
-| **Phase** | Étape du pipeline (Think → Plan → Build → Review → Test → Deliver → Reflect). |
+| **Phase** | Étape du pipeline (Think → Plan → Build → Review → Test → Deliver → [Address] → Reflect ; *Address* est optionnelle/répétable, post-deliver). |
 | **Gate** | Point de contrôle tenu par un **sous-agent** isolé qui rend un verdict. Une phase ne se ferme qu'après un verdict `accept`/`accept_with_opportunity` de sa gate. |
 | **Artefact** | Fichier markdown produit par une phase et consommé par la suivante (`spec.md`, `plan.md`, `gate-*.md`…). C'est le mécanisme de hand-off **et** la mémoire de battle. |
 | **Fleet** | Vue consolidée des battles actives **à travers les repos**. Équivalent du *Conductor* de gstack adapté au multi-repo. |
@@ -68,6 +69,12 @@ le build).
 directement la cascade `review → test → security`, jusqu'au premier `revise`/`reject`
 ou jusqu'à `deliver` (exclu : la livraison reste manuelle/confirmée). Des warnings =
 remarques → pas d'enchaînement, l'humain tranche.
+
+**Boucle ADDRESS** (optionnelle, post-deliver, §11) : une fois la PR ouverte, les
+commentaires de revue humaine sont traités par `/battle address` — la gate
+`pr-triage` classe chaque fil, l'orchestrateur applique les corrections (re-gate
+`review`/`test` selon le rayon d'impact) puis répond/résout. Pas de commentaire → la
+phase n'existe pas.
 
 ---
 
@@ -219,7 +226,7 @@ plugins/legion/
 ├── README.md                    # guide d'utilisation
 ├── docs/ui-integration.md       # contrat de données figé (pour une UI read-only)
 ├── commands/
-│   ├── battle.md                # orchestrateur : start|build|review|test|deliver|resume|status
+│   ├── battle.md                # orchestrateur : start|build|review|test|deliver|address|resume|status
 │   ├── retro.md                 # REFLECT
 │   ├── fleet.md                 # vue multi-repo
 │   ├── freeze.md / guard.md / careful.md
@@ -228,7 +235,8 @@ plugins/legion/
 │   ├── builder.md               # PRODUCER BUILD (Edit/Write/Bash, worktree)
 │   ├── reviewer.md              # gate REVIEW (+ MCP Roslyn)
 │   ├── test-engineer.md         # gate TEST
-│   └── security.md              # gate sécurité
+│   ├── security.md              # gate sécurité
+│   └── pr-triage.md             # gate ADDRESS (triage des retours de PR)
 ├── hooks/
 │   ├── hooks.json               # PreToolUse: guard,careful · PostToolUse: fleet_sync · Stop/SubagentStop: usage_track
 │   ├── guard.py                 # périmètre d'écriture (exit 2 = block)
@@ -268,8 +276,40 @@ La source de tickets et la couche PR passent par le CLI GitHub :
 | THINK (marquer démarré) | `gh issue edit <n> --add-assignee @me` |
 | DELIVER (PR) | `gh pr create --title <conv> --body-file pr-body.md` (corps avec `Closes #<n>`) |
 | DELIVER (note issue) | `gh issue comment <n> --body-file wi-comment.md` |
+| ADDRESS (fils) | `gh api graphql … reviewThreads { isResolved comments }` (REST n'expose pas `isResolved`) |
+| ADDRESS (réponse) | `gh api graphql … addPullRequestReviewThreadReply` |
+| ADDRESS (résolution) | `gh api graphql … resolveReviewThread` |
 
 La fermeture de l'issue est **automatique au merge** via `Closes #<n>` dans le corps
 de PR — pas de transition d'état explicite à gérer. Dégradation gracieuse : si `gh`
 est absent/non authentifié, l'intake bascule inline et le `deliver` rend la main avec
 les commandes à exécuter manuellement.
+
+---
+
+## 11. Phase ADDRESS (optionnelle, post-deliver)
+
+Une fois la PR ouverte, les retours de revue humaine sont traités par
+`/battle address` — une **boucle mono-repo légère** (l'équivalent allégé de la revue
+PR multi-round d'entreprise), branchée sur `gh`. Optionnelle (rien à traiter → la
+phase n'existe pas) et **répétable** : un *round* par vague de commentaires
+(`phases.address.round`).
+
+Découpage acteur/orchestrateur, fidèle à l'invariant « gates pures » :
+
+- **`pr-triage` (gate, lecture seule, haiku)** : reçoit le JSON des fils non résolus,
+  lit le code visé + le `plan.md`, et **retourne** un plan de tri par fil — `target`
+  (`builder`/`architect`/`none`), `kind` (`code-trivial`/`code-logic`/`test`/
+  `question`/`disagreement`), `requires_regate` — plus un brouillon de réponse FR.
+  Il ne code pas, ne poste rien, ne résout rien.
+- **Orchestrateur (`/battle address`)** : route chaque fil (un commit par fil,
+  re-gate `review`/`test` pour `code-logic`/`test`), **confirme** les effets sortants,
+  pousse, puis **répond + résout** chaque fil via `gh api graphql`, et persiste
+  `phases.address`.
+
+GitHub n'expose l'état résolu des fils que par **GraphQL** (`reviewThreads.isResolved`)
+et n'a **pas** la distinction `fixed`/`wontFix` : `fixed` et `disagreement` confirmé
+résolvent tous deux le fil (`resolveReviewThread`), une `question` reste ouverte. La
+résolution est **revérifiée** après coup (re-fetch) avant d'être persistée — on ne
+fait jamais confiance à la valeur qu'on a voulu écrire. État :
+`phases.address = { status, round, threads:[{id, target, kind, commit, resolution}] }`.

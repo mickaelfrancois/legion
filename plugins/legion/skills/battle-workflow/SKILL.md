@@ -22,14 +22,20 @@ the operational summary loaded at run time.
 ## The pipeline
 
 ```
-THINK  → PLAN     → BUILD    → REVIEW  → TEST     → DELIVER → REFLECT
-start    architect  builder    reviewer  test-eng   deliver   retro
-         (gate)     (producer) (gate)    (gate)     (PR)
+THINK  → PLAN     → BUILD    → REVIEW  → TEST     → DELIVER → (ADDRESS) → REFLECT
+start    architect  builder    reviewer  test-eng   deliver   pr-triage    retro
+         (gate)     (producer) (gate)    (gate)     (PR)      (gate)
 ```
 
 Each step **hands off a markdown artifact** to the next. A gate reads the
 upstream artifact, judges it, and emits a verdict. The pipeline does **not**
 advance on `revise` or `reject` — a fix loops back to BUILD.
+
+**ADDRESS is optional and repeatable.** It runs only when the open PR draws human
+review comments: `/battle address` triages them (the `pr-triage` gate), loops fixes
+back through BUILD/REVIEW/TEST, replies and resolves the threads — one round per
+comment wave. No comments → the phase never exists; `/retro` closes the battle as
+usual.
 
 **Auto-advance on a clean build.** A build that is `build_ok` with **0 warnings**
 chains straight into the gate cascade `review → test → security` (no separate
@@ -70,6 +76,7 @@ never invokes another agent; the builder never invokes a gate.
 | TEST | `test-engineer` gate | `gate-test.md` | `dotnet-claude-kit:testing`, `:tdd`, `:verify` |
 | (sec) | `security` gate | `gate-security.md` | `dotnet-claude-kit:security-scan` |
 | DELIVER | `/battle deliver` | `pr-body.md`, `wi-comment.md` | `gh pr create` (PR with `Closes #<n>`), `gh issue comment` |
+| (ADDRESS) | `pr-triage` gate | `pr-feedback.md` | `gh api graphql` (PR review threads); loops fixes back to BUILD/REVIEW/TEST |
 | REFLECT | `/retro` | `retro.md` | Claude memory |
 
 Gates are optional per battle **profile** (`feature` / `hotfix` / `security` /
@@ -82,7 +89,21 @@ Gates are optional per battle **profile** (`feature` / `hotfix` / `security` /
 artifacts → push → open the PR via `gh pr create`. For a numeric issue, the PR body
 ends with **`Closes #<n>`** so merging auto-closes the issue. Best-effort, non-blocking:
 post a short business-facing comment to the issue (`wi-comment.md`) via
-`gh issue comment`. Then the human reviews — suggest `/retro` once stabilized.
+`gh issue comment`. Then the human reviews — review comments are handled by
+`/battle address` (ADDRESS, below), and `/retro` closes the battle once stabilized.
+
+## ADDRESS (optional, repeatable, post-deliver)
+
+`/battle address` handles **human PR review comments** once the PR is open. It
+fetches the unresolved review threads (`gh api graphql` — the REST API does not
+expose `isResolved`), hands them to the read-only `pr-triage` gate (classifies each
+thread → `target` builder/architect/none, `kind`, `requires_regate` + drafts a FR
+reply), then the orchestrator applies the fixes (one commit per thread, re-gating
+`code-logic`/`test` through REVIEW/TEST), pushes, and **replies + resolves** each
+thread — verifying the resolution actually stuck server-side before persisting.
+Repeatable: one **round** per comment wave (`phases.address.round`). Artifact:
+`pr-feedback.md`. GitHub has no `fixed`/`wontFix` distinction — both resolve the
+thread; a `question` is left unresolved for the author.
 
 ## State layout
 
@@ -113,6 +134,8 @@ run time**):
     "test":    { "status": "pending" },
     "deliver": { "status": "pending" },
     "reflect": { "status": "pending" }
+    // "address" is NOT in the default set — `/battle address` adds it on demand
+    // (optional, repeatable): { status, round, threads:[{id,target,kind,commit,resolution}] }
   },
   // guard.allow = PLACEHOLDER — `/battle start` derives it from detected *.csproj
   // dirs (e.g. ["HttpForge/**","HttpForge.Tests/**"]); src/**+tests/** matches

@@ -33,7 +33,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit")
-PHASE_ORDER = ["think", "plan", "build", "review", "test", "deliver", "reflect"]
+# `address` is optional + repeatable (post-deliver PR review loop); when never run
+# its phase entry is simply absent, which _current_phase treats transparently.
+PHASE_ORDER = ["think", "plan", "build", "review", "test", "deliver", "address", "reflect"]
 
 
 def _state_base() -> Path:
@@ -253,6 +255,10 @@ def _self_test() -> int:
     assert _battle_status({"build": {"status": "in_progress"}}) == "active"
     assert _battle_status({}) == "active"
     assert _current_phase({"deliver": {"status": "done"}}) == ("deliver", "done")
+    # address (optionnelle, post-deliver) : in_progress => phase courante
+    assert _current_phase({"deliver": {"status": "done"}, "address": {"status": "in_progress"}}) == ("address", "in_progress")
+    # address jamais jouée (absente) : transparente, reflect=done => closed
+    assert _battle_status({"deliver": {"status": "done"}, "reflect": {"status": "done"}}) == "closed"
     assert _battle_dir_from_path("x/.legion/battles/b1/battle.json").name == "b1"
     assert _battle_dir_from_path("x/src/foo.cs") is None
     assert _shard_name("a::b") == _shard_name("a::b") and _shard_name("a::b").endswith(".json")
