@@ -17,6 +17,7 @@ public static class Artifacts
         new("gate-test.md", "Gate — tests", Phase.Test),
         new("pr-body.md", "Corps de PR", Phase.Deliver),
         new("wi-comment.md", "Note issue", Phase.Deliver),
+        new("pr-feedback.md", "Retours de PR", Phase.Address),
         new("retro.md", "Rétrospective", Phase.Reflect),
     ];
 }

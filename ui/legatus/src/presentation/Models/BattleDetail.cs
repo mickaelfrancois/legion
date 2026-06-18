@@ -24,6 +24,22 @@ public sealed class PhaseState
     public PhaseStatus Status { get; set; }
     public string? Artifact { get; set; }
     public Verdict Verdict { get; set; }   // only meaningful for gate phases (plan/review/test/security)
+
+    // ADDRESS phase only (doc §4): post-deliver, repeatable. No single verdict — a wave
+    // counter and the PR review threads. Both stay default/empty for every other phase.
+    public int Round { get; set; }
+    public List<FeedbackThread> Threads { get; set; } = [];
+}
+
+// One PR review thread tracked by the ADDRESS phase (doc §4). Read defensively — the
+// producer guarantees none of these in particular.
+public sealed class FeedbackThread
+{
+    public string? Id { get; set; }
+    public string? Target { get; set; }
+    public string? Kind { get; set; }
+    public string? Commit { get; set; }
+    public string? Resolution { get; set; }   // fixed | active | wontFix
 }
 
 public sealed class Guard
