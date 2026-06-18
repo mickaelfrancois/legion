@@ -33,6 +33,16 @@ public static class StatusVisuals
         _ => Color.Default,
     };
 
+    // RETEX severity is a free string from the producer; map known values, default otherwise.
+    public static Color RetexColor(string? severity) => severity?.ToLowerInvariant() switch
+    {
+        "blocker" => Color.Error,
+        "friction" => Color.Warning,
+        "annoyance" => Color.Info,
+        "idea" => Color.Success,
+        _ => Color.Default,
+    };
+
     public static string Label(PhaseStatus status) => status switch
     {
         PhaseStatus.Pending => "En attente",

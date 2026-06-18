@@ -20,6 +20,10 @@ public static class LegionPaths
     // The sharded index directory <base>/fleet.d/ — one <sha1>.json per battle (doc §2).
     public static string FleetDirectory() => Path.Combine(BaseDirectory(), "fleet.d");
 
+    // Central tooling RETEX journal <base>/plugin-retex.jsonl: append-only, one suggestion
+    // per line, aggregated across every battle and repo. Written by scripts/plugin_retex.py.
+    public static string PluginRetexJournal() => Path.Combine(BaseDirectory(), "plugin-retex.jsonl");
+
     // <repo_path>/.legion/battles/<id>/ — normalizing host-native separators first (doc §5).
     public static string BattleDirectory(string repoPath, string id)
         => Path.Combine(NormalizeSeparators(repoPath), ".legion", "battles", id);
