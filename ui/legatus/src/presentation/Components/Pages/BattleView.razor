@@ -81,6 +81,15 @@
                                                 </MudChip>
                                             </div>
                                         }
+                                        @* ADDRESS has no verdict (doc §4): show the review round and how many
+                                           threads stay open — an open thread awaits the author, hence warning. *@
+                                        @if (phase == Phase.Address && state is { } addr && (addr.Round > 0 || addr.Threads.Count > 0))
+                                        {
+                                            <MudText Typo="Typo.caption"
+                                                     Class="@($"d-block mt-1 {(OpenThreads(addr) > 0 ? "mud-warning-text" : "mud-text-secondary")}")">
+                                                round @addr.Round · @OpenThreads(addr) ouvert(s) / @ResolvedThreads(addr) résolu(s)
+                                            </MudText>
+                                        }
                                     </div>
                                 </ItemContent>
                             </MudTimelineItem>
@@ -269,6 +278,13 @@
         }
         return current;
     }
+
+    // ADDRESS threads (doc §4): an "active" resolution is an open question; anything else
+    // (fixed / wontFix) counts as resolved.
+    private static int OpenThreads(PhaseState s)
+        => s.Threads.Count(t => string.Equals(t.Resolution, "active", StringComparison.OrdinalIgnoreCase));
+
+    private static int ResolvedThreads(PhaseState s) => s.Threads.Count - OpenThreads(s);
 
     private void SelectPhase(Phase phase) => _selectedPhase = phase;
 
