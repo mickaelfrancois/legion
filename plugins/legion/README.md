@@ -62,6 +62,9 @@ automatiquement `review → test → security` jusqu'au premier `revise` ou jusq
 ## Exemple complet
 
 ```text
+# 0. (optionnel) Cadrer une issue floue AVANT de démarrer
+/legion:recon 42                   ← interrogatoire serré + exploration du repo → ajoute une section « Cadrage » à l'issue
+
 # 1. Démarrer une battle
 /legion:battle start 42            ← id numérique = issue GitHub : tire titre/body/labels
 /legion:battle start refonte-tva   ← libellé libre : la spec est rédigée depuis la conversation
@@ -97,6 +100,7 @@ automatiquement `review → test → security` jusqu'au premier `revise` ou jusq
 
 | Commande | Ce qu'elle fait |
 |---|---|
+| `/legion:recon <issue>` | *(avant THINK, optionnel)* Affine une issue floue par un interrogatoire serré + exploration du repo, puis ajoute une section « Cadrage » à l'issue (confirmation avant écriture). |
 | `/legion:battle start <issue\|slug>` | Démarre une battle. `<issue>` numérique = issue GitHub (tirée auto) ; sinon libellé libre. |
 | `/legion:battle build [slice\|all] [--auto]` | Code une slice (toi en direct, ou l'agent builder). |
 | `/legion:battle review` / `test` | Lance les gates reviewer → test-engineer → security. |
