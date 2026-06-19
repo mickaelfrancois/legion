@@ -140,7 +140,10 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    In both cases `spec.md` must contain: intent, in-scope, explicitly
    out-of-scope, assumptions, acceptance criteria. **Write it in French**
    (identifiers & file names stay English). If the seeded content is thin,
-   ask the user to fill the gaps before locking the plan.
+   ask the user to fill the gaps before locking the plan. For a rough issue, the
+   cleaner fix is **upstream**: `/legion:recon <n>` sharpens the issue *before*
+   `start` reads it (it appends a « Cadrage » section), so the seed comes in already
+   sharp — suggest it when the issue is vague rather than patching `spec.md` here.
 
 4. **Complete `battle.json`** (the minimal one from step 2) following the schema
    **inlined in the `battle-workflow` doctrine** (State layout) — already in context.
