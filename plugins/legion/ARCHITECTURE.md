@@ -85,9 +85,28 @@ commande**. Raison : un sous-agent démarre en **session vierge** (aucun biais d
 contexte de production) avec son **propre budget de contexte** — il peut lire 30
 fichiers pour challenger l'archi et ne remonter que son verdict.
 
-> **Invariant « gates pures ».** Un sous-agent gate ne touche **jamais** le disque :
-> il lit et **retourne** (verdict + contenu en clair). Seuls l'**orchestrateur**
-> (`/battle`) et le **builder** écrivent l'état de la battle.
+> **Invariant « gate à écriture confinée ».** Un sous-agent gate est **lecture seule
+> sur le code** et n'écrit **qu'un seul fichier** : son propre artefact
+> (`plan.md` / `gate-review.md` / `gate-test.md` / `gate-security.md` /
+> `pr-feedback.md`) dans le dossier de la battle. Le hook `guard.py` l'y **confine**
+> via `agent_type` (toute autre écriture — code, `battle.json`, artefact d'une autre
+> gate → `exit 2`) : la garantie « une gate ne touche pas le code » est ainsi
+> **structurelle** (portée par le hook), non plus seulement déclarative. La gate
+> **retourne** alors son verdict + le **chemin** de l'artefact — *jamais* le contenu
+> en clair : c'est ce qui garde le travail des gates **hors du contexte** de la
+> session orchestratrice (le levier de discipline de contexte). L'**orchestrateur**
+> (`/battle`) écrit le reste de l'état (`battle.json`, `spec.md`, artefacts de PR) et
+> **lit** les artefacts de gate sur disque au besoin ; le **builder** écrit le code +
+> `build-report.md`. Cas particulier : `pr-triage` écrit `pr-feedback.md` **et**
+> retourne en plus le bloc TRIAGE JSON (machine-lisible) sur lequel l'orchestrateur
+> route.
+>
+> **Contrepartie : vérif de livraison.** Comme le verdict ne *prouve* plus que
+> l'artefact existe, l'orchestrateur applique un **check de livraison** déterministe
+> autour de chaque gate (métadonnées seules — il ne lit pas le contenu) : l'artefact
+> attendu doit **exister**, au **chemin canonique**, et avoir été **écrit à ce passage**
+> (mtime postérieur — pas un résidu d'un round précédent). À défaut, il ne persiste pas
+> le verdict, re-invoque la gate une fois, puis bloque la phase. Détail : `battle.md` §E.
 
 | Verdict | Sens | Effet sur le pipeline |
 |---|---|---|
@@ -98,12 +117,16 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 
 ### 4.1 Les quatre gates
 
-| Sous-agent | Lecture seule ? | Modèle | Mandat |
+| Sous-agent | Lecture seule (sur le code) ? | Modèle | Mandat |
 |---|---|---|---|
 | **architect** | Oui (Read/Grep/Glob) | opus | Scope justifié ? Archi conforme Clean Architecture ? Matrice de tests couvrante ? |
 | **reviewer** | Oui + MCP Roslyn | sonnet | Correction, conformité au plan, performance, lisibilité, antipatterns, dead code. |
-| **test-engineer** | Non (exécute les tests) | sonnet | Les tests existent, passent, et couvrent la matrice du `plan.md`. |
+| **test-engineer** | Oui sur le code (exécute les tests) | sonnet | Les tests existent, passent, et couvrent la matrice du `plan.md`. |
 | **security** | Oui | opus | OWASP/secrets/NuGet vulnérables/auth — délègue à `security-scan`. |
+
+> Chacune **écrit son seul artefact** (`plan.md` / `gate-*.md`), confinée par
+> `guard.py` ; aucune ne touche le code (cf. invariant § 4). `Write` figure donc dans
+> leur whitelist d'outils, mais le hook borne cette écriture à l'unique artefact.
 
 > **Paliers de modèle.** Opus pour les gates à plus fort discernement et coût
 > d'erreur (`architect`, `security`) ; sonnet pour `reviewer`/`test-engineer` où le
@@ -177,12 +200,26 @@ stderr).
 
 ```
 PreToolUse(Edit|Write|MultiEdit) :
+  0. CONFINEMENT DES GATES (prioritaire, actif même guard non armé).
+     Si `agent_type` ∈ GATE_ARTIFACT (legion:architect → plan.md,
+     legion:reviewer → gate-review.md, legion:test-engineer → gate-test.md,
+     legion:security → gate-security.md, legion:pr-triage → pr-feedback.md) :
+       - file_path == .legion/battles/<active>/<artefact de la gate> → exit 0
+       - sinon (autre fichier, code, battle.json, hors battle)        → exit 2
+     La session principale (agent_type "claude") et le builder (legion:builder)
+     ne sont pas dans la table → règles de périmètre standard ci-dessous.
   1. Lire la battle active (.legion/active-battle → battle.json → guard.allow/deny).
   2. Le file_path visé est-il dans `allow` et hors `deny` ?
      - oui  → exit 0 (autorisé)
      - non  → exit 2 + message : "hors périmètre de la battle <id>. /freeze actif."
   3. `.legion/**` toujours autorisé. Bypass délibéré : env var LEGION_GUARD_OFF=1.
 ```
+
+> **Pourquoi `agent_type`.** Le payload `PreToolUse` porte `agent_type` (nom
+> namespacé du sous-agent appelant, ex. `legion:reviewer` ; la session principale
+> vaut `"claude"`). C'est ce signal qui permet de confiner une gate à son seul
+> artefact **sans** lui interdire d'écrire (elle a besoin de `Write`), et donc de
+> sortir le contenu des artefacts du contexte orchestrateur (cf. invariant § 4).
 
 ### 6.2 Commandes de pilotage
 
@@ -295,10 +332,11 @@ PR multi-round d'entreprise), branchée sur `gh`. Optionnelle (rien à traiter �
 phase n'existe pas) et **répétable** : un *round* par vague de commentaires
 (`phases.address.round`).
 
-Découpage acteur/orchestrateur, fidèle à l'invariant « gates pures » :
+Découpage acteur/orchestrateur, fidèle à l'invariant « gate à écriture confinée » :
 
-- **`pr-triage` (gate, lecture seule, haiku)** : reçoit le JSON des fils non résolus,
-  lit le code visé + le `plan.md`, et **retourne** un plan de tri par fil — `target`
+- **`pr-triage` (gate, lecture seule sur le code, sonnet)** : reçoit le JSON des fils
+  non résolus, lit le code visé + le `plan.md`, **écrit** son artefact `pr-feedback.md`
+  (le guard l'y confine) et **retourne** le plan de tri par fil — `target`
   (`builder`/`architect`/`none`), `kind` (`code-trivial`/`code-logic`/`test`/
   `question`/`disagreement`), `requires_regate` — plus un brouillon de réponse FR.
   Il ne code pas, ne poste rien, ne résout rien.

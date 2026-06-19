@@ -57,9 +57,17 @@ explicitly. Errors (`build_ok == false`) block as before.
 - **Producer** — `builder` only. It *writes* code from `plan.md` and reports in
   `build-report.md`. Not read-only, emits no verdict: its output is what the
   gates review.
-- **Gates** — `architect`, `reviewer`, `test-engineer`, `security`. They *judge* a
-  deliverable and return a verdict. Read-only (or execute-only), never write battle
-  state (the orchestrator persists). Invariant "pure gates".
+- **Gates** — `architect`, `reviewer`, `test-engineer`, `security` (+ `pr-triage`).
+  They *judge* a deliverable. **Read-only on the code**, but each **writes its own
+  single artifact** (`plan.md` / `gate-*.md` / `pr-feedback.md`) and returns only its
+  **verdict + the artifact path** — never the full content, which keeps it out of the
+  orchestrator's context. The `guard.py` hook **confines** each gate to that one file
+  (via `agent_type`): invariant "gate à écriture confinée". The orchestrator persists
+  the rest (`battle.json`, `spec.md`, PR artifacts) and reads gate artifacts from disk
+  on demand. (`pr-triage` also returns its TRIAGE JSON for routing.) Because a verdict
+  no longer proves the artifact exists, the orchestrator runs a deterministic
+  **delivery check** before trusting it (artifact exists, canonical path, freshly
+  written this pass via mtime) — see `battle.md` §E.
 
 Sequencing rule: the **orchestrator** (`/battle`) chains `builder → gates`. A gate
 never invokes another agent; the builder never invokes a gate.
@@ -186,7 +194,12 @@ memory. Persist only what would change how the *next* battle is run.
 `/freeze`, `/guard`, `/careful` set `battle.json.guard`. PreToolUse hooks enforce:
 `guard.py` **blocks** edits outside `guard.allow` (`exit 2`), `careful.py`
 **warns** (never blocks) on destructive shell commands. Bypass:
-`LEGION_GUARD_OFF=1`. The `builder` is subject to the same guard.
+`LEGION_GUARD_OFF=1`. The `builder` is subject to the same guard. **Gate
+confinement**: `guard.py` also reads `agent_type` and restricts each gate
+(`architect`/`reviewer`/`test-engineer`/`security`/`pr-triage`) to writing **only**
+its own artifact under `.legion/battles/<active>/` — any other write (code,
+`battle.json`, another gate's file) is blocked, even when the perimeter guard is not
+armed.
 
 ## Conventions
 
