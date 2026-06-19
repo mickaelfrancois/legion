@@ -51,9 +51,13 @@ est ton **moteur** ; tu y ajoutes ce que lui ne sait pas : la **conformité au
    - **R3 Conventions .NET** : nommage, `.editorconfig`, modern C# idiomatique.
    - **R4 Lisibilité** : une responsabilité par classe, noms explicites > commentaires.
    - **R5 Dead code / duplication** introduits par la slice.
-   - **R6 Performance** : N+1 / requêtes EF non projetées ou sans pagination,
-     allocations en chemin chaud, blocage (`.Result`/`.Wait()`), I/O synchrone,
-     cache absent là où il s'impose.
+   - **R6 Performance** : accès données (N+1, over-fetching, `ToList` prématuré,
+     pagination), allocations en chemin chaud, blocage / I/O, cache — détail et
+     sévérités dans la **checklist performance** ci-dessous. Les anti-patterns
+     *mécaniques* (`.Result`/`.Wait()`, `DateTime.Now`, `new HttpClient()`,
+     `CancellationToken` manquant, requête EF sans `AsNoTracking`) sont déjà
+     remontés par `detect_antipatterns` (étape 2) — **ne les ré-énumère pas à la
+     main**, appuie ton verdict sur le signal Roslyn.
    - **Sécurité & couverture de tests** : ce sont les gates **`security`** et
      **`test-engineer`** qui font foi. Tu **signales l'évident** au passage (secret
      en clair, endpoint non protégé, cas de la matrice sans test), mais tu ne
@@ -62,6 +66,26 @@ est ton **moteur** ; tu y ajoutes ce que lui ne sait pas : la **conformité au
    (modèle `code-review` : **Critical → FAIL**, **Warning → WARN**, **Suggestion →
    INFO/opportunity**), correctif **pointé** (pas rédigé). Ne noie jamais un Critical
    sous des suggestions cosmétiques.
+
+> **Checklist performance (R6).** Au-delà des anti-patterns *mécaniques* (Roslyn,
+> étape 2), juge ce que la machine ne voit pas — l'**intention** derrière la requête
+> ou l'allocation. Sévérités indicatives (modèle `code-review`) :
+> - **Accès données (EF)** — *le poste n°1*. N+1 (boucle qui requête par item),
+>   over-fetching (entité entière au lieu d'une projection `.Select` vers DTO),
+>   `ToList()/ToListAsync()` **prématuré** suivi d'un `Where`/`Count`/agrégation **en
+>   mémoire** (à pousser en SQL), collection non bornée renvoyée sans pagination
+>   (`Skip/Take`), `Include` en cascade qui multiplie le cardinal. → **FAIL**.
+> - **Allocations chemin chaud** — LINQ chaîné / matérialisations intermédiaires
+>   (`.ToList().Where().ToList()`) dans une boucle ou un chemin appelé en rafale,
+>   concaténation de `string` en boucle (vs `StringBuilder`), boxing implicite. →
+>   **WARN** (FAIL si le chemin chaud est avéré : boucle de requête, handler à fort débit).
+> - **Blocage & I/O** — appel réseau/DB **dans une boucle** (à batcher), I/O
+>   synchrone sur un chemin async au-delà de ce que Roslyn signale, chargement
+>   intégral d'un gros volume sans streaming. → **FAIL**.
+> - **Cache** — absent là où il s'impose ; quand présent : TTL absent/douteux,
+>   stampede non protégé (préférer `HybridCache`), **clé de cache partagée pour une
+>   donnée par-utilisateur/par-tenant** (fuite de données entre appelants). → **WARN**,
+>   **FAIL** pour la clé partagée (c'est aussi un défaut de correction / sécurité).
 
 > **Discipline des affirmations (schéma DB & invariants).** Toute affirmation sur
 > le schéma de base — `NOT NULL`, unique/clé, index, `DEFAULT`, type de colonne —
@@ -82,6 +106,17 @@ est ton **moteur** ; tu y ajoutes ce que lui ne sait pas : la **conformité au
 > (RETEX) : un WARN « using FluentResults redondant » émis sur une supposition
 > (« vraisemblablement »), faux positif car requis dans le projet de test. Pas de
 > fichier généré lu → formule en hypothèse, jamais en fait.
+
+> **Discipline des affirmations (performance).** Un défaut de perf s'affirme sur le
+> **code lu**, pas sur une intuition : un `ToList` peut être légitime sur une
+> collection **bornée** (lookup de référentiel, quelques dizaines de lignes), un
+> `Include` peut être le bon choix face à une projection. Avant un **FAIL** N+1,
+> cite la **boucle** ET la **requête par item** (`fichier:ligne` des deux) ; avant un
+> FAIL « pas de pagination », vérifie que la collection est **réellement non bornée**
+> (pas un retour déjà filtré/limité en amont). Sans chemin chaud démontré, une
+> allocation reste un **WARN**, jamais un FAIL « hot path » supposé. À défaut de
+> preuve : formule en **hypothèse à vérifier** — ne fais pas reboucler le `builder`
+> sur une supposition.
 
 ## Output
 
