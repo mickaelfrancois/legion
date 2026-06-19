@@ -13,6 +13,13 @@ Regles :
 - Memoire projet de Claude (`~/.claude/projects/*/memory/**`) toujours autorisee :
   le guard regit le perimetre d'ecriture *du repo*, pas l'infra memoire de Claude
   (ou /retro persiste une learning durable, parfois perimetre encore actif).
+- **Confinement des gates** : un sous-agent gate (`agent_type` =
+  `<plugin>:architect`/`reviewer`/`test-engineer`/`security`/`pr-triage`) ne peut
+  ecrire QUE son unique artefact dans `.legion/battles/<active>/` (ni code, ni
+  `battle.json`) -> hors de la -> exit 2. Rend structurelle (portee par le hook) la
+  garantie « une gate ne touche pas le code ». La session principale (`agent_type`
+  "claude") et le `builder` (`<plugin>:builder`) ne sont **pas** confines : regles
+  de perimetre standard ci-dessous. S'applique meme guard non arme.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -37,6 +44,20 @@ ACTIVE_POINTER = Path(".legion/active-battle")
 BATTLES_DIR = Path(".legion/battles")
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit")
 ALWAYS_ALLOW = (".legion/**", ".gitignore")  # etat de la battle + .gitignore (setup orchestrateur)
+
+# Confinement des gates. `agent_type` (payload PreToolUse) vaut le nom NAMESPACE du
+# sous-agent appelant (`<plugin>:<agent>`) ; la session principale vaut "claude" et
+# le builder "<plugin>:builder" (tous deux hors table -> regles de perimetre standard).
+# Chaque gate listee ici ne peut ecrire QUE l'artefact associe, dans le dossier de
+# la battle active. Le prefixe de plugin (`legion:`) doit matcher le `name` du
+# marketplace ; sur un fork (ex. `divalto-legion`) adapter le prefixe.
+GATE_ARTIFACT = {
+    "legion:architect": "plan.md",
+    "legion:reviewer": "gate-review.md",
+    "legion:test-engineer": "gate-test.md",
+    "legion:security": "gate-security.md",
+    "legion:pr-triage": "pr-feedback.md",
+}
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -126,10 +147,56 @@ def _is_claude_memory(file_path: str) -> bool:
     return len(parts) >= 3 and parts[1] == "memory"
 
 
+def _active_battle_id(repo_root: Path) -> str | None:
+    """Id de la battle active (pointeur seul), independamment de `guard.allow`.
+
+    `_load_active_guard` renvoie None des que `guard.allow` est vide ; le confinement
+    des gates doit s'appliquer meme guard non arme, d'ou ce lecteur dedie du pointeur.
+    """
+    pointer = repo_root / ACTIVE_POINTER
+    if not pointer.is_file():
+        return None
+    battle_id = pointer.read_text(encoding="utf-8").strip()
+    return battle_id or None
+
+
+def _gate_decision(agent_type, rel: str | None, battle_id: str | None):
+    """Decision de confinement pour un sous-agent gate (fonction pure, testable).
+
+    - None  -> `agent_type` n'est pas une gate : appliquer les regles standard.
+    - True  -> ecriture AUTORISEE (l'unique artefact de la gate, battle active).
+    - False -> ecriture BLOQUEE (autre fichier, hors battle, ou chemin hors repo).
+    """
+    artifact = GATE_ARTIFACT.get(agent_type)
+    if artifact is None:
+        return None
+    if battle_id is None or rel is None:
+        return False
+    return rel == f".legion/battles/{battle_id}/{artifact}"
+
+
 def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     """Retourne (exit_code, message). exit 2 = blocage."""
     if data.get("tool_name") not in WRITE_TOOLS:
         return 0, ""
+
+    file_path = (data.get("tool_input") or {}).get("file_path", "")
+
+    # Confinement des gates : une gate n'ecrit QUE son artefact (cf. GATE_ARTIFACT).
+    # Prioritaire sur tout le reste, et actif meme guard non arme.
+    agent_type = data.get("agent_type")
+    if agent_type in GATE_ARTIFACT:
+        battle_id = _active_battle_id(repo_root)
+        rel = _relative(repo_root, file_path) if file_path else None
+        if _gate_decision(agent_type, rel, battle_id):
+            return 0, ""
+        expected = f".legion/battles/{battle_id or '<aucune battle active>'}/{GATE_ARTIFACT[agent_type]}"
+        return 2, (
+            f"BLOQUE : la gate `{agent_type}` ne peut ecrire QUE son artefact "
+            f"`{expected}`.\nTentative : `{rel}`.\n"
+            f"Une gate retourne son verdict + le chemin de son artefact ; elle "
+            f"n'ecrit ni code, ni `battle.json`, ni l'artefact d'une autre gate."
+        )
 
     active = _load_active_guard(repo_root)
     if active is None:
@@ -138,7 +205,6 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     if not allow:
         return 0, ""  # guard non arme
 
-    file_path = (data.get("tool_input") or {}).get("file_path", "")
     if not file_path:
         return 0, ""
 
@@ -209,6 +275,17 @@ def _self_test() -> int:
     # contournement par suffixe (chemin hors home se terminant par le motif) -> bloque
     assert not _is_claude_memory("C:/repo/.claude/projects/x/memory/evil.sh")
     assert not _is_claude_memory("C:/repo/src/Foo.cs")
+    # confinement des gates (fonction pure)
+    assert _gate_decision("claude", "src/x.cs", "B") is None            # session principale -> standard
+    assert _gate_decision("legion:builder", "src/x.cs", "B") is None    # builder -> standard
+    assert _gate_decision("legion:reviewer", ".legion/battles/B/gate-review.md", "B") is True
+    assert _gate_decision("legion:architect", ".legion/battles/B/plan.md", "B") is True
+    assert _gate_decision("legion:pr-triage", ".legion/battles/B/pr-feedback.md", "B") is True
+    assert _gate_decision("legion:reviewer", ".legion/battles/B/gate-test.md", "B") is False   # pas SON artefact
+    assert _gate_decision("legion:reviewer", "src/Foo.cs", "B") is False                        # pas de code
+    assert _gate_decision("legion:reviewer", ".legion/battles/B/battle.json", "B") is False     # pas battle.json
+    assert _gate_decision("legion:reviewer", ".legion/battles/B/gate-review.md", None) is False # hors battle active
+    assert _gate_decision("legion:reviewer", None, "B") is False                                # chemin hors repo
     # decision : pas de write tool -> 0
     assert _decide({"tool_name": "Bash"}, Path.cwd())[0] == 0
     print("OK: guard self-test passed", file=sys.stderr)

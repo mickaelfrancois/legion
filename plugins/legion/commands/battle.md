@@ -4,8 +4,14 @@ argument-hint: start <issue|slug> | build [slice|all] [--auto] | review | test |
 ---
 
 You are the **battle orchestrator** of `legion`. Load the `battle-workflow` skill
-doctrine before acting. You are the **only** writer of battle state besides the
-`builder`: gate agents return content, you persist it.
+doctrine before acting. Producers and gates each write their **own** artifact: the
+`builder` writes `build-report.md`, every gate writes its single `gate-*.md` /
+`plan.md` / `pr-feedback.md` (the `guard.py` hook **confines** each gate to that one
+file). You persist everything else — `battle.json`, `spec.md`, the PR artifacts —
+and you read the gate artifacts from disk when you need their detail. A gate returns
+only its **verdict + the artifact path** (plus, for `pr-triage`, the TRIAGE JSON),
+never the full content — that keeps the gate's output out of this orchestrating
+session's context.
 
 > **Surfacing commands to the user — always namespace them.** This plugin's
 > commands are **namespaced**: the user must type `/legion:battle …`
@@ -162,11 +168,15 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 
 5. **Invoke the `architect` gate** with the `Agent` tool
    (`subagent_type: architect`). Pass a self-contained prompt: the absolute path
-   of `spec.md`, the battle directory, and the repo root. The agent is read-only
-   and **returns** a verdict plus the `plan.md` content — it does not write.
+   of `spec.md`, the battle directory, and the repo root. The agent **writes**
+   `plan.md` itself (the guard confines it to that single file) and **returns** a
+   verdict + the artifact path — not the content.
 
-6. **Persist the result.** Write the returned plan content to `plan.md`. Update
-   `battle.json`: `phases.plan.verdict` and `phases.plan.status`.
+6. **Record the result.** First run the **gate artifact delivery check** (§E) on
+   `plan.md` — the `architect` must have actually written it this pass. `plan.md` is
+   already on disk — do **not** re-write it from a returned blob. Once delivery is
+   confirmed, update `battle.json`: `phases.plan.verdict` and `phases.plan.status`.
+   Read `plan.md` from disk only if you need its detail to report.
    - `accept` / `accept_with_opportunity` → `status = "done"`; report the plan
      summary and any opportunity, then **stop and hand back to the user** (BUILD
      is a separate step).
@@ -243,11 +253,39 @@ The orchestrator sequences `builder → gates` — the builder never calls a gat
 
 ## §E — review / test gates
 
-Precondition: `phases.build.status == "done"`. Each gate is a **read-only/
-execute-only** subagent: it **returns** a verdict and its artifact content; you
-persist it. Apply this shared loop for each gate, in order
+Precondition: `phases.build.status == "done"`. Each gate is a subagent that is
+**read-only on the code** but **writes its own single artifact** (`gate-*.md` — the
+`guard.py` hook confines it to that one file): it **returns** only a verdict + the
+artifact path, not the content. Apply this shared loop for each gate, in order
 `reviewer → test-engineer → security`, skipping any gate not in
 `battle.json.required_gates`.
+
+### Gate artifact delivery check (shared — every gate, incl. `architect` and `pr-triage`)
+
+A gate now writes its own artifact, so a returned verdict no longer **proves** the
+artifact exists. A verdict counts **only if its artifact was written this pass**.
+Wrap every gate invocation with this check — it is deterministic (metadata only, you
+never read the artifact's content, which would refill the context the confinement
+spares):
+
+1. **Before** invoking, resolve the expected artifact path
+   `.legion/battles/<id>/<artifact>` (architect → `plan.md`, reviewer →
+   `gate-review.md`, test-engineer → `gate-test.md`, security → `gate-security.md`,
+   pr-triage → `pr-feedback.md`) and, **if it already exists** (a re-loop round),
+   capture its current modified-time (`(Get-Item <path>).LastWriteTimeUtc`).
+2. The gate returns `VERDICT … ARTIFACT: <path>`.
+3. **After** the return, verify **all three** — metadata only, no content read:
+   - the file at the expected path **exists**;
+   - the returned `ARTIFACT:` path **equals** the expected canonical path (the guard
+     already blocks a wrong *write*; this catches a wrong path in the *returned* string);
+   - it was **written this pass** — it either did not exist before, or its
+     modified-time is now **strictly newer** than the value captured in step 1 (so a
+     stale artifact from a previous round is never mistaken for a fresh one).
+4. **On any failure** → do **not** record the verdict and do **not** advance.
+   Re-invoke the gate **once** with an explicit reminder ("write your artifact to
+   `<exact path>` first, then return your verdict"). If it still fails → set the phase
+   `status = "blocked"`, surface it to the user, and stop. **Never advance the pipeline
+   on a verdict whose fresh artifact you could not confirm.**
 
 The gate identifier (used for `subagent_type` and `required_gates`) is **not**
 the phase key written to `battle.json.phases`. Map gate → phase key before
@@ -261,16 +299,21 @@ pending even though the gate ran.
    artifacts it needs (`build-report.md`, `plan.md`, touched files), repo root. For
    `test-engineer`, also pass `stack.test_target` when set (repo without a `.sln`)
    so `dotnet test` targets the test project explicitly.
-2. **Persist** the returned content to its artifact (`gate-review.md` /
-   `gate-test.md` / `gate-security.md`) and record `phases.<phase-key>.verdict` +
+2. **Run the gate artifact delivery check** (above) on the gate's artifact, then
+   **record the verdict.** The gate already wrote its artifact (`gate-review.md` /
+   `gate-test.md` / `gate-security.md`) on disk — do **not** re-write it from a
+   returned blob. Once delivery is confirmed, record `phases.<phase-key>.verdict` +
    `status` in `battle.json` (using the phase key from the mapping above, e.g. the
    `reviewer` gate writes `phases.review`).
 3. **Branch on the verdict** (cascade):
    - `accept` / `accept_with_opportunity` → `status = "done"`, continue to the
      next gate. Log any opportunity.
    - `revise` / `reject` → `status = "blocked"`, **stop the chain**. Relay the
-     FAILs verbatim and hand back: the fix loops back to BUILD
-     (`/legion:battle build`), not forward.
+     verdict's one-line RAISON and hand back: the fix loops back to BUILD
+     (`/legion:battle build`), not forward. **Pass the next builder the artifact
+     path** (`gate-review.md` / `gate-test.md`) so it reads the FAIL detail from
+     disk — do not pull the full gate content into this session just to brief it
+     (that would refill the context the confinement is meant to spare).
 
 When all required review/test/security gates are `done`, announce readiness for
 DELIVER.
@@ -441,10 +484,16 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
 
 2. **Triage.** Invoke the `pr-triage` gate via `Agent` (`subagent_type: pr-triage`).
    Self-contained prompt: `plan.md` path, `_threads.json` path, battle dir, repo
-   root, the PR branch `<me>/<token>`. It **returns** a `TRIAGE:` JSON block + the
-   `pr-feedback.md` content. **Persist** `pr-feedback.md` (append this round if the
-   file already exists), set `phases.address = { "status": "in_progress", "round":
-   <n> }`, and parse the `TRIAGE` JSON to route.
+   root, the PR branch `<me>/<token>`. The gate **writes** `pr-feedback.md` itself
+   (appending this round when the file already exists — the guard confines it to
+   that one file) and **returns** the `TRIAGE:` JSON block. **Run the gate artifact
+   delivery check** (§E) on `pr-feedback.md` — the modified-time guard especially
+   matters here, since the file usually exists from a previous round and the gate must
+   have **re-written** it this round (appended). Then set `phases.address =
+   { "status": "in_progress", "round": <n> }` and parse the returned `TRIAGE` JSON
+   to route. You complete `pr-feedback.md` later (step 4: commit SHAs + resolutions)
+   — that later write is yours (the orchestrator is not guard-confined), not the
+   gate's.
 
 3. **Apply, thread by thread** (JSON order). `target: none` threads produce **no**
    code — reply only (step 7).
@@ -509,7 +558,9 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
 ## Guardrails
 
 - Never `cd` / `Set-Location`; operate from the current directory.
-- Persist state yourself; gates and reviewers never write.
+- Persist `battle.json` / `spec.md` / PR artifacts yourself; each gate writes **only
+  its own** `gate-*.md` / `plan.md` / `pr-feedback.md` (guard-confined) and returns
+  verdict + path — nothing else.
 - Stop on `revise`/`reject` — the pipeline does not advance.
 - Delegate concrete .NET reasoning to `dotnet-claude-kit` skills; do not duplicate
   them here.
