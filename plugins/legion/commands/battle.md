@@ -524,6 +524,17 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
    ```
 
+   **Where the commit-message file lives (if you use one).** A multi-line body with
+   accents or other non-ASCII punctuation is fragile through `-m` on a Windows console;
+   writing the message to a file and committing with `git commit -F <file>` is more
+   robust. When you do, that file **must live under `.legion/battles/<id>/`** (e.g.
+   `.legion/battles/<id>/commit-msg.txt`) — **never outside the repo** (no
+   `$CLAUDE_JOB_DIR/tmp/…`). Reason: once a write scope is armed (`/freeze` or
+   `/guard`), the `guard.py` hook blocks every write outside it, while `.legion/**` is
+   always allowed and git-ignored — so a scratch message file there is writable yet
+   never committed (the path whitelist + `git reset -q HEAD .legion` above already
+   guarantee it). `git commit -m` stays fine for a short one-line subject.
+
 3. **Compose the PR body** → write `.legion/battles/<id>/pr-body.md` from the
    artifacts: intent/scope (`spec.md`), approach (`plan.md`), and the gate verdicts
    (review/test/security `accept`). **Written in French** (identifiers & file names
