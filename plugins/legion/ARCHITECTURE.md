@@ -65,10 +65,31 @@ et produit le sien. Un `revise`/`reject` d'une gate de revue (reviewer/test/secu
 reboucle vers **BUILD** — jamais vers l'architect (l'archi est verrouillée pendant
 le build).
 
-**Auto-enchaînement BUILD → gates** : un build `build_ok` **sans warning** enchaîne
-directement la cascade `review → test → security`, jusqu'au premier `revise`/`reject`
-ou jusqu'à `deliver` (exclu : la livraison reste manuelle/confirmée). Des warnings =
-remarques → pas d'enchaînement, l'humain tranche.
+**Run autonome (défaut).** Après l'approbation du plan (unique point d'arbitrage), le
+pipeline enchaîne automatiquement BUILD → gates → DELIVER → ouverture de la PR, sans
+rendre la main — sauf escalade (taxonomie §12). En mode `step` (`--step` sur `start`),
+chaque transition de phase rend la main (comportement pas-à-pas).
+
+**Warnings non bloquants.** Un build `build_ok` — avec ou sans warnings — enchaîne
+directement la cascade `review → test → security`. Les warnings sont loggés dans
+`build-report.md` et relayés à l'utilisateur, puis la cascade continue sans
+interruption. Seul `build_ok == false` bloque (→ boucle d'auto-correction, §12).
+Quand toutes les gates requises sont `done`, la cascade enchaîne automatiquement vers
+DELIVER (en mode `autonomous`).
+
+**DELIVER sans OK bloquant (mode `autonomous`).** Quand toutes les gates sont `done`
+et le mode est `autonomous`, l'orchestrateur compose `pr-body.md`, pousse et ouvre la
+PR **sans attendre d'OK explicite** — l'humain relit le code sur GitHub. Les **filets
+§G.0** (`base en retard sur origin`, remote vide, fichier hors whitelist, `.gitignore`
+auto-induit) sont la **dernière barrière** : chacun, s'il se déclenche, **escalade**
+(cas 4 de la taxonomie — §12). La discipline de staging (whitelist de chemins, `git
+reset -q HEAD .legion`) reste stricte et non affaiblie, quel que soit le mode. En mode
+`step`, le comportement historique est maintenu : afficher l'effet sortant et attendre
+un OK explicite.
+
+**L'autonomie s'arrête à l'ouverture de la PR.** La phase ADDRESS (commentaires humains
+post-livraison) garde sa confirmation humaine — elle est hors scope de cet enchaînement
+autonome.
 
 **Boucle ADDRESS** (optionnelle, post-deliver, §11) : une fois la PR ouverte, les
 commentaires de revue humaine sont traités par `/battle address` — la gate
@@ -351,3 +372,74 @@ résolvent tous deux le fil (`resolveReviewThread`), une `question` reste ouvert
 résolution est **revérifiée** après coup (re-fetch) avant d'être persistée — on ne
 fait jamais confiance à la valeur qu'on a voulu écrire. État :
 `phases.address = { status, round, threads:[{id, target, kind, commit, resolution}] }`.
+
+---
+
+## 12. Run autonome & taxonomie d'escalade
+
+### Principe directeur
+
+Après l'approbation du plan (unique point d'arbitrage), l'orchestrateur enchaîne
+BUILD → gates → DELIVER → ouverture de la PR **sans interaction humaine intermédiaire**,
+sauf escalade. L'humain devient un **arbitre**, pas un opérateur qui relance chaque
+étape.
+
+**Frontière de l'autonomie :** l'enchaînement autonome s'arrête à l'ouverture de la PR.
+La phase ADDRESS (commentaires humains post-livraison) garde sa confirmation humaine.
+
+### Mode d'exécution (`run.mode`)
+
+`run.mode` ∈ `"autonomous"` | `"step"` — persisté dans `battle.json`.
+
+- `"autonomous"` (défaut) : enchaînement automatique de toutes les phases après
+  l'approbation du plan.
+- `"step"` : chaque transition de phase rend la main (comportement des battles
+  antérieures à la feature). Activé par `--step` sur `start`.
+
+**Rétrocompatibilité :** un champ `run` absent dans `battle.json` (battle antérieure)
+équivaut à `"autonomous"` par défaut — aucune battle en cours n'est cassée.
+
+**`--step` vs `--auto` — deux dimensions orthogonales :**
+- `--step` sur `start` (= `run.mode`) : **cadence d'arrêt** de l'orchestrateur
+  entre les phases.
+- `--auto` sur `build` (= délégation builder) : **délégation de la production de code**
+  à un sous-agent `builder` isolé.
+Ces deux flags sont indépendants et ne se confondent pas.
+
+### Taxonomie d'escalade (liste close)
+
+L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants.
+Toute correction déterministe se fait sans lui.
+
+| Cas | Déclencheur | Action |
+|-----|-------------|--------|
+| **1. `reject`** | Une gate rend un verdict `reject`. | Escalade immédiate, zéro tentative. |
+| **2. Boucle non convergente** | FAIL-count stable/en hausse après une tentative, ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL-count avant/après, tentatives. |
+| **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`). | Escalade : re-planification nécessaire. |
+| **4. Filets DELIVER** | Base locale en retard sur `origin`, remote vide, fichier hors whitelist de commit, `.gitignore` auto-induit. | Escalade : résoudre le filet, puis DELIVER reprend. |
+| **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
+
+Hors liste = pas d'escalade.
+
+### Boucle d'auto-correction bornée (deux niveaux distincts)
+
+| Niveau | Acteur | Budget | Unité mesurée | Décision d'escalade |
+|--------|--------|--------|---------------|---------------------|
+| Interne (build-fix) | `builder` | 3 tentatives | Erreurs `dotnet build` | Le builder rapporte `build_ok: false`, **ne décide pas d'escalader** |
+| Externe (re-gate) | Orchestrateur | 2/gate, 6 au global (maximums fermes) | FAIL-count du `gate-*.md` | L'orchestrateur escalade si non-progrès ou plafond |
+
+Les deux budgets sont **non additionnés** : un `build_ok: false` du builder après ses 3
+essais **compte pour 1 tentative** de la boucle orchestrateur. La boucle interne repart
+de 0 à chaque nouvelle demande de correction.
+
+**Détection de progrès :** progrès = baisse du FAIL-count du `gate-*.md` entre deux
+tentatives. FAIL-count stable ou en hausse = non-progrès → escalade immédiate (pas
+d'attente du plafond).
+
+### Choix ouverts exposés par l'architecte
+
+L'architecte documente dans `plan.md` (section « Choix ouverts à arbitrer ») chaque
+décision de conception où plusieurs options valides existaient. L'objectif est de
+résoudre un maximum d'options **en amont** pour qu'aucune ne reste à arbitrer pendant
+le run. C'est cette section que l'orchestrateur présente à l'humain au point
+d'arbitrage unique (approbation du plan).

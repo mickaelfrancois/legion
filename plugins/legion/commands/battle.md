@@ -158,6 +158,20 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    profile. Flip `phases.think.status` from `in_progress` to `done`, everything
    else `pending`, `phases.plan.status = "in_progress"`.
 
+   **Write the `run` block.** Set `run.mode` based on the flag passed to `start`:
+   - `--step` → `run.mode = "step"` (pas-à-pas : chaque transition de phase rend la
+     main, comportement des battles antérieures à la feature).
+   - Absent (default) → `run.mode = "autonomous"` (enchaînement autonome après
+     l'approbation du plan).
+   Initialize `run.autocorrect = { "per_gate": {}, "total": 0 }`.
+
+   > **`--step` vs `--auto` : deux dimensions orthogonales.**
+   > `--step` sur `start` (= `run.mode`) pilote la **cadence d'arrêt** de
+   > l'orchestrateur entre les phases. `--auto` sur `build` (= délégation au
+   > sous-agent `builder`) pilote la **délégation de la production de code**. Les deux
+   > sont indépendants : on peut avoir un run `--step` avec ou sans `--auto`, et
+   > inversement. Ne pas confondre.
+
    **Derive `guard.allow` from the real solution layout — never ship the
    placeholder blind.** The schema's `["src/**","tests/**"]` is a *placeholder*: on a
    repo whose projects sit at the root (e.g. `HttpForge/`, `HttpForge.Tests/`) it
@@ -180,11 +194,24 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    already on disk — do **not** re-write it from a returned blob. Once delivery is
    confirmed, update `battle.json`: `phases.plan.verdict` and `phases.plan.status`.
    Read `plan.md` from disk only if you need its detail to report.
-   - `accept` / `accept_with_opportunity` → `status = "done"`; report the plan
-     summary and any opportunity, then **stop and hand back to the user** (BUILD
-     is a separate step).
    - `revise` / `reject` → `status = "blocked"`; relay the FAILs verbatim and ask
      the user how to adjust the spec. Do **not** advance.
+   - `accept` / `accept_with_opportunity` → `status = "done"`. Lire `plan.md` pour
+     présenter le résumé, les éventuelles opportunités, et la section
+     **« Choix ouverts à arbitrer »** (si elle est présente). Puis demander
+     **l'unique approbation explicite** de l'humain — toujours obligatoire, même si
+     aucun choix ouvert n'est listé :
+
+     > « Le plan est prêt. Voici le résumé + les choix ouverts. **OK pour lancer le
+     > build ?** »
+
+     **Sur OK** : enchaîner directement vers §D (BUILD) dans la même session, en
+     annonçant l'enchaînement — ne plus rendre la main. En mode `--step`, rendre la
+     main après l'OK (comportement pas-à-pas, cf. §B).
+
+     **Sur modification demandée** : relayer les ajustements et demander à l'humain de
+     corriger `spec.md` avant de relancer PLAN. Ce cas est en amont du point
+     d'arbitrage et reste légitime.
 
 7. **Report** the battle id, the phase statuses, and the next action.
 
@@ -196,6 +223,24 @@ Read `.legion/battles/<battle-id>/battle.json`. Re-point `.legion/active-battle`
 to this id (so the guard hooks track the resumed battle). Summarize phase
 statuses and the last verdict. Announce the next pending phase and what it needs.
 Do not re-run completed phases unless asked.
+
+**Lire et respecter `run.mode`.** Le mode persisté dans `battle.json.run.mode`
+détermine le comportement de la session reprise :
+- `"step"` → chaque transition de phase rend la main (comportement pas-à-pas) : une
+  battle reprise en mode `step` **ne s'emballe pas**, même si les phases précédentes
+  s'étaient enchaînées automatiquement.
+- `"autonomous"` → ré-enchaîner depuis la phase pending sans demander d'OK redondant
+  (le point d'arbitrage a déjà eu lieu avant la première exécution de BUILD).
+- Champ `run` absent (battle démarrée avant la feature) → se comporter comme
+  `"autonomous"` par défaut. N'écrire pas rétroactivement le champ si la battle est
+  en cours de progression — ne casser aucune battle existante.
+
+> **Tableau mode × transition → rend la main ?**
+>
+> | Mode | Après approbation plan | Après BUILD | Après chaque gate | Avant push/PR (DELIVER) |
+> |------|------------------------|-------------|-------------------|------------------------|
+> | `autonomous` | Oui (point d'arbitrage) | Non — cascade | Non — cascade | Non (filets = barrière) |
+> | `step` | Oui | Oui | Oui | Oui (CONFIRM §G.4) |
 
 ---
 
@@ -239,14 +284,14 @@ dependent slices sequential. Collect each
 After build (either mode), **classify the result and persist `battle.json`
 immediately** — for `all`, only after **every targeted slice** has a result:
 - **any `build_ok == false`** → `phases.build.status = "blocked"`; relay the
-  residual errors and stop. Do not advance.
-- **all `build_ok` but total `warnings > 0`** → `phases.build.status = "done"`
-  (it compiles), but **do not auto-advance**: warnings are remarks. Report the
-  touched files **and the warnings**, then hand back — fix them and re-build, or
-  run `/legion:battle review` explicitly to proceed as-is.
-- **all `build_ok` and `warnings == 0` (clean)** → `phases.build.status = "done"`,
-  then **auto-advance straight into §E** (the gate cascade) without waiting for a
-  separate command. Announce the chaining so the user sees it.
+  residual errors. En mode `autonomous`, entrer dans la boucle d'auto-correction
+  (§E — boucle de `revise`) ; en mode `step`, stop. Do not advance until resolved.
+- **all `build_ok` (with or without warnings)** → `phases.build.status = "done"`.
+  Warnings are **non-blocking remarks**: log them (in `build-report.md` and in the
+  relay to the user), then **auto-advance straight into §E** (the gate cascade)
+  without waiting for a separate command — exactly as for a clean build. Announce
+  the chaining and the warning count so the user sees them. En mode `step`, rendre
+  la main après avoir annoncé les warnings, sans enchaîner automatiquement.
 
 Persisting the phase status is **not optional**: a build that produced code but
 left `phases.build.status` at `pending`/`in_progress` is a bug — always write the
@@ -311,15 +356,38 @@ pending even though the gate ran.
 3. **Branch on the verdict** (cascade):
    - `accept` / `accept_with_opportunity` → `status = "done"`, continue to the
      next gate. Log any opportunity.
-   - `revise` / `reject` → `status = "blocked"`, **stop the chain**. Relay the
-     verdict's one-line RAISON and hand back: the fix loops back to BUILD
-     (`/legion:battle build`), not forward. **Pass the next builder the artifact
-     path** (`gate-review.md` / `gate-test.md`) so it reads the FAIL detail from
-     disk — do not pull the full gate content into this session just to brief it
-     (that would refill the context the confinement is meant to spare).
+   - `reject` → `status = "blocked"`, **escalade immédiate** (cas 1 de la taxonomie).
+     Relay the verdict's one-line RAISON and hand back — zero tentative de correction.
+     La replanification est requise.
+   - `revise` → `status = "blocked"`. En mode `step`, relay the RAISON and hand back
+     (the fix loops back to BUILD). En mode `autonomous`, entrer dans la **boucle
+     d'auto-correction** :
 
-When all required review/test/security gates are `done`, announce readiness for
-DELIVER.
+     **Boucle d'auto-correction** (mode `autonomous` uniquement) :
+     a. Incrémenter `run.autocorrect.per_gate[<gate>]` et `run.autocorrect.total`.
+     b. Vérifier les bornes **avant** de relancer :
+        - Si `run.autocorrect.per_gate[<gate>] >= 2` → **escalade** (cas 2 : plafond
+          par gate atteint, 2 tentatives maximum).
+        - Si `run.autocorrect.total >= 6` → **escalade** (cas 2 : plafond global
+          atteint, 6 tentatives maximum au global).
+     c. **Détecter le progrès** : comparer le nombre de FAIL du nouveau `gate-*.md`
+        avec celui du run précédent. Si le FAIL-count est **stable ou en hausse** →
+        **escalade immédiate** (cas 2 : non-progrès). Un FAIL-count en baisse = progrès,
+        on continue.
+     d. Passer au builder le **chemin de l'artefact** `gate-*.md` (lire depuis le
+        disque, ne pas injecter le contenu dans ce contexte) et relancer BUILD pour
+        cette slice. Puis re-invoquer la gate. Retour à l'étape (a).
+
+     **Escalade** : `status = "blocked"`, relayer le détail du blocage (gate, FAIL-count,
+     tentatives effectuées), rendre la main. **Pass the builder the artifact path**
+     (`gate-review.md` / `gate-test.md`) so it reads the FAIL detail from disk — do not
+     pull the full gate content into this session just to brief it (that would refill
+     the context the confinement is meant to spare).
+
+When all required review/test/security gates are `done`: in mode `autonomous`,
+**enchaîner directement vers §G (DELIVER)** sans attendre une commande séparée —
+annoncer l'enchaînement. En mode `step`, annoncer la disponibilité pour DELIVER et
+rendre la main.
 
 ### Non-.NET stack — gate adaptation
 
@@ -342,12 +410,52 @@ fall back to .NET tooling:
 The orchestrator owns this: the agents default to .NET; it is the gate prompt that
 carries the non-.NET deviation per battle.
 
+---
+
+## §F — Autonomie & escalade
+
+### Taxonomie d'escalade (liste close)
+
+L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants.
+Toute correction déterministe se fait sans lui.
+
+| Cas | Déclencheur | Action |
+|-----|-------------|--------|
+| **1. `reject`** | Une gate rend un verdict `reject` (régression majeure, redesign requis). | Escalade **immédiate**, zéro tentative de correction. Relayer le verdict + RAISON. |
+| **2. Boucle non convergente** | FAIL-count stable/en hausse après une tentative, ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL-count avant/après, tentatives effectuées. |
+| **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`). | Escalade : re-planification nécessaire. Ne pas modifier `plan.md` en cours de run. |
+| **4. Filets DELIVER déclenchés** | Base locale en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit à arbitrer (§G.0). | Escalade : résoudre le filet d'abord, puis DELIVER peut reprendre. |
+| **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë (§A.preflight). | Escalade : résoudre l'environnement avant toute battle. |
+
+> **Hors liste = pas d'escalade.** Toute autre situation (warning de build,
+> `accept_with_opportunity`, opportunité de découpe) est résolue automatiquement.
+
+### Budgets de boucle (deux niveaux distincts)
+
+Les deux budgets sont **indépendants et non additionnés** :
+
+- **Boucle interne `build-fix` du builder** : 3 tentatives sur `dotnet build`.
+  Gérée par le builder lui-même ; le builder ne décide pas d'escalader (il rapporte
+  `build_ok: false` si son budget est épuisé).
+- **Boucle orchestrateur (re-gate)** : 2 tentatives par gate (maximum ferme), plafond global de 6 tentatives au global (maximum ferme)
+  sur le run. Un `build_ok: false` du builder après ses 3 essais **compte pour
+  1 tentative** de la boucle orchestrateur.
+
+La boucle orchestrateur opère un cran au-dessus : elle borne les **re-gate**, pas
+les re-builds internes du builder.
+
+---
+
 ## §G — deliver (branch, commit, push, PR) — final step
 
 Precondition: every required review/test/security gate `done`. This step **writes
-and pushes** — it runs with **confirmation before push/PR** (user decision). Once
-the PR is open, hand back: the human reviews it. New review comments are handled by
-`/legion:battle address` (§H, repeatable); when the PR is stabilized,
+and pushes**. En mode `autonomous` (chemin heureux), la PR est composée, poussée et
+ouverte **sans OK bloquant** — l'humain relit le code sur GitHub. Les filets §G.0
+(ci-dessous) sont la **dernière barrière** : chacun, s'il se déclenche, **escalade**
+(cas 4 de la taxonomie — §F). En mode `step`, le comportement historique est
+maintenu : afficher l'effet sortant et attendre un OK explicite (§G.4 ci-dessous).
+Once the PR is open, hand back: the human reviews it. New review comments are handled
+by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
 `/legion:retro` closes the battle.
 
 0. **Pre-branch safety nets.** Before branching, two checks:
@@ -423,9 +531,15 @@ the PR is open, hand back: the human reviews it. New review comments are handled
    merging the PR auto-closes the issue. This is the payoff of the artifact
    pipeline — the PR documents itself.
 
-4. **CONFIRM (the full outward sequence)** — show the user **everything that will
-   reach the remote under one OK**: target branch, the commit message, `git diff
-   --stat`, the PR title/target. **Wait for explicit OK.** Do not push before.
+4. **CONFIRM (mode `step` uniquement)** — En mode `step`, avant de pousser, afficher
+   à l'utilisateur **tout l'effet sortant** : branche cible, message de commit,
+   `git diff --stat`, titre/cible de la PR. **Attendre un OK explicite.** Ne pas
+   pousser avant.
+
+   En mode `autonomous`, sauter ce CONFIRM : passer directement à l'étape 5. Les
+   filets §G.0 sont la seule barrière — la discipline de staging (whitelist de chemins,
+   `git reset -q HEAD .legion`) reste intacte et **non affaiblie** : elle s'applique
+   quelle que soit la valeur de `run.mode`.
 
 5. **Push & open the PR**:
    ```bash
