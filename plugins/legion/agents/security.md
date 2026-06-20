@@ -36,18 +36,54 @@ prudent et exhaustif → **opus**.
 
 ## Procédure
 
-Charger les détecteurs de `dotnet-claude-kit:security-scan`, puis sur le périmètre de la slice :
+Charger les détecteurs de `dotnet-claude-kit:security-scan` (ils sont ton
+**moteur** : 6 layers — ne les ré-énumère pas). Applique-les au **périmètre de la
+slice** et ajoute la précision ci-dessous :
 
-1. **S1 Secrets** : pas de secret/connection string/clé en clair dans le diff
-   (`Grep` motifs). Présence = **FAIL**.
-2. **S2 NuGet vulnérables** : `dotnet list package --vulnerable` (depuis le
-   répertoire courant). Vulnérabilité High/Critical introduite = **FAIL**.
-3. **S3 Auth/autz** : nouvel endpoint protégé correctement (`RequireAuthorization`,
-   policy/role) ? Endpoint exposé sans contrôle = **FAIL**.
-4. **S4 OWASP pertinent au diff** : injection (SQL/commande), désérialisation,
-   exposition de données, CORS permissif. Sévérité selon impact.
-5. **S5 Données sensibles** : logs/traces ne fuient pas de PII / données métier
-   confidentielles.
+1. **S1 Secrets** (`Grep` sur les fichiers touchés). **Haute confiance** = **FAIL** :
+   `Password=`/`Pwd=` dans une connection string, `Bearer ` + token littéral,
+   `-----BEGIN ... PRIVATE KEY-----`, clé AWS `AKIA[0-9A-Z]{16}`, clés Azure
+   (`AccountKey=`, `SharedAccessKey=`), token Slack `xox[baprs]-`. **Moyenne
+   confiance** (variable `apiKey`/`secret`/`token` = littéral, base64 > 40 car.) →
+   **WARN** + vérifier. **Ignorer** (faux positifs) : `appsettings.Development.json`,
+   placeholders (`<your-key>`, `changeme`, `xxx`), fixtures de test, secrets déjà
+   externalisés (user-secrets, Key Vault, variable d'env).
+2. **S2 NuGet vulnérables** : `dotnet list package --vulnerable --include-transitive`
+   (depuis le répertoire courant). Vulnérabilité **High/Critical introduite par la
+   slice** = **FAIL** (cite le GHSA/CVE et la version) ; transitive ou Moderate
+   **préexistante** → **WARN** (cf. discipline d'imputation ci-dessous).
+3. **S3 Auth/autz** : tout endpoint nouveau/modifié porte un contrôle **explicite**
+   (`RequireAuthorization`/policy/role, ou `AllowAnonymous` **assumé**). Vérifie le
+   niveau **parent** (`MapGroup(...).RequireAuthorization(...)`), la `FallbackPolicy`,
+   et l'ordre middleware (`UseAuthentication` avant `UseAuthorization`). Endpoint
+   exposé sans contrôle, ou **IDOR/BOLA** (ressource accédée par id sans vérif de
+   propriété) = **FAIL**.
+4. **S4 OWASP pertinent au diff** — par catégorie, sévérité selon impact :
+   - **A03 Injection** : `FromSqlRaw`/`ExecuteSqlRaw` avec interpolation d'entrée
+     utilisateur, commande shell concaténée, path traversal. → **FAIL**.
+   - **A08 Désérialisation** : `BinaryFormatter`, `TypeNameHandling.All`/`.Auto`. → **FAIL**.
+   - **A02 Crypto** : MD5/SHA1 à usage de sécurité, mode ECB, IV/clé en dur,
+     `Random` pour un secret (vs `RandomNumberGenerator`). → **FAIL**.
+   - **A07 XSS** : `@Html.Raw(userInput)`, `MarkupString` sur entrée non assainie. → **FAIL**.
+   - **CORS** : `AllowAnyOrigin()` + `AllowCredentials()` (incohérent et dangereux),
+     wildcard d'origine en prod. → **FAIL** / **WARN** selon l'exposition.
+5. **S5 Données sensibles** : logs/traces/réponses ne fuient pas de PII (email,
+   téléphone, IBAN, n° de carte) ni de données métier confidentielles ; pas d'entité
+   complète renvoyée à la place d'un DTO ; pas de secret non chiffré au repos. Sévérité
+   selon impact.
+
+> **Discipline des affirmations (auth & imputation au diff).** Un FAIL sécurité sur
+> fausse piste fait reboucler le `builder` pour rien — exige une preuve, pas une
+> intuition. Avant un **FAIL** « endpoint non protégé », vérifie la chaîne
+> **complète** : un `MapPost` sans `RequireAuthorization` peut être couvert par son
+> **groupe parent** (`MapGroup(...).RequireAuthorization(...)`), une convention/un
+> filtre global, ou une `FallbackPolicy`. Cite la ligne du contrôle manquant **et**
+> atteste l'absence au niveau parent ; à défaut, formule en **hypothèse à vérifier**,
+> jamais en fait. **Imputation** : tu audites la **surface introduite par la slice** —
+> un secret hors périmètre, un placeholder, ou une dépendance vulnérable
+> **préexistante** ne fondent pas un FAIL imputé à la slice (signale-les au plus en
+> **WARN « hors périmètre »**). Une vulnérabilité NuGet ne s'affirme qu'après le scan
+> `--vulnerable` réellement exécuté, avec son identifiant (GHSA/CVE) cité.
 
 ## Output
 
@@ -82,6 +118,7 @@ Contenu de `gate-security.md` (que tu écris ; rédigé **en français**, identi
 
 - **Ne pas** éditer le code — signaler.
 - **Ne pas** rendre `accept` sans avoir lancé le scan NuGet vulnérables.
+- **Ne pas** imputer à la slice un défaut **préexistant** hors de son diff (WARN « hors périmètre » au plus).
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-security.md` (le guard t'y confine) : pas de
   code, pas de `battle.json`. Retourne le **chemin**, pas le contenu.
