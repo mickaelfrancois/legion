@@ -37,18 +37,18 @@ back as a **« Cadrage »** section on the issue. The payoff is downstream:
      This title/body/labels is the rough idea you will sharpen.
    - **No argument / not an issue** → ask the user which issue number to recon. If
      there is genuinely no issue yet (just an idea in the conversation), say so and
-     offer a fallback: run the grilling now, then **propose** `gh issue create` at the
+     offer a fallback: run the recon now, then **propose** `gh issue create` at the
      end so a battle has something to start from. Pass the body via a `--body-file`
      temp file and **confirm first** (same discipline as §4) — the create path inherits
      the same cp1252-safe, confirmed-write behaviour as the edit path.
 2. **Check `gh`.** Run `gh auth status`. If `gh` is missing or unauthenticated →
-   **degrade gracefully**: still run the full grilling, but at the end **print the
+   **degrade gracefully**: still run the full recon, but at the end **print the
    « Cadrage » block ready to paste** instead of editing the issue. Warn the user once.
 3. **Reading files.** Use the `Read` tool, never `cat`/`type` (a Windows cp1252 console
    crashes on non-ASCII with `UnicodeEncodeError`). Never `cd`; operate from the
    current directory.
 
-## §2 — The grilling (core loop)
+## §2 — The recon (core loop)
 
 Interview the user **relentlessly** about the feature until you reach a **shared
 understanding**. Walk down each branch of the decision tree, resolving dependencies
