@@ -100,6 +100,7 @@ automatiquement `review → test → security` jusqu'au premier `revise` ou jusq
 
 | Commande | Ce qu'elle fait |
 |---|---|
+| `/legion:issues` | *(avant THINK)* Liste les issues GitHub ouvertes du repo courant (`#id  titre  [labels]`) ; rappelle `/legion:recon <n>` et `/legion:battle start <n>`. |
 | `/legion:recon <issue>` | *(avant THINK, optionnel)* Affine une issue floue par un interrogatoire serré + exploration du repo, puis ajoute une section « Cadrage » à l'issue (confirmation avant écriture). |
 | `/legion:battle start <issue\|slug>` | Démarre une battle. `<issue>` numérique = issue GitHub (tirée auto) ; sinon libellé libre. |
 | `/legion:battle build [slice\|all] [--auto]` | Code une slice (toi en direct, ou l'agent builder). |
