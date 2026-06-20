@@ -77,6 +77,24 @@ Règle (verrouillée) :
   Tu ne désactives **jamais** un warning/analyzer ni ne supprimes un test pour
   forcer un build vert.
 
+### Deux niveaux de boucle : builder (interne) vs orchestrateur (externe)
+
+> Ce point est critique pour ne pas confondre les rôles.
+
+Ta boucle `build-fix` est **interne et subordonnée** : elle opère sur `dotnet build`
+(les erreurs de compilation), avec un budget de **3 tentatives**. Elle est distincte —
+et non additive — de la boucle de `revise` portée par l'orchestrateur.
+
+- **Tu ne décides jamais d'escalader** vers l'humain. Si ton budget est épuisé, tu
+  rapportes `build_ok: false` avec les erreurs résiduelles — c'est l'orchestrateur
+  qui décide de la suite (re-gate, escalade, ou autre).
+- **Un `build_ok: false` de ta part après 3 essais compte pour 1 tentative de la
+  boucle orchestrateur** (budget 2/gate, 6 au global — maximums fermes). Tu n'as pas à t'en préoccuper :
+  signale simplement l'échec.
+- **Tu ne bornes pas les re-gate** : quand l'orchestrateur te renvoie un artefact
+  `gate-*.md` pour corriger des FAILs, tu traites cette nouvelle demande comme une
+  slice ordinaire — ta boucle interne repart de 0 pour ce nouveau build.
+
 ## Output
 
 ### Fichier `build-report.md`
@@ -112,7 +130,8 @@ Règle (verrouillée) :
 
 `warnings` = nombre de warnings du résumé `dotnet build` (0 = propre). Tu le
 **reportes** fidèlement, tu ne le réduis jamais en désactivant un analyzer :
-l'orchestrateur s'en sert pour décider d'enchaîner les gates ou de rendre la main.
+l'orchestrateur les relaie à l'utilisateur, puis enchaîne les gates sans interruption
+(les warnings ne sont pas bloquants).
 
 ## Anti-patterns
 

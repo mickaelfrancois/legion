@@ -56,6 +56,20 @@ L'orchestrateur fournit dans le prompt :
    couches touchées et pourquoi), étapes ordonnées **au niveau fichier**
    (découpables en slices pour le `builder`), et une **matrice de tests** (cas
    nominal + cas limites issus des critères d'acceptation).
+
+   **Exposer les choix ouverts (obligatoire).** Pour chaque endroit où plusieurs
+   options valides existaient et où tu as dû figer une décision, documenter
+   explicitement dans une section **« ## Choix ouverts à arbitrer »** :
+   - Les options envisagées (au moins Option A et Option B).
+   - La recommandation (quelle option tu as retenue) et la raison.
+
+   L'objectif est de **résoudre un maximum d'options en amont** pour qu'aucune ne
+   reste à arbitrer pendant le run. Si toutes les décisions sont évidentes et sans
+   ambiguïté (aucune option valide concurrente), la section peut être vide ou absente
+   — mais elle doit **toujours figurer dans le gabarit** pour que l'orchestrateur
+   puisse la présenter au point d'arbitrage. C'est cette section que l'orchestrateur
+   lit et présente à l'humain lors de l'approbation du plan (slice-2 de la doctrine).
+
 5. **Écrire `plan.md`** dans le dossier de la battle, puis **rendre le verdict**
    (cascade partagée) + le **chemin** de l'artefact.
 
@@ -116,6 +130,19 @@ ARTIFACT: .legion/battles/<id>/plan.md
 |-----|------|---------|
 | nominal ... | unit/integration | ... |
 | limite ...  | ... | ... |
+
+## Choix ouverts à arbitrer
+
+> Ces décisions de conception ont été figées lors de la planification. Elles doivent
+> être confirmées ou réorientées à l'approbation du plan.
+> Si aucune option valide concurrente n'existait, indiquer « Aucun — toutes les
+> décisions sont sans ambiguïté ».
+
+### C1 — <titre du choix>
+<Description du problème de conception. Pourquoi plusieurs options existent.>
+- **Option A** : <description> — avantages / inconvénients.
+- **Option B** : <description> — avantages / inconvénients.
+**Recommandation : A** — <raison en une ligne>.
 ```
 
 ## Anti-patterns

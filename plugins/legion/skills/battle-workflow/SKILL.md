@@ -31,6 +31,13 @@ Each step **hands off a markdown artifact** to the next. A gate reads the
 upstream artifact, judges it, and emits a verdict. The pipeline does **not**
 advance on `revise` or `reject` — a fix loops back to BUILD.
 
+**Point d'arbitrage unique.** Le seul rendez-vous garanti avec l'humain est
+l'**approbation du plan** (après PLAN, avant BUILD). L'orchestrateur présente le
+résumé du `plan.md` avec ses choix ouverts et attend un OK explicite. Toujours
+obligatoire, même sans choix ouvert. En mode `autonomous` (défaut), sur OK,
+l'orchestrateur enchaîne directement BUILD → gates → DELIVER sans rendre la main —
+sauf escalade. En mode `step`, chaque transition de phase rend la main.
+
 **Optional pre-THINK: recon.** Before `start` consumes a rough issue, the `recon`
 skill (`/legion:recon <issue>`) can sharpen it first — a relentless interview (one
 question at a time, exploring the repo to answer its own questions) that appends a
@@ -45,12 +52,39 @@ back through BUILD/REVIEW/TEST, replies and resolves the threads — one round p
 comment wave. No comments → the phase never exists; `/retro` closes the battle as
 usual.
 
-**Auto-advance on a clean build.** A build that is `build_ok` with **0 warnings**
-chains straight into the gate cascade `review → test → security` (no separate
-command), stopping at the first `revise`/`reject` or before `deliver` (delivery
-is always a manual, confirmed action). A build with **warnings** does *not*
-auto-advance — warnings are remarks; the user fixes them or runs `/battle review`
-explicitly. Errors (`build_ok == false`) block as before.
+**Auto-advance on a successful build (warnings non bloquants).** A build that is
+`build_ok` — with **or without warnings** — chains straight into the gate cascade
+`review → test → security` (no separate command) in `autonomous` mode. Warnings are
+**non-blocking remarks**: they are logged in `build-report.md` and relayed to the user,
+then the cascade continues uninterrupted. Only `build_ok == false` blocks the cascade
+(→ boucle d'auto-correction). When all required gates are `done`, the cascade chains
+automatically into DELIVER (in `autonomous` mode). In `step` mode, each transition
+hands back to the user.
+
+## Autonomous run & escalation
+
+### Taxonomie d'escalade (liste close)
+
+L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants :
+
+| Cas | Déclencheur | Action |
+|-----|-------------|--------|
+| **1. `reject`** | Une gate rend un verdict `reject`. | Escalade immédiate, zéro tentative. |
+| **2. Boucle non convergente** | FAIL-count stable/en hausse, ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail du blocage. |
+| **3. Déviation du plan** | La correction sort du périmètre de `plan.md` ou `guard.allow`. | Escalade : re-planification nécessaire. |
+| **4. Filets DELIVER** | Base en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit. | Escalade : résoudre le filet d'abord. |
+| **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
+
+Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiquement.
+
+### Budgets de boucle
+
+- **Builder (boucle interne `build-fix`)** : 3 tentatives sur `dotnet build`. Le
+  builder ne décide pas d'escalader — il rapporte `build_ok: false`. Un `build_ok:
+  false` après 3 essais **compte pour 1 tentative** de la boucle orchestrateur.
+- **Orchestrateur (re-gate)** : 2 tentatives par gate (maximum ferme), plafond global de 6 tentatives au global (maximum ferme).
+  Progrès = baisse du FAIL-count entre deux tentatives ; stable ou en hausse →
+  escalade immédiate.
 
 ## Two natures of actor
 
@@ -100,13 +134,25 @@ Gates are optional per battle **profile** (`feature` / `hotfix` / `security` /
 
 ## DELIVER
 
-`/battle deliver` (confirmation before push) branches `<me>/<token>` → commit
-(Conventional Commits subject + co-author trailer) → compose `pr-body.md` from the
-artifacts → push → open the PR via `gh pr create`. For a numeric issue, the PR body
-ends with **`Closes #<n>`** so merging auto-closes the issue. Best-effort, non-blocking:
-post a short business-facing comment to the issue (`wi-comment.md`) via
-`gh issue comment`. Then the human reviews — review comments are handled by
-`/battle address` (ADDRESS, below), and `/retro` closes the battle once stabilized.
+`/battle deliver` branches `<me>/<token>` → commit (Conventional Commits subject +
+co-author trailer) → compose `pr-body.md` from the artifacts → push → open the PR via
+`gh pr create`. For a numeric issue, the PR body ends with **`Closes #<n>`** so merging
+auto-closes the issue.
+
+**En mode `autonomous` (chemin heureux)** : la PR est composée, poussée et ouverte
+**sans OK bloquant** — l'humain relit le code sur GitHub. Les **filets §G.0** (base en
+retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit) sont
+la **dernière barrière** : chacun, s'il se déclenche, **escalade** (cas 4). La discipline
+de staging (whitelist de chemins, `git reset -q HEAD .legion`) reste stricte et non
+affaiblie, quel que soit le mode.
+
+**En mode `step`** : afficher l'effet sortant et attendre un OK explicite avant de
+pousser.
+
+Best-effort, non-blocking: post a short business-facing comment to the issue
+(`wi-comment.md`) via `gh issue comment`. Then the human reviews — review comments are
+handled by `/battle address` (ADDRESS, below), and `/retro` closes the battle once
+stabilized.
 
 ## ADDRESS (optional, repeatable, post-deliver)
 
@@ -120,6 +166,18 @@ thread — verifying the resolution actually stuck server-side before persisting
 Repeatable: one **round** per comment wave (`phases.address.round`). Artifact:
 `pr-feedback.md`. GitHub has no `fixed`/`wontFix` distinction — both resolve the
 thread; a `question` is left unresolved for the author.
+
+## Vocabulaire d'autonomie
+
+> Ces termes sont définis ici une seule fois ; les autres sections y réfèrent sans les
+> redéfinir.
+
+| Terme | Définition |
+|---|---|
+| **Run autonome** | Enchaînement BUILD → gates → DELIVER déclenché automatiquement après l'approbation du plan, sans intervention humaine intermédiaire, sauf escalade. |
+| **Arbitrage** | Décision que seul l'humain peut trancher (taxonomie d'escalade ci-dessous). L'orchestrateur s'arrête et rend la main uniquement dans ces cas. |
+| **Boucle d'auto-correction** | Sur `revise` d'une gate ou `build_ok == false`, l'orchestrateur re-build et re-gate sans rendre la main, jusqu'à convergence ou épuisement du budget (2 tentatives/gate, 6 tentatives au global — maximums fermes). |
+| **Escalade** | L'orchestrateur rend la main à l'humain avec le détail du blocage. Toujours motivée par un cas de la taxonomie d'escalade. |
 
 ## State layout
 
@@ -158,6 +216,17 @@ run time**):
   // nothing on a root-projects repo and silently blocks every builder edit.
   "guard": { "allow": ["src/**", "tests/**"], "deny": [], "careful": false },
   "stack": { "kind": ".net", "build_target": null, "test_target": null },  // *_target: explicit csproj when the repo has NO .sln; null ⇒ run dotnet from root
+  // run — mode d'exécution de la battle (écrit par /battle start).
+  // Absent (battle antérieure à la feature) ⇒ "autonomous" par défaut : aucune battle
+  // en cours n'est cassée par l'ajout de ce champ.
+  // --step sur start écrit run.mode = "step" (comportement pas-à-pas, cf. §B/§D/§E/§G).
+  "run": {
+    "mode": "autonomous",               // "autonomous" | "step"
+    "autocorrect": {
+      "per_gate": {},                   // { "review": 1, "test": 0, … } — tentatives par gate
+      "total": 0                        // compteur global de tentatives (plafond : 6 au global, maximum ferme)
+    }
+  },
   "delivery": { "pr_url": null }
 }
 ```
@@ -179,6 +248,9 @@ projects `tokens_total` + `skills` into the shard for the UI.
 
 A new session **resumes** a battle by reading `battle.json` — no conversational
 context required. The active battle is pointed to by `.legion/active-battle`.
+**`run.mode` est lu et respecté au resume** : une battle `step` ne s'emballe pas,
+une battle `autonomous` ré-enchaîne depuis la phase pending. Un champ `run` absent
+(battle antérieure à la feature) → comportement `autonomous` par défaut.
 
 Global — `~/.claude/legion/`: `fleet.d/` (cross-repo battle index, one JSON shard
 per battle, read by `/fleet` and any UI; concurrency-safe — one file per battle, no
