@@ -57,6 +57,17 @@ else
                             <MudText Typo="Typo.body2" Class="mud-text-secondary">→ @suggestion</MudText>
                         }
                         @{
+                            var ctx = string.Join(" · ", new[] { e.Title, e.Phase, e.Profile }.Where(x => !string.IsNullOrWhiteSpace(x)));
+                        }
+                        @if (ctx.Length > 0)
+                        {
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary d-block mt-1">@ctx</MudText>
+                        }
+                        @if (e.Intent is { Length: > 0 } intent)
+                        {
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary d-block" Style="font-style:italic">@intent</MudText>
+                        }
+                        @{
                             var src = string.Join(" · ", new[] { e.Battle, e.Repo }.Where(x => !string.IsNullOrWhiteSpace(x)));
                         }
                         @if (src.Length > 0)
