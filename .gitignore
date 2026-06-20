@@ -11,6 +11,9 @@ __pycache__/
 # Battle state is per-target-repo and local — never tracked here anyway
 .legion/
 
+# Claude Code local state (worktrees, plans, jobs, memory) — never tracked
+.claude/
+
 # OS
 Thumbs.db
 .DS_Store
