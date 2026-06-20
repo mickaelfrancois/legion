@@ -15,6 +15,13 @@ public sealed class RetexJournalEntry
     public string? Plugin { get; set; }         // legion | dotnet-claude-kit | ...
     public string? Battle { get; set; }         // battle id that surfaced this friction
     public string? Repo { get; set; }
+    // Battle context (optional) — keeps the entry self-contained once the repo/worktree
+    // is gone. Set by plugin_retex.py from battle.json (Title/Profile) + spec.md (Intent);
+    // Phase is per-entry (where the friction surfaced). None of these affect the derived Id.
+    public string? Title { get; set; }          // battle title
+    public string? Intent { get; set; }         // one-line battle intent (from spec.md)
+    public string? Phase { get; set; }          // phase where the friction surfaced
+    public string? Profile { get; set; }        // battle profile (feature|hotfix|...)
     public string? Area { get; set; }           // gate:/hook:/command:/skill:/script:
     public string? Severity { get; set; }       // blocker | friction | annoyance | idea
     public string? Observation { get; set; }

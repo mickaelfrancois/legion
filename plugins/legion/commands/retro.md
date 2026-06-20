@@ -88,13 +88,23 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 6. **Persist the Plugin RETEX to the central journal** (tooling improvement loop).
    From the `Plugin RETEX` section, write the structured items to
    `.legion/battles/<id>/plugin-retex.json` (a JSON array of
-   `{plugin, area, severity, observation, suggestion}`), then append them to the
-   cross-battle journal:
+   `{plugin, area, severity, observation, suggestion, title, intent, phase, profile}`),
+   then append them to the cross-battle journal:
 
    ```bash
    python "$CLAUDE_PLUGIN_ROOT/scripts/plugin_retex.py" append \
      --file ".legion/battles/<id>/plugin-retex.json" --battle "<id>" --repo "<repo>"
    ```
+
+   **Embed the battle context in each item** so the entry stays self-contained once
+   the repo/worktree is gone (the journal lives in `~/.claude/legion/`, the battle
+   artifacts do not — this is the whole point: a RETEX must be actionable without the
+   repo). For every item set: `title` and `profile` from `battle.json`, `intent` a
+   one-line summary of `spec.md`'s intent, and `phase` = the phase where the friction
+   surfaced (`think|plan|build|review|test|deliver|reflect`) — **per item**, since one
+   battle's frictions can arise at different phases. These four fields are **optional**
+   and never affect the entry's stable `id` (derived from `ts|plugin|observation`);
+   `--battle`/`--repo` stay as they are.
 
    If the tooling did not get in the way (`RAS`), skip this — write nothing. This
    journal (`~/.claude/legion/plugin-retex.jsonl`) is how plugin improvements are

@@ -18,9 +18,14 @@ resolues (boucle qui reste actionnable), `--all` les montre toutes, `--resolved`
 ne montre que l'historique resolu.
 
 Une entree :
-    { id, ts, plugin, battle, repo, area, severity, observation, suggestion }
+    { id, ts, plugin, battle, repo, title, intent, phase, profile,
+      area, severity, observation, suggestion }
 Champs requis a l'append : plugin, observation, suggestion. Les autres sont
-completes/optionnels. `id` est derive si absent (entrees legacy comprises).
+completes/optionnels -- dont le contexte battle (title, intent, phase, profile)
+qui rend l'entree auto-portante quand le repo/worktree a disparu (le journal vit
+dans ~/.claude/legion/, pas les artefacts de la battle). `id` est derive si
+absent (entrees legacy comprises) de ts|plugin|observation UNIQUEMENT : le
+contexte n'entre JAMAIS dans le calcul d'id (tombstones legacy preserves).
 
 Usage :
     python plugin_retex.py append  --file <entries.json> [--battle B] [--repo R] [--journal P]
@@ -76,6 +81,12 @@ def _normalize(entry: dict, battle: str | None, repo: str | None) -> dict | None
         "plugin": entry["plugin"],
         "battle": entry.get("battle") or battle,
         "repo": entry.get("repo") or repo,
+        # Contexte battle (optionnel) : rend l'entree auto-portante meme repo disparu.
+        # N'entre PAS dans le calcul d'id (derive de ts|plugin|observation).
+        "title": entry.get("title"),                 # titre de la battle
+        "intent": entry.get("intent"),               # intention (resume de spec.md)
+        "phase": entry.get("phase"),                 # phase ou la friction est apparue (par entree)
+        "profile": entry.get("profile"),             # profil de battle (feature|hotfix|...)
         "area": entry.get("area"),                   # gate:/hook:/command:/skill:/script:
         "severity": entry.get("severity"),           # blocker | friction | annoyance | idea
         "observation": entry["observation"],
@@ -171,6 +182,11 @@ def _to_markdown(entries: list, plugin_filter: str | None, resolved: set, mode: 
             src = " · ".join(x for x in (e.get("battle"), e.get("repo")) if x)
             lines.append(f"- `{e['id']}`{done} **{tag}** — {e['observation']}")
             lines.append(f"  → {e['suggestion']}  _({src})_")
+            ctx = " · ".join(x for x in (e.get("title"), e.get("phase"), e.get("profile")) if x)
+            if ctx:
+                lines.append(f"  · {ctx}")
+            if e.get("intent"):
+                lines.append(f"  · _{e['intent']}_")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -302,6 +318,47 @@ def _self_test() -> int:
         e3, r3 = _split(_read_journal(j2))
         assert r3 == set(targets)
         assert _to_markdown(e3, None, r3, "active") == "_(aucune entrée RETEX plugin)_"
+
+        # --- contexte battle auto-portant (title/intent/phase/profile) ---
+        j3 = Path(d) / "j3.jsonl"
+        enriched = {
+            "ts": "2026-06-20T00:00:00+00:00", "plugin": "legion",
+            "area": "gate:reviewer", "severity": "friction",
+            "observation": "friction-ctx", "suggestion": "corriger X",
+            "title": "Titre de la battle", "intent": "Intention resumee",
+            "phase": "review", "profile": "feature",
+        }
+        append([enriched], j3, None, None)
+        rows_e, _res_e = _split(_read_journal(j3))
+        assert len(rows_e) == 1
+        re_ = rows_e[0]
+        assert re_["title"] == "Titre de la battle" and re_["intent"] == "Intention resumee"
+        assert re_["phase"] == "review" and re_["profile"] == "feature"
+
+        # id INCHANGÉ : même ts|plugin|observation, avec vs sans contexte => même id
+        bare_same = {"ts": "2026-06-20T00:00:00+00:00", "plugin": "legion",
+                     "observation": "friction-ctx", "suggestion": "corriger X"}
+        n_bare = _normalize(bare_same, None, None)
+        assert n_bare["id"] == re_["id"], (n_bare["id"], re_["id"])   # contexte hors graine d'id
+        assert n_bare["title"] is None and n_bare["phase"] is None    # entrée legacy : champs None
+
+        # rendu : contexte présent affiché ; absent => dégradation propre (rien de parasite)
+        md_e = _to_markdown(rows_e, None, set(), "active")
+        assert "Titre de la battle" in md_e and "Intention resumee" in md_e and "review" in md_e
+        md_bare = _to_markdown([n_bare], None, set(), "active")
+        assert "friction-ctx" in md_bare and "Titre de la battle" not in md_bare
+
+        # tombstone sur entrée enrichie ET entrée legacy distincte : les deux matchent leur id
+        legacy = {"ts": "2026-06-19T00:00:00+00:00", "plugin": "legion",
+                  "observation": "friction-legacy", "suggestion": "corriger Y"}
+        append([legacy], j3, None, None)
+        e_all, _r = _split(_read_journal(j3))
+        ids_all = sorted({x["id"] for x in e_all})
+        assert len(ids_all) == 2                                      # enrichie + legacy, ids distincts
+        _append_tombstones(ids_all, j3, None)
+        e_all2, resolved2 = _split(_read_journal(j3))
+        assert resolved2 == set(ids_all)
+        assert _to_markdown(e_all2, None, resolved2, "active") == "_(aucune entrée RETEX plugin)_"
     print("OK: plugin_retex self-test passed", file=sys.stderr)
     return 0
 
