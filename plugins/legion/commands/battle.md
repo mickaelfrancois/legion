@@ -393,10 +393,14 @@ gate ran.
           par gate atteint, 2 tentatives maximum).
         - Si `run.autocorrect.total >= 6` → **escalade** (cas 2 : plafond global
           atteint, 6 tentatives maximum au global).
-     c. **Détecter le progrès** : comparer le nombre de FAIL du nouveau `gate-*.md`
-        avec celui du run précédent. Si le FAIL-count est **stable ou en hausse** →
-        **escalade immédiate** (cas 2 : non-progrès). Un FAIL-count en baisse = progrès,
-        on continue.
+     c. **Détecter le progrès par l'identité des FAIL, pas par le compte brut.**
+        Compare l'**ensemble** des FAIL du nouveau `gate-*.md` à celui du run précédent,
+        par cible (`fichier:ligne` + dimension, ex. `R2`/`S3`). **Progrès** = au moins
+        un FAIL ciblé au run précédent a **disparu** (résolu) — même si le compte total
+        est stable parce qu'un nouveau FAIL d'une autre cause est apparu. **Non-progrès**
+        = aucun FAIL précédent résolu (le même ensemble persiste ou grossit) →
+        **escalade immédiate** (cas 2). Le compte brut seul est trompeur : « 1 FAIL
+        corrigé, 1 autre découvert » est un compte stable mais un vrai progrès.
      d. Passer au builder le **chemin de l'artefact** `gate-*.md` (lire depuis le
         disque, ne pas injecter le contenu dans ce contexte) et relancer BUILD pour
         cette slice. Puis re-invoquer la gate. Retour à l'étape (a).
@@ -445,7 +449,7 @@ Toute correction déterministe se fait sans lui.
 | Cas | Déclencheur | Action |
 |-----|-------------|--------|
 | **1. `reject`** | Une gate rend un verdict `reject` (régression majeure, redesign requis). | Escalade **immédiate**, zéro tentative de correction. Relayer le verdict + RAISON. |
-| **2. Boucle non convergente** | FAIL-count stable/en hausse après une tentative, ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL-count avant/après, tentatives effectuées. |
+| **2. Boucle non convergente** | Aucun FAIL ciblé résolu d'une tentative à l'autre (progrès = identité des FAIL, pas le compte brut), ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL résolus/persistants/nouveaux, tentatives effectuées. |
 | **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`). | Escalade : re-planification nécessaire. Ne pas modifier `plan.md` en cours de run. |
 | **4. Filets DELIVER déclenchés** | Base locale en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit à arbitrer (§G.0). | Escalade : résoudre le filet d'abord, puis DELIVER peut reprendre. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë (§A.preflight). | Escalade : résoudre l'environnement avant toute battle. |

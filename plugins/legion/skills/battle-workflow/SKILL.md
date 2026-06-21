@@ -74,7 +74,7 @@ L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants :
 | Cas | Déclencheur | Action |
 |-----|-------------|--------|
 | **1. `reject`** | Une gate rend un verdict `reject`. | Escalade immédiate, zéro tentative. |
-| **2. Boucle non convergente** | FAIL-count stable/en hausse, ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail du blocage. |
+| **2. Boucle non convergente** | Aucun FAIL ciblé résolu d'une tentative à l'autre (progrès = identité des FAIL, pas le compte brut), ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail du blocage. |
 | **3. Déviation du plan** | La correction sort du périmètre de `plan.md` ou `guard.allow`. | Escalade : re-planification nécessaire. |
 | **4. Filets DELIVER** | Base en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit. | Escalade : résoudre le filet d'abord. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
@@ -87,8 +87,9 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   builder ne décide pas d'escalader — il rapporte `build_ok: false`. Un `build_ok:
   false` après 3 essais **compte pour 1 tentative** de la boucle orchestrateur.
 - **Orchestrateur (re-gate)** : 2 tentatives par gate (maximum ferme), plafond global de 6 tentatives au global (maximum ferme).
-  Progrès = baisse du FAIL-count entre deux tentatives ; stable ou en hausse →
-  escalade immédiate.
+  Progrès = au moins un FAIL ciblé résolu entre deux tentatives (mesuré par l'identité
+  des FAIL — `fichier:ligne` + dimension —, pas le compte brut) ; aucun FAIL précédent
+  résolu → escalade immédiate.
 
 ## Two natures of actor
 
