@@ -9,7 +9,7 @@ directement sur le filesystem. N'écrit **jamais** dans `.legion/` ni dans `flee
 
 ## Fonctionnalités
 - Liste filtrable des battles (recherche repo/titre/ticket, `clôturées` masquées par défaut, `bloquées` en tête).
-- Frise des 7 phases (THINK → … → REFLECT) avec statut et verdicts de gate.
+- Frise des phases du pipeline (THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → ADDRESS → REFLECT) avec statut et verdicts de gate ; le slot ADDRESS reste *pending* tant que la PR n'a pas reçu de commentaire de revue.
 - Détail d'une battle : rendu des artefacts Markdown dans l'ordre de lecture.
 - **Rafraîchissement live** : le dossier `fleet.d/` est surveillé (debounce 300 ms) ; l'UI se met à jour à chaque transition de phase, sans rechargement.
 - Gestion des entrées orphelines (repo déplacé/supprimé) sans plantage.
