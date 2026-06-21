@@ -233,7 +233,9 @@ PreToolUse(Edit|Write|MultiEdit) :
      legion:lint → gate-lint.md, legion:reviewer → gate-review.md,
      legion:test-engineer → gate-test.md, legion:security → gate-security.md,
      legion:pr-triage → pr-feedback.md) :
-       - file_path == .legion/battles/<active>/<artefact de la gate> → exit 0
+       - file_path == .legion/battles/<active>/<artefact de la gate> :
+           · `Write` à contenu blanc (artefact 0 octet) → exit 2 (RETEX A1)
+           · sinon → exit 0
        - sinon (autre fichier, code, battle.json, hors battle)        → exit 2
      La session principale (agent_type "claude") et le builder (legion:builder)
      ne sont pas dans la table → règles de périmètre standard ci-dessous.

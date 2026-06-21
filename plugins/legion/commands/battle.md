@@ -338,7 +338,10 @@ spares):
    - it is **non-empty** — `(Get-Item <path>).Length > 0`. A gate can return a verdict
      yet leave a **0-byte** artifact (the `Write` never landed, or wrote nothing); such
      an empty file still **exists**, so the existence check alone would wave it through.
-     (RETEX: an empty `gate-review.md` would have passed the literal check.)
+     (RETEX: an empty `gate-review.md` would have passed the literal check.) The
+     `guard.py` hook now **also** blocks a gate's blank `Write` upstream (defense in
+     depth); this orchestrator check still catches the case where the gate wrote
+     **nothing at all** (no `Write` for the hook to intercept).
    - the returned `ARTIFACT:` path **equals** the expected canonical path (the guard
      already blocks a wrong *write*; this catches a wrong path in the *returned* string);
    - it was **written this pass** — it either did not exist before, or its
