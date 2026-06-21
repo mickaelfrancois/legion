@@ -146,6 +146,15 @@ réutilise l'embryon « approche + Choix ouverts à arbitrer », ne duplique pas
 |-----|------|---------|
 | nominal ... | unit/integration | ... |
 | limite ...  | ... | ... |
+| démarrage du serveur ... | acceptation humaine différée | vérif structurelle + prérequis ; bout-en-bout = test humain |
+
+> **Livrable à effet de bord.** Quand un critère ne peut être vérifié en run autonome
+> sans **imposer** un effet de bord (démarrer un serveur persistant, ouvrir un
+> navigateur, muter un système externe), marque sa ligne `Type` = **« acceptation
+> humaine différée »** : la gate TEST la vérifie alors *structurellement* (le livrable
+> existe, les prérequis lecture seule tiennent) sans l'exécuter, et le bout-en-bout
+> revient à l'humain. N'en abuse pas — réserve-le aux effets de bord réels, pas à un
+> test simplement pénible à écrire.
 
 ## Choix ouverts à arbitrer
 

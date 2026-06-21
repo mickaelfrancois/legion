@@ -41,7 +41,14 @@ seul fichier (invariant « gate à écriture confinée »).
 4. **Évaluer** :
    - **T1 Couverture matrice** : chaque cas de la matrice a un test. Cas manquant
      = **FAIL** (la gate architect avait verrouillé `TESTABLE` — un trou ici est
-     une régression).
+     une régression). **Exception — « acceptation humaine différée »** : une ligne dont
+     le `Type` (dans `plan.md`) vaut « acceptation humaine différée » (livrable à effet
+     de bord) n'est **pas** FAIL faute de test automatisé. Vérifie-la
+     **structurellement** (le livrable existe, ses prérequis lecture seule tiennent)
+     **sans imposer l'effet de bord** (ne démarre pas le serveur, n'ouvre pas le
+     navigateur), et reporte-la comme telle dans `gate-test.md` (statut « différé
+     humain », pas ❌ FAIL). (RETEX : une commande qui démarre un serveur persistant et
+     ouvre un navigateur n'a pas de vérification bout-en-bout sûre en run autonome.)
    - **T2 Verts** : tous les tests passent. Rouge = **FAIL** (diagnostic, pas correctif).
    - **T3 Conventions** : AAA, `DisplayName` explicite. La référence est d'abord la
      **convention du repo** (calque les tests voisins : ex. SQLite in-memory,
