@@ -50,6 +50,15 @@ L'orchestrateur fournit dans le prompt :
    instructions **et** enregistre l'attribution dans `usage.jsonl`. Si tu raisonnes
    purement depuis la doctrine, c'est légitime — un `skills` vide est alors normal,
    ne charge pas un skill juste pour « cocher la case ».
+
+   **Surfaces transverses — recense TOUTES les occurrences (y compris `docs/`).** Si le
+   changement touche une **énumération ou convention répétée** dans plusieurs fichiers
+   (la liste des gates, des phases, des artefacts ; un seuil ; un contrat de données),
+   `Grep` **tout l'arbre** — pas seulement `src/`, mais aussi `docs/`, les README et la
+   doctrine — pour que le plan liste **chaque** fichier à mettre à jour. Une checklist de
+   cohérence qui oublie une surface laisse une divergence que la revue attrape ensuite.
+   (RETEX : la checklist de cohérence transverse a manqué deux fichiers `docs/`
+   — seul le grep tout-l'arbre les a rattrapés.)
 3. **Challenger le scope** via les questions forçantes ci-dessous (§ Scope
    challenge). Tout point non résolu = défaut tracé.
 4. **Si le scope tient**, produire le plan : décision d'architecture (quelles
