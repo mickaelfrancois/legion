@@ -66,6 +66,12 @@ between decisions one at a time.
   current behaviour — then bring the finding to the user, don't make them recite it.
 - **One branch at a time.** Resolve a decision before opening the next that depends on
   it; surface trade-offs as you go.
+- **Verify every code-level claim before it enters the « Cadrage ».** A file, symbol, or
+  current-behaviour statement you write into the brief must be checked with `Read`/`Grep`
+  first. If you cannot verify it, frame it as an **assumption to confirm in PLAN** —
+  never assert it as fact. (RETEX: a « Cadrage » named the wrong file as carrying a
+  per-phase visual and omitted the one that actually displayed it; the architect caught
+  it before any code, but a verified claim would have spared the push-back.)
 
 **Cover every branch** (skip a branch only once it is genuinely settled): the
 underlying problem/intent, what is **in scope**, what is **explicitly out of scope**,
