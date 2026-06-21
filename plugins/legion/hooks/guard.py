@@ -14,7 +14,7 @@ Regles :
   le guard regit le perimetre d'ecriture *du repo*, pas l'infra memoire de Claude
   (ou /retro persiste une learning durable, parfois perimetre encore actif).
 - **Confinement des gates** : un sous-agent gate (`agent_type` =
-  `<plugin>:architect`/`reviewer`/`test-engineer`/`security`/`pr-triage`) ne peut
+  `<plugin>:architect`/`lint`/`reviewer`/`test-engineer`/`security`/`pr-triage`) ne peut
   ecrire QUE son unique artefact dans `.legion/battles/<active>/` (ni code, ni
   `battle.json`) -> hors de la -> exit 2. Rend structurelle (portee par le hook) la
   garantie « une gate ne touche pas le code ». La session principale (`agent_type`
@@ -53,6 +53,7 @@ ALWAYS_ALLOW = (".legion/**", ".gitignore")  # etat de la battle + .gitignore (s
 # marketplace ; sur un fork (ex. `divalto-legion`) adapter le prefixe.
 GATE_ARTIFACT = {
     "legion:architect": "plan.md",
+    "legion:lint": "gate-lint.md",
     "legion:reviewer": "gate-review.md",
     "legion:test-engineer": "gate-test.md",
     "legion:security": "gate-security.md",
@@ -280,6 +281,8 @@ def _self_test() -> int:
     assert _gate_decision("legion:builder", "src/x.cs", "B") is None    # builder -> standard
     assert _gate_decision("legion:reviewer", ".legion/battles/B/gate-review.md", "B") is True
     assert _gate_decision("legion:architect", ".legion/battles/B/plan.md", "B") is True
+    assert _gate_decision("legion:lint", ".legion/battles/B/gate-lint.md", "B") is True
+    assert _gate_decision("legion:lint", ".legion/battles/B/gate-review.md", "B") is False  # pas SON artefact
     assert _gate_decision("legion:pr-triage", ".legion/battles/B/pr-feedback.md", "B") is True
     assert _gate_decision("legion:reviewer", ".legion/battles/B/gate-test.md", "B") is False   # pas SON artefact
     assert _gate_decision("legion:reviewer", "src/Foo.cs", "B") is False                        # pas de code

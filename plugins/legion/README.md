@@ -15,7 +15,7 @@ discipliné, sur tes **projets .NET perso hébergés sur GitHub**. Inspirée de
 |---|---|---|
 | **Claude Code** | héberge le plugin | ✅ obligatoire |
 | **Python 3** (`python`) | exécute les 4 hooks (`guard`, `careful`, `fleet_sync`, `usage_track`) | ✅ obligatoire |
-| **.NET SDK** | `dotnet build` / `dotnet test` lancés par le builder et la gate test | ✅ obligatoire |
+| **.NET SDK** | `dotnet build` / `dotnet test` / `dotnet format` lancés par le builder et les gates test / lint | ✅ obligatoire |
 | **`gh` (GitHub CLI)** | `/battle start <n>` (lecture d'issue) **et** `/battle deliver` (création de PR) | ⚙️ recommandé |
 | **plugin `dotnet-claude-kit`** | fournit la **MCP Roslyn** dont dépend la gate `reviewer`, + les skills délégués (scaffold, code-review, testing, security-scan…) | ✅ fortement recommandé |
 
@@ -42,19 +42,20 @@ nue `/battle` renvoie *Unknown command*).
 
 ---
 
-## Le pipeline en 7 étapes
+## Le pipeline en 8 étapes
 
 ```
-THINK → PLAN → BUILD → REVIEW → TEST → DELIVER → REFLECT
+THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → REFLECT
 ```
 
 Chaque étape produit un fichier dans `.legion/battles/<id>/`, lu par la suivante.
-Les étapes PLAN / REVIEW / TEST sont tenues par des **gates** : un agent qui rend
-un verdict. **Si le verdict est `revise`, le pipeline s'arrête** — tu corriges,
-puis tu relances.
+Les étapes PLAN / LINT / REVIEW / TEST sont tenues par des **gates** : un agent qui
+rend un verdict. **Si le verdict est `revise`, le pipeline s'arrête** — tu corriges,
+puis tu relances. La gate **LINT** (formatage .NET, `dotnet format --verify-no-changes`)
+est **.NET-only** : sur un repo non-.NET elle se retire sans bloquer.
 
 **Enchaînement BUILD → gates** : un build **propre** (0 erreur, 0 warning) enchaîne
-automatiquement `review → test → security` jusqu'au premier `revise` ou jusqu'à
+automatiquement `lint → review → test → security` jusqu'au premier `revise` ou jusqu'à
 `deliver` (exclu — la livraison reste une action manuelle confirmée).
 
 ---
@@ -77,7 +78,7 @@ automatiquement `review → test → security` jusqu'au premier `revise` ou jusq
 /legion:battle build --auto        ← ou tu délègues à l'agent builder (autonome)
 
 # 4. Gates de revue (enchaînées auto si le build est propre)
-/legion:battle review              ← reviewer → test-engineer → security
+/legion:battle review              ← lint → reviewer → test-engineer → security
 
 # 5. Livrer
 /legion:battle deliver             ← branche <moi>/<n> → commit → push → PR (Closes #<n>)
@@ -104,7 +105,7 @@ automatiquement `review → test → security` jusqu'au premier `revise` ou jusq
 | `/legion:recon <issue>` | *(avant THINK, optionnel)* Affine une issue floue par un interrogatoire serré + exploration du repo, puis ajoute une section « Cadrage » à l'issue (confirmation avant écriture). |
 | `/legion:battle start <issue\|slug>` | Démarre une battle. `<issue>` numérique = issue GitHub (tirée auto) ; sinon libellé libre. |
 | `/legion:battle build [slice\|all] [--auto]` | Code une slice (toi en direct, ou l'agent builder). |
-| `/legion:battle review` / `test` | Lance les gates reviewer → test-engineer → security. |
+| `/legion:battle review` / `test` | Lance les gates lint → reviewer → test-engineer → security. |
 | `/legion:battle deliver` | Branche `<moi>/<n>`, commit, push, PR avec `Closes #<n>` (confirmation avant push). |
 | `/legion:battle resume <id>` | Reprend une battle existante. |
 | `/legion:battle status` | État des phases de la battle courante. |

@@ -1,7 +1,7 @@
 # Mémo — Confinement d'écriture des gates (discipline de contexte)
 
 > **Objet.** Réduire l'empreinte de contexte d'un pipeline de gates type *legion*
-> (`architect` / `reviewer` / `test-engineer` / `security` / `pr-triage` + un
+> (`architect` / `lint` / `reviewer` / `test-engineer` / `security` / `pr-triage` + un
 > producteur `builder`). Ce document explique le **problème**, le **pré-requis
 > technique** (validé empiriquement), la **solution** et son **implémentation
 > fichier par fichier**. Il est écrit pour être **transposé à un autre plugin** du
@@ -109,6 +109,7 @@ Ajouter la table (clés **namespacées** — adapter le préfixe au plugin) :
 ```python
 GATE_ARTIFACT = {
     "<plugin>:architect": "plan.md",
+    "<plugin>:lint": "gate-lint.md",
     "<plugin>:reviewer": "gate-review.md",
     "<plugin>:test-engineer": "gate-test.md",
     "<plugin>:security": "gate-security.md",
@@ -154,7 +155,7 @@ if agent_type in GATE_ARTIFACT:
 Ajouter des assertions au `--self-test` (autorisé / mauvais artefact / code /
 `battle.json` / hors battle / non-gate).
 
-### 4.2 `agents/*.md` (les 5 gates)
+### 4.2 `agents/*.md` (les 6 gates)
 
 Pour **chaque** gate :
 - **Frontmatter** : ajouter `Write` à `tools:` ; reformuler `description:` en « écrit
@@ -266,7 +267,7 @@ re-remplirait le contexte que le confinement épargne) :
 
 - [ ] Valider `agent_type == "<plugin>:<agent>"` sur l'install cible (§2).
 - [ ] `guard.py` : table `GATE_ARTIFACT` (préfixe `<plugin>:`), helpers, branchement, self-tests.
-- [ ] 5 `agents/*.md` : `Write` + description + Rôle/Output/Anti-patterns (+ `pr-triage` : TRIAGE JSON conservé, multi-round, **modèle sonnet**).
+- [ ] 6 `agents/*.md` : `Write` + description + Rôle/Output/Anti-patterns (+ `lint` : .NET-only, `dotnet format` verify-only ; + `pr-triage` : TRIAGE JSON conservé, multi-round, **modèle sonnet**).
 - [ ] `battle.md` : préambule, PLAN, gates, boucle `revise` (brief par chemin), `pr-triage`, guardrails.
 - [ ] `battle.md` : **garde-fou de livraison §4.5** (check existence + chemin canonique + mtime, autour de chaque gate) — **indissociable du levier**.
 - [ ] `ARCHITECTURE.md` + `SKILL.md` : nouvel invariant + étape 0 du guard + vérif de livraison.

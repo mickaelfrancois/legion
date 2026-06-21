@@ -1,6 +1,6 @@
 ---
 name: battle-workflow
-description: Operational doctrine for the legion battle pipeline (Think→Plan→Build→Review→Test→Deliver→Reflect). Use whenever running, resuming or reasoning about a battle, a gate, a builder slice, delivery/PR, /battle, /fleet, /retro, or a GitHub-issue-driven task. Defines the phases, the producer/gate split, the verdict cascade, the per-repo state layout and the delegation rules.
+description: Operational doctrine for the legion battle pipeline (Think→Plan→Build→Lint→Review→Test→Deliver→Reflect). Use whenever running, resuming or reasoning about a battle, a gate, a builder slice, delivery/PR, /battle, /fleet, /retro, or a GitHub-issue-driven task. Defines the phases, the producer/gate split, the verdict cascade, the per-repo state layout and the delegation rules.
 ---
 
 # Battle workflow — legion doctrine
@@ -22,10 +22,14 @@ the operational summary loaded at run time.
 ## The pipeline
 
 ```
-THINK  → PLAN     → BUILD    → REVIEW  → TEST     → DELIVER → (ADDRESS) → REFLECT
-start    architect  builder    reviewer  test-eng   deliver   pr-triage    retro
-         (gate)     (producer) (gate)    (gate)     (PR)      (gate)
+THINK  → PLAN     → BUILD    → LINT  → REVIEW  → TEST     → DELIVER → (ADDRESS) → REFLECT
+start    architect  builder    lint    reviewer  test-eng   deliver   pr-triage    retro
+         (gate)     (producer) (gate)  (gate)    (gate)     (PR)      (gate)
 ```
+
+> **LINT** (formatage .NET, `dotnet format --verify-no-changes`, verify-only) est la
+> première gate de la cascade de revue. **.NET-only** : sur une stack non-.NET elle se
+> retire (bannière + verdict neutre `accept`), sans bloquer la cascade.
 
 Each step **hands off a markdown artifact** to the next. A gate reads the
 upstream artifact, judges it, and emits a verdict. The pipeline does **not**
@@ -54,7 +58,7 @@ usual.
 
 **Auto-advance on a successful build (warnings non bloquants).** A build that is
 `build_ok` — with **or without warnings** — chains straight into the gate cascade
-`review → test → security` (no separate command) in `autonomous` mode. Warnings are
+`lint → review → test → security` (no separate command) in `autonomous` mode. Warnings are
 **non-blocking remarks**: they are logged in `build-report.md` and relayed to the user,
 then the cascade continues uninterrupted. Only `build_ok == false` blocks the cascade
 (→ boucle d'auto-correction). When all required gates are `done`, the cascade chains
@@ -91,8 +95,8 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
 - **Producer** — `builder` only. It *writes* code from `plan.md` and reports in
   `build-report.md`. Not read-only, emits no verdict: its output is what the
   gates review.
-- **Gates** — `architect`, `reviewer`, `test-engineer`, `security` (+ `pr-triage`).
-  They *judge* a deliverable. **Read-only on the code**, but each **writes its own
+- **Gates** — `architect`, `lint`, `reviewer`, `test-engineer`, `security`
+  (+ `pr-triage`). They *judge* a deliverable. **Read-only on the code**, but each **writes its own
   single artifact** (`plan.md` / `gate-*.md` / `pr-feedback.md`) and returns only its
   **verdict + the artifact path** — never the full content, which keeps it out of the
   orchestrator's context. The `guard.py` hook **confines** each gate to that one file
@@ -122,6 +126,7 @@ never invokes another agent; the builder never invokes a gate.
 | THINK | `/battle start` | `spec.md` | `gh issue view <n>` (numeric id), else inline |
 | PLAN | `architect` gate | `plan.md` (+ test matrix) | `dotnet-claude-kit:clean-architecture`, `:modern-csharp` |
 | BUILD | `builder` producer | code + `build-report.md` | `dotnet-claude-kit:scaffold`, `:build-fix`, `:modern-csharp`, `:testing` |
+| LINT | `lint` gate | `gate-lint.md` | `dotnet format --verify-no-changes` (.NET-only, verify; self-retires on non-.NET) |
 | REVIEW | `reviewer` gate | `gate-review.md` | `dotnet-claude-kit:code-review` (multi-dim: correctness, **plan conformance**, **performance**, conventions, dead code) + Roslyn MCP |
 | TEST | `test-engineer` gate | `gate-test.md` | `dotnet-claude-kit:testing`, `:tdd`, `:verify` |
 | (sec) | `security` gate | `gate-security.md` | `dotnet-claude-kit:security-scan` |
@@ -185,7 +190,7 @@ Per repo — `.legion/battles/<battle-id>/`:
 
 ```
 battle.json   # metadata, profile, required_gates, per-phase status, guard, delivery.pr_url
-spec.md  plan.md  build-report.md  gate-review.md  gate-test.md
+spec.md  plan.md  build-report.md  gate-lint.md  gate-review.md  gate-test.md
 gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
 ```
 
@@ -199,11 +204,12 @@ run time**):
   "ticket": "GH#1234",                  // "GH#<n>" or a free slug
   "title": "…",
   "profile": "feature",                 // feature | hotfix | security | spike
-  "required_gates": ["architect", "reviewer", "test-engineer"],
+  "required_gates": ["architect", "lint", "reviewer", "test-engineer"],
   "phases": {
     "think":   { "status": "done", "artifact": "spec.md" },
     "plan":    { "status": "in_progress", "artifact": "plan.md", "verdict": null },
     "build":   { "status": "pending" },
+    "lint":    { "status": "pending" },     // .NET-only — self-retires (neutral accept) on non-.NET
     "review":  { "status": "pending" },
     "test":    { "status": "pending" },
     "deliver": { "status": "pending" },
@@ -268,8 +274,8 @@ memory. Persist only what would change how the *next* battle is run.
 **warns** (never blocks) on destructive shell commands. Bypass:
 `LEGION_GUARD_OFF=1`. The `builder` is subject to the same guard. **Gate
 confinement**: `guard.py` also reads `agent_type` and restricts each gate
-(`architect`/`reviewer`/`test-engineer`/`security`/`pr-triage`) to writing **only**
-its own artifact under `.legion/battles/<active>/` — any other write (code,
+(`architect`/`lint`/`reviewer`/`test-engineer`/`security`/`pr-triage`) to writing
+**only** its own artifact under `.legion/battles/<active>/` — any other write (code,
 `battle.json`, another gate's file) is blocked, even when the perimeter guard is not
 armed.
 

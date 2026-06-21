@@ -114,6 +114,7 @@ sauf `battle.json`) :
 | `spec.md` | THINK | intention, périmètre in/out, critères d'acceptation |
 | `plan.md` | PLAN | décision d'archi, slices, matrice de tests |
 | `build-report.md` | BUILD | fichiers touchés, ce qui a été fait, tests, **compte de warnings** |
+| `gate-lint.md` | LINT | verdict lint (formatage .NET, `dotnet format` verify-only ; .NET-only) |
 | `gate-review.md` | REVIEW | verdict reviewer + détail (qualité, antipatterns) |
 | `gate-test.md` | TEST | verdict test-engineer (tests verts + couverture) |
 | `gate-security.md` | (sécurité) | verdict security (si gate requise) |
@@ -137,11 +138,12 @@ du repo (utile si l'UI veut signaler « la battle en cours dans ce repo »).
   "ticket": "GH#1234",
   "title": "Ajout endpoint facturation",
   "profile": "feature",
-  "required_gates": ["architect", "reviewer", "test-engineer"],
+  "required_gates": ["architect", "lint", "reviewer", "test-engineer"],
   "phases": {
     "think":   { "status": "done", "artifact": "spec.md" },
     "plan":    { "status": "done", "artifact": "plan.md", "verdict": "accept" },
     "build":   { "status": "in_progress" },
+    "lint":    { "status": "pending" },
     "review":  { "status": "pending" },
     "test":    { "status": "pending" },
     "deliver": { "status": "pending" },
@@ -160,16 +162,18 @@ phase (verdicts, artefacts), l'UI lit `phases` ici. La source de vérité est to
 
 ## 4. Phases et verdicts
 
-Pipeline : `THINK → PLAN → BUILD → REVIEW → TEST → DELIVER → REFLECT`.
+Pipeline : `THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → REFLECT`.
 
 - **Clés de phase** (dans `phases` et le champ `phase` de l'index) : `think`,
-  `plan`, `build`, `review`, `test`, `deliver`, `reflect`.
+  `plan`, `build`, `lint`, `review`, `test`, `deliver`, `reflect`. La clé `lint`
+  est .NET-only (gate de formatage) ; sur une stack non-.NET elle reste `pending`
+  ou `done` (retrait neutre) — lecture défensive habituelle.
 - **Statut de phase** : `pending` | `in_progress` | `done` | `blocked`.
 - **Verdict de gate** (champ `verdict` des phases tenues par une gate :
   plan/review/test/sécurité) : `accept` | `accept_with_opportunity` | `revise` |
   `reject`. Un `revise`/`reject` ⇒ phase `blocked` ⇒ battle `blocked`.
 
-Affichage suggéré : une frise des 7 phases avec leur statut ; badge « bloqué » +
+Affichage suggéré : une frise des 8 phases avec leur statut ; badge « bloqué » +
 extrait du verdict (lu dans le `gate-*.md`) quand `battle_status == "blocked"`.
 
 ---

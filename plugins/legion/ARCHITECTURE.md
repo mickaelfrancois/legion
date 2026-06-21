@@ -29,7 +29,7 @@ l'**invoque** — il ne la duplique pas. Sa valeur propre est la *coordination*.
 | Terme | Définition |
 |---|---|
 | **Battle** | Unité de travail bout-en-bout sur **une** feature/issue, dans **un** repo. Possède un identifiant et un dossier d'état. |
-| **Phase** | Étape du pipeline (Think → Plan → Build → Review → Test → Deliver → [Address] → Reflect ; *Address* est optionnelle/répétable, post-deliver). |
+| **Phase** | Étape du pipeline (Think → Plan → Build → Lint → Review → Test → Deliver → [Address] → Reflect ; *Lint* est .NET-only et se retire sur stack non-.NET, *Address* optionnelle/répétable post-deliver). |
 | **Gate** | Point de contrôle tenu par un **sous-agent** isolé qui rend un verdict. Une phase ne se ferme qu'après un verdict `accept`/`accept_with_opportunity` de sa gate. |
 | **Artefact** | Fichier markdown produit par une phase et consommé par la suivante (`spec.md`, `plan.md`, `gate-*.md`…). C'est le mécanisme de hand-off **et** la mémoire de battle. |
 | **Fleet** | Vue consolidée des battles actives **à travers les repos**. Équivalent du *Conductor* de gstack adapté au multi-repo. |
@@ -44,15 +44,18 @@ l'**invoque** — il ne la duplique pas. Sa valeur propre est la *coordination*.
 ## 3. Le pipeline
 
 ```
-  THINK     PLAN        BUILD        REVIEW      TEST       DELIVER    REFLECT
- ┌──────┐ ┌─────────┐ ┌──────────┐ ┌─────────┐ ┌────────┐ ┌────────┐ ┌───────┐
- │intake│→│architect│→│ builder  │→│ reviewer│→│  test- │→│ deliver│→│ retro │
- │      │ │  GATE   │ │ PRODUCER │ │  GATE   │ │engineer│ │  (PR)  │ │       │
- └──────┘ └─────────┘ └──────────┘ └─────────┘ │  GATE  │ └────────┘ └───────┘
-  spec.md  plan.md     code +       gate-      └────────┘ pr-body.md  retro.md
-                       build-report review.md  gate-test.md
+  THINK     PLAN        BUILD        LINT      REVIEW      TEST       DELIVER    REFLECT
+ ┌──────┐ ┌─────────┐ ┌──────────┐ ┌──────┐ ┌─────────┐ ┌────────┐ ┌────────┐ ┌───────┐
+ │intake│→│architect│→│ builder  │→│ lint │→│ reviewer│→│  test- │→│ deliver│→│ retro │
+ │      │ │  GATE   │ │ PRODUCER │ │ GATE │ │  GATE   │ │engineer│ │  (PR)  │ │       │
+ └──────┘ └─────────┘ └──────────┘ └──────┘ └─────────┘ │  GATE  │ └────────┘ └───────┘
+  spec.md  plan.md     code +       gate-     gate-      └────────┘ pr-body.md  retro.md
+                       build-report lint.md   review.md  gate-test.md
                                  + security GATE → gate-security.md
 ```
+
+> La gate **LINT** (formatage .NET, verify-only) est en tête de la cascade de revue ;
+> elle est **.NET-only** et se retire (verdict neutre) sur une stack non-.NET.
 
 Deux natures d'acteurs :
 - **Producteur** (`builder`) : *écrit* du code à partir de `plan.md`, rend un
@@ -71,7 +74,7 @@ rendre la main — sauf escalade (taxonomie §12). En mode `step` (`--step` sur 
 chaque transition de phase rend la main (comportement pas-à-pas).
 
 **Warnings non bloquants.** Un build `build_ok` — avec ou sans warnings — enchaîne
-directement la cascade `review → test → security`. Les warnings sont loggés dans
+directement la cascade `lint → review → test → security`. Les warnings sont loggés dans
 `build-report.md` et relayés à l'utilisateur, puis la cascade continue sans
 interruption. Seul `build_ok == false` bloque (→ boucle d'auto-correction, §12).
 Quand toutes les gates requises sont `done`, la cascade enchaîne automatiquement vers
@@ -108,8 +111,9 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 
 > **Invariant « gate à écriture confinée ».** Un sous-agent gate est **lecture seule
 > sur le code** et n'écrit **qu'un seul fichier** : son propre artefact
-> (`plan.md` / `gate-review.md` / `gate-test.md` / `gate-security.md` /
-> `pr-feedback.md`) dans le dossier de la battle. Le hook `guard.py` l'y **confine**
+> (`plan.md` / `gate-lint.md` / `gate-review.md` / `gate-test.md` /
+> `gate-security.md` / `pr-feedback.md`) dans le dossier de la battle. Le hook
+> `guard.py` l'y **confine**
 > via `agent_type` (toute autre écriture — code, `battle.json`, artefact d'une autre
 > gate → `exit 2`) : la garantie « une gate ne touche pas le code » est ainsi
 > **structurelle** (portée par le hook), non plus seulement déclarative. La gate
@@ -136,11 +140,12 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 | `revise` | ≥1 FAIL | **Stop**. Correction requise (retour BUILD) avant re-soumission. |
 | `reject` | Régression majeure / livrable inexploitable | **Stop**. Re-conception requise. |
 
-### 4.1 Les quatre gates
+### 4.1 Les cinq gates
 
 | Sous-agent | Lecture seule (sur le code) ? | Modèle | Mandat |
 |---|---|---|---|
 | **architect** | Oui (Read/Grep/Glob) | opus | Scope justifié ? Archi conforme Clean Architecture ? Matrice de tests couvrante ? |
+| **lint** | Oui (exécute `dotnet format --verify-no-changes`, non-mutant) | sonnet | Formatage .NET conforme — première gate de la cascade. **.NET-only** : se retire (verdict neutre) sur stack non-.NET. |
 | **reviewer** | Oui + MCP Roslyn | sonnet | Correction, conformité au plan, performance, lisibilité, antipatterns, dead code. |
 | **test-engineer** | Oui sur le code (exécute les tests) | sonnet | Les tests existent, passent, et couvrent la matrice du `plan.md`. |
 | **security** | Oui | opus | OWASP/secrets/NuGet vulnérables/auth — délègue à `security-scan`. |
@@ -150,8 +155,9 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 > leur whitelist d'outils, mais le hook borne cette écriture à l'unique artefact.
 
 > **Paliers de modèle.** Opus pour les gates à plus fort discernement et coût
-> d'erreur (`architect`, `security`) ; sonnet pour `reviewer`/`test-engineer` où le
-> jugement est borné par des signaux objectifs (Roslyn, `dotnet test`).
+> d'erreur (`architect`, `security`) ; sonnet pour `lint`/`reviewer`/`test-engineer`
+> où le jugement est borné par des signaux objectifs (`dotnet format`, Roslyn,
+> `dotnet test`).
 
 ### 4.2 Le producteur `builder` (≠ gate)
 
@@ -182,6 +188,7 @@ Deux niveaux : **par repo** (la battle) et **global** (le fleet).
         ├── spec.md            # THINK
         ├── plan.md            # PLAN
         ├── build-report.md    # BUILD
+        ├── gate-lint.md       # LINT (.NET-only)
         ├── gate-review.md     # REVIEW
         ├── gate-test.md       # TEST
         ├── gate-security.md   # (sécurité)
@@ -223,8 +230,9 @@ stderr).
 PreToolUse(Edit|Write|MultiEdit) :
   0. CONFINEMENT DES GATES (prioritaire, actif même guard non armé).
      Si `agent_type` ∈ GATE_ARTIFACT (legion:architect → plan.md,
-     legion:reviewer → gate-review.md, legion:test-engineer → gate-test.md,
-     legion:security → gate-security.md, legion:pr-triage → pr-feedback.md) :
+     legion:lint → gate-lint.md, legion:reviewer → gate-review.md,
+     legion:test-engineer → gate-test.md, legion:security → gate-security.md,
+     legion:pr-triage → pr-feedback.md) :
        - file_path == .legion/battles/<active>/<artefact de la gate> → exit 0
        - sinon (autre fichier, code, battle.json, hors battle)        → exit 2
      La session principale (agent_type "claude") et le builder (legion:builder)
@@ -291,6 +299,7 @@ plugins/legion/
 ├── agents/
 │   ├── architect.md             # gate PLAN
 │   ├── builder.md               # PRODUCER BUILD (Edit/Write/Bash, worktree)
+│   ├── lint.md                  # gate LINT (dotnet format --verify-no-changes, .NET-only)
 │   ├── reviewer.md              # gate REVIEW (+ MCP Roslyn)
 │   ├── test-engineer.md         # gate TEST
 │   ├── security.md              # gate sécurité
