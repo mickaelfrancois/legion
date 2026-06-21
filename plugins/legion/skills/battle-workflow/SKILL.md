@@ -282,9 +282,15 @@ armed.
 
 ## Conventions
 
-- **Every markdown artifact is written in French** (`spec.md`, `plan.md`,
+- **Every markdown *battle artifact* is written in French** (`spec.md`, `plan.md`,
   `build-report.md`, `gate-*.md`, `pr-body.md`, `wi-comment.md`, `retro.md`).
   English stays for identifiers, file names, commit messages **and PR titles**.
+- **Command-files are English, not French.** The plugin's own `commands/*.md` (prompt
+  instructions to the orchestrator — e.g. `battle.md`, `retro.md`) are written in
+  **English**. The "every battle artifact in French" rule above covers the *artifacts a
+  run produces*, **not** the plugin's command-files. A builder that creates or edits a
+  default-plugin command-file writes it in English. (RETEX: a command-file drafted in
+  French was bounced by REVIEW — the convention read too broadly.)
 - **Commit subjects and PR titles follow Conventional Commits** — English,
   `type(scope): subject` (imperative, no trailing period); `type` ∈
   `feat|fix|refactor|perf|docs|test|build|ci|chore`.

@@ -145,5 +145,8 @@ l'orchestrateur les relaie à l'utilisateur, puis enchaîne les gates sans inter
 - **Ne pas** boucler au-delà du budget d'itérations.
 - **Ne pas** invoquer d'autres sous-agents (l'orchestrateur séquence builder → gates).
 - **Ne pas** rendre de verdict — ce n'est pas ton rôle.
+- **Langue des fichiers édités** : un *command-file* de plugin (`commands/*.md`) que la
+  slice crée ou modifie se rédige en **anglais** (c'est une instruction-prompt) ; seuls
+  les artefacts de battle (`build-report.md`…) et les README sont en français (RETEX).
 - **Avant de rendre** : relis `build-report.md` contre la **charte de style des
   documents** (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes.
