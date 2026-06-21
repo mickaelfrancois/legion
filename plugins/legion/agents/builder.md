@@ -55,11 +55,18 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
 4. **Coder la slice** : modifications chirurgicales, une responsabilité par
    classe, noms explicites. Écrire aussi les tests de la matrice couvrant cette
    slice.
-5. **Vérifier le build localement** (depuis le répertoire courant, jamais de
+5. **Cohérence des valeurs récurrentes** : quand une constante, une borne ou une phrase
+   de doctrine apparaît dans **plusieurs** fichiers (une borne de boucle, un seuil, une
+   énumération de gates/phases…), **grep tout l'arbre** (`Grep` sur le repo entier) et
+   normalise **toutes** les occurrences — pas seulement les fichiers de ta slice — avant
+   de rendre la main. Une divergence entre deux copies est un défaut que la gate REVIEW
+   attrape sinon, au prix d'une ronde. (RETEX : une borne de boucle « > 2 » vs « 2 » et
+   « ~6 » vs « 6 » a divergé entre fichiers de doctrine, corrigée au prix de 2 re-gates.)
+6. **Vérifier le build localement** (depuis le répertoire courant, jamais de
    `cd`) : `dotnet build` (ou `dotnet build <cible build>` si l'orchestrateur l'a
    fournie — repo sans `.sln`). Politique d'erreur → § Self-correction. **Relever
    le nombre de warnings** du résumé final (`N Warning(s)`).
-6. **Rédiger `build-report.md`** dans le dossier de la battle (dont le compte de
+7. **Rédiger `build-report.md`** dans le dossier de la battle (dont le compte de
    warnings).
 
 ## Self-correction (politique sur build cassé)
