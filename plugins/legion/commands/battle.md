@@ -333,8 +333,12 @@ spares):
    re-loop round),
    capture its current modified-time (`(Get-Item <path>).LastWriteTimeUtc`).
 2. The gate returns `VERDICT … ARTIFACT: <path>`.
-3. **After** the return, verify **all three** — metadata only, no content read:
+3. **After** the return, verify **all four** — metadata only, no content read:
    - the file at the expected path **exists**;
+   - it is **non-empty** — `(Get-Item <path>).Length > 0`. A gate can return a verdict
+     yet leave a **0-byte** artifact (the `Write` never landed, or wrote nothing); such
+     an empty file still **exists**, so the existence check alone would wave it through.
+     (RETEX: an empty `gate-review.md` would have passed the literal check.)
    - the returned `ARTIFACT:` path **equals** the expected canonical path (the guard
      already blocks a wrong *write*; this catches a wrong path in the *returned* string);
    - it was **written this pass** — it either did not exist before, or its
