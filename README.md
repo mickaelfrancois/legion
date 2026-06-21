@@ -11,13 +11,20 @@ garde l'état de chaque tâche par repo, et **délègue** tout le travail .NET c
 [`dotnet-claude-kit`](https://github.com/trossitec/dotnet-claude-kit).
 
 ```
-THINK → PLAN → BUILD → REVIEW → TEST → DELIVER → REFLECT
-start   architect builder reviewer test-eng  PR     retro
-        (gate)   (producer)(gate)  (gate)
+THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → REFLECT
+start   architect builder lint   reviewer test-eng  PR    retro
+        (gate)   (producer)(gate) (gate)   (gate)
 ```
 
-Une étape produit un artefact Markdown que la suivante consomme. Un build propre
-enchaîne automatiquement les gates ; un `revise` arrête tout et renvoie corriger.
+Une étape produit un artefact Markdown que la suivante consomme. La gate **LINT**
+(formatage .NET) est **.NET-only** : elle se retire sans bloquer sur un repo non-.NET.
+
+**Run autonome (défaut).** Tu n'arbitres **qu'une fois** : à l'approbation du plan.
+Sur ton OK, le pipeline enchaîne seul `build → lint → review → test → deliver` et
+**ouvre la PR** sans nouvelle confirmation. Il ne rend la main que sur blocage —
+`reject`, boucle qui ne converge pas, ou filet de livraison (cf. taxonomie d'escalade).
+Un `revise` déclenche une boucle d'auto-correction bornée. Force le pas-à-pas avec
+`/legion:battle start <issue> --step`.
 
 ## Contenu du dépôt (monorepo)
 
@@ -41,11 +48,17 @@ et le plugin **`dotnet-claude-kit`** (fournit la MCP Roslyn + les skills délég
    ```
    /legion:battle start 42        # 42 = numéro d'issue GitHub (tirée via gh)
    /legion:battle build           # code la slice (toi en direct, ou --auto)
-   /legion:battle review          # gates reviewer → test → security
+   /legion:battle review          # gates lint → reviewer → test → security
    /legion:battle deliver         # branche, commit, push, PR (Closes #42)
    /legion:retro                  # rétro + apprentissage, ferme la battle
    ```
-3. **(optionnel) Visualiser** avec Legatus : voir [`ui/legatus/README.md`](ui/legatus/README.md).
+   En mode autonome (défaut), `build` → `review` → `deliver` **s'enchaînent seuls**
+   après l'approbation du plan : ces commandes ne sont à lancer à la main qu'en
+   `--step`, ou pour reprendre après un blocage. Les retours de revue sur la PR
+   se traitent avec `/legion:battle address` (répétable).
+3. **(optionnel) Visualiser** avec Legatus, l'UI web locale read-only :
+   `/legion:legatus` la lance depuis n'importe quel repo. Détails :
+   [`ui/legatus/README.md`](ui/legatus/README.md).
 
 Guide complet, antisèche des commandes et garde-fous :
 [`plugins/legion/README.md`](plugins/legion/README.md).
@@ -59,9 +72,9 @@ Conception & doctrine : [`plugins/legion/ARCHITECTURE.md`](plugins/legion/ARCHIT
   vit dans la PR + l'issue GitHub.
 - **Vue multi-repo** : `/legion:fleet` agrège un index global (`~/.claude/legion/fleet.d/`)
   — c'est ce que lit Legatus.
-- **Garde-fous exécutables** : `/legion:freeze` limite réellement le périmètre d'écriture
-  (un hook bloque les éditions hors zone) ; `/legion:careful` avertit sur les commandes
-  destructrices.
+- **Garde-fous exécutables** : `/legion:freeze` (ou `/legion:guard`, périmètre déduit
+  du plan) limite réellement la zone d'écriture — un hook bloque toute édition hors
+  zone, builder compris ; `/legion:careful` avertit sur les commandes destructrices.
 
 ## Licence
 

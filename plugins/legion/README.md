@@ -45,22 +45,43 @@ nue `/battle` renvoie *Unknown command*).
 ## Le pipeline en 8 étapes
 
 ```
-THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → REFLECT
+THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → (ADDRESS) → REFLECT
 ```
 
 Chaque étape produit un fichier dans `.legion/battles/<id>/`, lu par la suivante.
 Les étapes PLAN / LINT / REVIEW / TEST sont tenues par des **gates** : un agent qui
 rend un verdict. **Si le verdict est `revise`, le pipeline s'arrête** — tu corriges,
 puis tu relances. La gate **LINT** (formatage .NET, `dotnet format --verify-no-changes`)
-est **.NET-only** : sur un repo non-.NET elle se retire sans bloquer.
+est **.NET-only** : sur un repo non-.NET elle se retire sans bloquer. **ADDRESS** est
+optionnelle et répétable : elle n'existe que si la PR reçoit des commentaires de revue
+(voir l'antisèche, `/legion:battle address`).
 
-**Enchaînement BUILD → gates** : un build **propre** (0 erreur, 0 warning) enchaîne
-automatiquement `lint → review → test → security` jusqu'au premier `revise` ou jusqu'à
-`deliver` (exclu — la livraison reste une action manuelle confirmée).
+### Run autonome (défaut)
+
+Le seul rendez-vous garanti avec toi est l'**approbation du plan** (après PLAN). Sur
+ton OK, l'orchestrateur enchaîne seul `build → lint → review → test → security →
+deliver`, **pousse et ouvre la PR sans nouvelle confirmation** — tu relis le code sur
+GitHub. Un build qui **compile** déclenche la cascade (les warnings sont **non
+bloquants** : juste loggés dans `build-report.md` et relayés). Un `revise` ouvre une
+**boucle d'auto-correction bornée** (2 essais par gate, 6 au global). L'orchestrateur
+ne rend la main que sur **escalade** : `reject`, boucle non convergente, correction
+hors périmètre du plan, filet de livraison (base en retard sur `origin`, remote vide…),
+ou préflight défaillant (`python`/`gh` absent).
+
+**Pas-à-pas (`--step`).** `/legion:battle start <issue> --step` fait rendre la main à
+chaque transition de phase ; en `--step`, `deliver` attend une **confirmation explicite**
+avant de pousser. `--step` (sur `start`) et `--auto` (sur `build`) sont **orthogonaux** :
+le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à l'agent
+`builder`.
 
 ---
 
 ## Exemple complet
+
+> En mode autonome (défaut), tu lances surtout `start` : après l'approbation du plan,
+> les étapes 3 à 5 **s'enchaînent seules** jusqu'à la PR. Les commandes ci-dessous sont
+> les points de contrôle — à lancer à la main seulement en `--step`, ou pour reprendre
+> après un blocage.
 
 ```text
 # 0. (optionnel) Cadrer une issue floue AVANT de démarrer
@@ -69,6 +90,7 @@ automatiquement `lint → review → test → security` jusqu'au premier `revise
 # 1. Démarrer une battle
 /legion:battle start 42            ← id numérique = issue GitHub : tire titre/body/labels
 /legion:battle start refonte-tva   ← libellé libre : la spec est rédigée depuis la conversation
+/legion:battle start 42 --step     ← ou : pas-à-pas, rend la main à chaque phase
 
 # 2. (recommandé) Verrouiller le périmètre d'écriture
 /legion:freeze src/Billing.Api/** tests/**
@@ -77,11 +99,14 @@ automatiquement `lint → review → test → security` jusqu'au premier `revise
 /legion:battle build               ← tu codes en direct avec Claude (recommandé)
 /legion:battle build --auto        ← ou tu délègues à l'agent builder (autonome)
 
-# 4. Gates de revue (enchaînées auto si le build est propre)
+# 4. Gates de revue (enchaînées auto si le build compile)
 /legion:battle review              ← lint → reviewer → test-engineer → security
 
-# 5. Livrer
+# 5. Livrer (auto en mode autonome ; confirmé en --step)
 /legion:battle deliver             ← branche <moi>/<n> → commit → push → PR (Closes #<n>)
+
+# 5b. (optionnel) Traiter les retours de revue sur la PR — répétable
+/legion:battle address             ← triage des commentaires → corrige → répond → résout
 
 # 6. Clôturer
 /legion:retro                      ← synthèse, 1 apprentissage durable, ferme la battle
@@ -106,11 +131,13 @@ automatiquement `lint → review → test → security` jusqu'au premier `revise
 | `/legion:battle start <issue\|slug>` | Démarre une battle. `<issue>` numérique = issue GitHub (tirée auto) ; sinon libellé libre. |
 | `/legion:battle build [slice\|all] [--auto]` | Code une slice (toi en direct, ou l'agent builder). |
 | `/legion:battle review` / `test` | Lance les gates lint → reviewer → test-engineer → security. |
-| `/legion:battle deliver` | Branche `<moi>/<n>`, commit, push, PR avec `Closes #<n>` (confirmation avant push). |
-| `/legion:battle resume <id>` | Reprend une battle existante. |
+| `/legion:battle deliver` | Branche `<moi>/<n>`, commit, push, PR avec `Closes #<n>` (auto en mode autonome ; confirmation avant push en `--step`). |
+| `/legion:battle address` | *(post-deliver, répétable)* Traite les commentaires de revue de la PR : la gate `pr-triage` classe chaque fil, l'orchestrateur corrige (re-gate si besoin), répond et résout. |
+| `/legion:battle resume <id>` | Reprend une battle existante (respecte son `run.mode`). |
 | `/legion:battle status` | État des phases de la battle courante. |
 | `/legion:retro [<id>]` | Rétrospective + apprentissage en mémoire + clôture. |
 | `/legion:fleet [all\|prune]` | Vue consolidée des battles multi-repo. |
+| `/legion:legatus` | Lance **Legatus**, l'UI web locale read-only de suivi (http://localhost:5021), depuis n'importe quel repo. |
 | `/legion:freeze <globs>` / `off` | Restreint l'écriture aux globs donnés. |
 | `/legion:guard` / `off` | Périmètre auto (déduit du plan) + fichiers sensibles protégés. |
 | `/legion:careful` / `off` | Avertit (sans bloquer) sur les commandes destructrices. |
@@ -162,6 +189,13 @@ autre session.
 **La stack écrit du code à ma place ?**
 Seulement en `/battle build --auto`. Par défaut, c'est toi (avec Claude) qui codes ;
 les agents *revoient*, ils ne produisent pas.
+
+**Jusqu'où ça tourne tout seul ?**
+Deux choses à ne pas confondre. *Qui code* : toi par défaut (l'agent `builder`
+seulement en `--auto`). *Qui enchaîne les phases* : l'orchestrateur, en autonome par
+défaut. Après l'approbation du plan, il enchaîne build → gates → livraison et **ouvre
+la PR sans nouvelle confirmation** ; il ne s'arrête que sur escalade (cf. « Run
+autonome »). Tu veux valider chaque étape ? Démarre en `--step`.
 
 ---
 
