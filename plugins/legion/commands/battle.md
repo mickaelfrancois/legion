@@ -147,10 +147,14 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    - **Non-numeric** (a label / slug) → **inline intake**: write `spec.md` from the
      user's request in the conversation. No GitHub call.
 
-   In both cases `spec.md` must contain: intent, in-scope, explicitly
-   out-of-scope, assumptions, acceptance criteria. **Write it in French**
-   (identifiers & file names stay English). If the seeded content is thin,
-   ask the user to fill the gaps before locking the plan. For a rough issue, the
+   In both cases `spec.md` must contain: a systematic **`## En bref`** section at the
+   top (1-3 lines, reusing the "Intention" seed), then intent, in-scope, explicitly
+   out-of-scope, assumptions, acceptance criteria. Apply the **writing charter**
+   (`battle-workflow` § « Charte de style des documents ») — simple, precise language;
+   reference it, do not copy it. **Write it in French**
+   (identifiers & file names stay English). Before locking the plan, reread `spec.md`
+   against the charter (five rules + systematic « En bref »). If the seeded content is
+   thin, ask the user to fill the gaps before locking the plan. For a rough issue, the
    cleaner fix is **upstream**: `/legion:recon <n>` sharpens the issue *before*
    `start` reads it (it appends a « Cadrage » section), so the seed comes in already
    sharp — suggest it when the issue is vague rather than patching `spec.md` here.
@@ -553,7 +557,10 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
 3. **Compose the PR body** → write `.legion/battles/<id>/pr-body.md` from the
    artifacts: intent/scope (`spec.md`), approach (`plan.md`), and the gate verdicts
    (review/test/security `accept`). **Written in French** (identifiers & file names
-   stay English). For a numeric issue, **end the body with `Closes #<n>`** so
+   stay English). Apply the **writing charter**
+   (`battle-workflow` § « Charte de style des documents ») — simple, precise language;
+   **keep it synthetic, with no separate « En bref »** (the body is short by design),
+   and reread it against the charter before pushing. For a numeric issue, **end the body with `Closes #<n>`** so
    merging the PR auto-closes the issue. This is the payoff of the artifact
    pipeline — the PR documents itself.
 
@@ -580,7 +587,9 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
 6. **Comment the issue** (numeric issue only; best-effort, never blocking). Write a
    **short battle-review comment** to `.legion/battles/<id>/wi-comment.md`: 3–5
    lines, **in French**, what was delivered and why it matters (from `spec.md` +
-   gate outcomes); end with the PR URL. Then:
+   gate outcomes); end with the PR URL. Apply the **writing charter** (`battle-workflow`
+   § « Charte de style des documents ») — simple, precise language; it is already short,
+   so **no separate « En bref »**; reread it against the charter before posting. Then:
    ```bash
    gh issue comment <n> --body-file ".legion/battles/<id>/wi-comment.md"
    ```
