@@ -626,7 +626,12 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    gh issue comment <n> --body-file ".legion/battles/<id>/wi-comment.md"
    ```
    The issue itself closes on merge via `Closes #<n>` — do not close it here. On
-   failure → **warn and continue**: the PR is already created.
+   failure → **warn and continue**: the PR is already created. A constrained/headless
+   session may also **refuse** this comment (an auto-mode classifier blocks an outward
+   write under the user's identity that the run's authorization did not explicitly
+   cover). That refusal is **acceptable, not an error**: the comment is best-effort and
+   `Closes #<n>` already links the PR to the issue. Note it and move on. (RETEX: the
+   comment was refused in an autonomous session; the PR was already created and linked.)
 
 7. **Close the phase** — set `phases.deliver.status = "done"` in `battle.json`
    (record `delivery.pr_url`). Report the PR URL; if the PR draws review comments,
