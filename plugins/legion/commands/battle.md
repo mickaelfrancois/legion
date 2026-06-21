@@ -73,14 +73,18 @@ may not be .NET (RETEX: a non-.NET battle had to neutralize these assumptions by
 hand in every gate prompt). **Detect once per session** and record the result in
 `battle.json.stack` (written at §A.1) for the gates and `deliver`:
 
-- **.NET** — a `*.csproj` / `*.sln` exists at or under the repo root. Proceed as
-  documented. **But if no `*.sln` exists** (csproj-only repo, e.g. a single
-  service): `dotnet build` / `dotnet test` run from the repo root then fail with
-  *"Specify which project or solution file to use"*. Record the explicit target(s)
-  in `battle.json.stack` (`build_target` = the buildable csproj or a directory
-  holding exactly one; `test_target` = the test csproj) so the BUILD step (§D) and
-  the test gate (§E) pass them explicitly instead of relying on a solution. With a
-  `.sln` present, leave both `null` (commands run from the root unchanged).
+- **.NET** — a `*.csproj` / `*.sln` / `*.slnx` exists at or under the repo root.
+  Proceed as documented. **But if no `*.sln` exists** (csproj-only repo, or a repo
+  whose only solution is a `*.slnx`, e.g. a single service): `dotnet build` /
+  `dotnet test` / `dotnet format` run from the repo root then fail with *"Specify
+  which project or solution file to use"*, and `dotnet format <sln>.slnx` is only
+  recognized by a recent SDK (≥ .NET 9). Record the explicit target(s) in
+  `battle.json.stack` (`build_target` = the buildable csproj — or the `.slnx` when
+  the SDK supports it, but a **`.csproj` is the deterministic choice** that works on
+  any SDK, incl. for the `lint` gate's `dotnet format`; `test_target` = the test
+  csproj) so the BUILD step (§D), the `lint` gate and the test gate (§E) pass them
+  explicitly instead of relying on a solution. With a `.sln` present, leave both
+  `null` (commands run from the root unchanged).
 - **Non-.NET** — no `*.csproj`/`*.sln`, but a `package.json` / `tsconfig.json`
   (Node/TS), `pyproject.toml`, `go.mod`, `Cargo.toml`, … is present. Flag the
   battle **non-.NET** (`stack.kind`) and apply the **Non-.NET stack** rules in §E
@@ -154,8 +158,10 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 4. **Complete `battle.json`** (the minimal one from step 2) following the schema
    **inlined in the `battle-workflow` doctrine** (State layout) — already in context.
    Default `profile` to `feature` and `required_gates` to
-   `["architect","reviewer","test-engineer"]` unless the user states a different
-   profile. Flip `phases.think.status` from `in_progress` to `done`, everything
+   `["architect","lint","reviewer","test-engineer"]` unless the user states a
+   different profile. (`lint` is **.NET-only** — on a **non-.NET** stack it
+   self-retires at run time with a withdrawal banner and a neutral `accept`, so
+   keeping it in the default set is safe; see §E.) Flip `phases.think.status` from `in_progress` to `done`, everything
    else `pending`, `phases.plan.status = "in_progress"`.
 
    **Write the `run` block.** Set `run.mode` based on the flag passed to `start`:
@@ -305,7 +311,7 @@ Precondition: `phases.build.status == "done"`. Each gate is a subagent that is
 **read-only on the code** but **writes its own single artifact** (`gate-*.md` — the
 `guard.py` hook confines it to that one file): it **returns** only a verdict + the
 artifact path, not the content. Apply this shared loop for each gate, in order
-`reviewer → test-engineer → security`, skipping any gate not in
+`lint → reviewer → test-engineer → security`, skipping any gate not in
 `battle.json.required_gates`.
 
 ### Gate artifact delivery check (shared — every gate, incl. `architect` and `pr-triage`)
@@ -317,9 +323,10 @@ never read the artifact's content, which would refill the context the confinemen
 spares):
 
 1. **Before** invoking, resolve the expected artifact path
-   `.legion/battles/<id>/<artifact>` (architect → `plan.md`, reviewer →
-   `gate-review.md`, test-engineer → `gate-test.md`, security → `gate-security.md`,
-   pr-triage → `pr-feedback.md`) and, **if it already exists** (a re-loop round),
+   `.legion/battles/<id>/<artifact>` (architect → `plan.md`, lint → `gate-lint.md`,
+   reviewer → `gate-review.md`, test-engineer → `gate-test.md`, security →
+   `gate-security.md`, pr-triage → `pr-feedback.md`) and, **if it already exists** (a
+   re-loop round),
    capture its current modified-time (`(Get-Item <path>).LastWriteTimeUtc`).
 2. The gate returns `VERDICT … ARTIFACT: <path>`.
 3. **After** the return, verify **all three** — metadata only, no content read:
@@ -337,16 +344,24 @@ spares):
 
 The gate identifier (used for `subagent_type` and `required_gates`) is **not**
 the phase key written to `battle.json.phases`. Map gate → phase key before
-persisting: `reviewer → review`, `test-engineer → test`, `security → security`.
-Writing under the gate name (`phases.reviewer`/`phases.test-engineer`) is a bug —
-the UI reads the canonical keys `review`/`test` and would show the phase as
-pending even though the gate ran.
+persisting: `lint → lint`, `reviewer → review`, `test-engineer → test`,
+`security → security`. Writing under the gate name
+(`phases.reviewer`/`phases.test-engineer`) is a bug — the UI reads the canonical
+keys `lint`/`review`/`test` and would show the phase as pending even though the
+gate ran.
 
-1. **Invoke** the gate via `Agent` (`subagent_type`: `reviewer` |
+1. **Invoke** the gate via `Agent` (`subagent_type`: `lint` | `reviewer` |
    `test-engineer` | `security`). Self-contained prompt: battle dir, the upstream
    artifacts it needs (`build-report.md`, `plan.md`, touched files), repo root. For
-   `test-engineer`, also pass `stack.test_target` when set (repo without a `.sln`)
-   so `dotnet test` targets the test project explicitly.
+   `lint`, also pass the **format target** (`stack.build_target` when set — a
+   `.csproj` is the deterministic choice for `dotnet format`; absent ⇒ format runs
+   from the root), **the list of .NET files touched by the slice** (from
+   `build-report.md`) so `lint` scopes `dotnet format --include` to the **diff** and
+   **never judges pre-existing formatting outside the slice**, **and**, when the
+   battle is **non-.NET**, tell `lint` to self-retire (it writes a withdrawal banner
+   and returns a neutral `accept` — see §E "Non-.NET stack"). For `test-engineer`,
+   also pass `stack.test_target` when set (repo without a `.sln`) so `dotnet test`
+   targets the test project explicitly.
 2. **Run the gate artifact delivery check** (above) on the gate's artifact, then
    **record the verdict.** The gate already wrote its artifact (`gate-review.md` /
    `gate-test.md` / `gate-security.md`) on disk — do **not** re-write it from a
