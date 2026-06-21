@@ -492,12 +492,25 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
       then `git rev-list --count HEAD..origin/<default>` (resolve `<default>` via
       `git symbolic-ref refs/remotes/origin/HEAD`, fallback
       `gh repo view --json defaultBranchRef`). **> 0 → the local base is behind
-      origin** (work already merged elsewhere under another SHA, or a dependency/SDK
-      migration you don't have locally): **stop, integrate first** (rebase or merge
-      origin), then **re-run BUILD + the review/test gates on the updated base**
-      before delivering. A rebase changes what ships, so gate verdicts on the stale
-      base do **not** carry over. (RETEX: a base behind origin's default was only
-      caught at deliver, after the gates had validated a base that wasn't shipped.)
+      origin.** But "behind by N commits" is **not** the same as "the shipped tree
+      differs": a pure merge commit (the branch was already merged elsewhere) leaves
+      origin's tree **byte-identical** to yours. So before forcing a full re-run, **test
+      the actual tree delta**, not just the commit count —
+      `git diff --quiet HEAD origin/<default>` (exit 0 = identical tree):
+
+      - **Tree delta empty** (`git diff --quiet` exits 0) — the divergence is commits
+        only (a pure merge); the tree the gates judged is byte-identical to the base you
+        ship. **Waive the re-gate** — a re-run would re-test the exact same code. Run a
+        **sanity `dotnet build`/`dotnet test`**, rebase the work onto `origin/<default>`,
+        then continue to step 1. (RETEX: HEAD was 1 pure-merge commit behind with an
+        empty tree diff — a full re-gate would have judged byte-identical code.)
+      - **Tree delta non-empty** — origin actually changed the shipped base (work merged
+        under another SHA, or a dependency/SDK migration you don't have locally): **stop,
+        integrate first** (rebase or merge origin), then **re-run BUILD + the review/test
+        gates on the updated base** before delivering. A rebase changes what ships, so
+        gate verdicts on the stale base do **not** carry over. (RETEX: a base behind
+        origin's default was only caught at deliver, after the gates had validated a base
+        that wasn't shipped.)
 
    b. **Empty remote** — the flow assumes the remote already has a base branch.
       Check `git ls-remote --heads origin` — **no heads** means an uninitialized
