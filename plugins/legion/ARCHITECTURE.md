@@ -129,8 +129,8 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 > **Contrepartie : vérif de livraison.** Comme le verdict ne *prouve* plus que
 > l'artefact existe, l'orchestrateur applique un **check de livraison** déterministe
 > autour de chaque gate (métadonnées seules — il ne lit pas le contenu) : l'artefact
-> attendu doit **exister**, au **chemin canonique**, et avoir été **écrit à ce passage**
-> (mtime postérieur — pas un résidu d'un round précédent). À défaut, il ne persiste pas
+> attendu doit **exister**, être **non vide**, au **chemin canonique**, et avoir été
+> **écrit à ce passage** (mtime postérieur — pas un résidu d'un round précédent). À défaut, il ne persiste pas
 > le verdict, re-invoque la gate une fois, puis bloque la phase. Détail : `battle.md` §E.
 
 | Verdict | Sens | Effet sur le pipeline |

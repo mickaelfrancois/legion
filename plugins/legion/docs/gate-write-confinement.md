@@ -207,11 +207,13 @@ re-remplirait le contexte que le confinement épargne) :
    `.legion/battles/<id>/<artefact>` et, **s'il existe déjà** (round de re-loop),
    capturer son mtime (`(Get-Item <path>).LastWriteTimeUtc`).
 2. La gate retourne `VERDICT … ARTIFACT: <chemin>`.
-3. **Après** : vérifier **les trois** — (a) le fichier **existe** ; (b) le `ARTIFACT:`
-   retourné **== le chemin canonique** attendu (le guard bloque déjà une mauvaise
-   *écriture* ; ceci attrape un mauvais chemin dans la *chaîne retournée*) ; (c) il a
-   été **écrit à ce passage** (n'existait pas avant, ou mtime **strictement postérieur**
-   à l'étape 1 — un résidu de round précédent ne doit jamais passer pour frais).
+3. **Après** : vérifier **les quatre** — (a) le fichier **existe** ; (b) il est **non
+   vide** (`(Get-Item <path>).Length > 0` — une gate peut rendre un verdict en laissant
+   un artefact **0 octet** ; le fichier existe alors, mais ne prouve rien) ; (c) le
+   `ARTIFACT:` retourné **== le chemin canonique** attendu (le guard bloque déjà une
+   mauvaise *écriture* ; ceci attrape un mauvais chemin dans la *chaîne retournée*) ;
+   (d) il a été **écrit à ce passage** (n'existait pas avant, ou mtime **strictement
+   postérieur** à l'étape 1 — un résidu de round précédent ne doit jamais passer pour frais).
 4. **À tout échec** → ne pas enregistrer le verdict, ne pas avancer ; **re-invoquer la
    gate une fois** (rappel explicite « écris ton artefact à `<chemin exact>` d'abord ») ;
    si l'échec persiste → phase `blocked`, remonter à l'humain, stop. **Jamais

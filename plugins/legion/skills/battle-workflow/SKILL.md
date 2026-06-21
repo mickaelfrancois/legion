@@ -105,8 +105,8 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   the rest (`battle.json`, `spec.md`, PR artifacts) and reads gate artifacts from disk
   on demand. (`pr-triage` also returns its TRIAGE JSON for routing.) Because a verdict
   no longer proves the artifact exists, the orchestrator runs a deterministic
-  **delivery check** before trusting it (artifact exists, canonical path, freshly
-  written this pass via mtime) — see `battle.md` §E.
+  **delivery check** before trusting it (artifact exists, non-empty, canonical path,
+  freshly written this pass via mtime) — see `battle.md` §E.
 
 Sequencing rule: the **orchestrator** (`/battle`) chains `builder → gates`. A gate
 never invokes another agent; the builder never invokes a gate.
