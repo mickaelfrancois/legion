@@ -72,6 +72,12 @@ between decisions one at a time.
   never assert it as fact. (RETEX: a « Cadrage » named the wrong file as carrying a
   per-phase visual and omitted the one that actually displayed it; the architect caught
   it before any code, but a verified claim would have spared the push-back.)
+- **State the scope of any rule or check the « Cadrage » proposes.** When the brief
+  prescribes a control (a new gate, a threshold, a lint rule…), say **what it applies
+  to** — the slice diff vs the whole repo. Scope left implicit defaults wrong: legion's
+  review/security gates already impute findings to the **diff**, so a new check states
+  it the same way. (RETEX: a lint rule « repo not formatted → revise » left its scope
+  unstated; the implicit whole-repo default was wrong, fixed only in PR review.)
 
 **Cover every branch** (skip a branch only once it is genuinely settled): the
 underlying problem/intent, what is **in scope**, what is **explicitly out of scope**,
