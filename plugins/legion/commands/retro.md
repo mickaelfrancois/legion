@@ -25,7 +25,12 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    a delegated skill that misbehaved, an awkward command flow).
 
 3. **Synthesize `retro.md`** (write it in the battle dir, **in French** —
-   identifiers & file names stay English):
+   identifiers & file names stay English). Apply the **writing charter**
+   (`battle-workflow` § « Charte de style des documents ») — simple, precise language;
+   reference it, do not copy it. The **« En bref »** is **conditional**: add a
+   `## En bref` section at the top only when `retro.md` passes **~40 lines** (1-3
+   lines: shipped? + the main learning). Reread `retro.md` against the charter before
+   closing the battle:
 
    ```markdown
    # Retro — <title> (<battle-id>)

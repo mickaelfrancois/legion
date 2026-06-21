@@ -100,6 +100,12 @@ TRIAGE:
 
 ### 2. Artefact `pr-feedback.md` (que tu ÉCRIS ; rédigé **en français**, identifiants en anglais)
 
+> **Charte de style.** Applique la **charte de style des documents** (`battle-workflow`
+> § « Charte de style des documents ») : langage simple et précis. **Référence-la, ne la
+> recopie pas.** L'« En bref » est **conditionnel** : si le fichier (tous rounds cumulés)
+> dépasse **~40 lignes**, ouvre-le par une section « ## En bref » (1-3 lignes : nombre de
+> threads, combien actionnables) **avant** « ## Round <n> ».
+
 ```markdown
 # Retours PR — <titre> (<battle-id>)
 
@@ -118,6 +124,8 @@ TRIAGE:
 
 - **N'écris QUE** ton artefact `pr-feedback.md` dans le dossier de la battle (le
   guard t'y confine) ; retourne le bloc TRIAGE JSON. N'écris ni code, ni `battle.json`.
+- **Avant de rendre** : relis `pr-feedback.md` contre la **charte de style des documents**
+  (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes.
 - **Ne pas** coder, ni poster de réponse, ni changer un statut de thread.
 - **Ne pas** inventer un SHA de commit — l'orchestrateur l'ajoute après application.
 - **Ne pas** classer `builder`/`fixed` un commentaire ambigu — préférer `question`.

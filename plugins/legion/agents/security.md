@@ -99,6 +99,12 @@ ARTIFACT: .legion/battles/<id>/gate-security.md
 
 Contenu de `gate-security.md` (que tu écris ; rédigé **en français**, identifiants en anglais) :
 
+> **Charte de style.** Applique la **charte de style des documents** (`battle-workflow`
+> § « Charte de style des documents ») : langage simple et précis. **Référence-la, ne la
+> recopie pas.** L'« En bref » est **conditionnel** : ajoute « ## En bref » en tête
+> seulement au-delà de **~40 lignes** (1-3 lignes : verdict + finding majeur), sans retirer
+> les findings ni les signaux `fichier:ligne`.
+
 ```markdown
 # Security — <slice_id> (<battle-id>)
 
@@ -122,3 +128,5 @@ Contenu de `gate-security.md` (que tu écris ; rédigé **en français**, identi
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-security.md` (le guard t'y confine) : pas de
   code, pas de `battle.json`. Retourne le **chemin**, pas le contenu.
+- **Avant de rendre** : relis `gate-security.md` contre la **charte de style des
+  documents** (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes, findings préservés.

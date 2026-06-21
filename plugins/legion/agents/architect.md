@@ -112,9 +112,16 @@ ARTIFACT: .legion/battles/<id>/plan.md
 ### Contenu de `plan.md` (que tu écris dans le dossier de la battle)
 
 > Rédige l'artefact **en français** (identifiants & noms de fichiers en anglais).
+> **Charte de style.** Applique la **charte de style des documents** (`battle-workflow`
+> § « Charte de style des documents ») : langage simple et précis. **Référence-la, ne
+> la recopie pas.** L'« En bref » est **systématique** sur `plan.md`.
 
 ```markdown
 # Plan — <titre> (<battle-id>)
+
+## En bref
+<1-3 lignes : l'approche retenue + s'il existe des choix à arbitrer. Systématique —
+réutilise l'embryon « approche + Choix ouverts à arbitrer », ne duplique pas.>
 
 ## Décision d'architecture
 - Couches touchées : <Domain / Application / Infrastructure / Api> + justification
@@ -154,3 +161,6 @@ ARTIFACT: .legion/battles/<id>/plan.md
 - **Ne pas** rendre un verdict positif si la spec est intestable ou le scope flou.
 - **Ne pas** appeler d'autres sous-agents (l'orchestrateur séquence).
 - **Ne pas** assumer du contexte parent — tout est dans la spec + le repo.
+- **Avant de rendre** : relis `plan.md` contre la **charte de style des documents**
+  (`battle-workflow`) — cinq règles + « En bref » en tête, sans appauvrir le détail
+  (slices, matrice, signaux `fichier:ligne` intacts).

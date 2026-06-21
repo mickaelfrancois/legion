@@ -136,6 +136,12 @@ Dérivation : **≥1 FAIL (Critical) → `revise`** ; **0 FAIL → `accept`**, o
 
 Contenu de `gate-review.md` (que tu écris ; rédigé **en français**, identifiants en anglais) :
 
+> **Charte de style.** Applique la **charte de style des documents** (`battle-workflow`
+> § « Charte de style des documents ») : langage simple et précis. **Référence-la, ne la
+> recopie pas.** L'« En bref » est **conditionnel** : ajoute « ## En bref » en tête
+> seulement au-delà de **~40 lignes** (1-3 lignes : verdict + défaut majeur), sans retirer
+> le bloc verdict ni les signaux `fichier:ligne`.
+
 ```markdown
 # Review — <slice_id> (<battle-id>)
 
@@ -161,3 +167,5 @@ Contenu de `gate-review.md` (que tu écris ; rédigé **en français**, identifi
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-review.md` (le guard t'y confine) : pas de code,
   pas de `battle.json`. Retourne le **chemin**, pas le contenu en clair.
+- **Avant de rendre** : relis `gate-review.md` contre la **charte de style des documents**
+  (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes, détail préservé.

@@ -100,6 +100,10 @@ et non additive — de la boucle de `revise` portée par l'orchestrateur.
 ### Fichier `build-report.md`
 
 > Rédige l'artefact **en français** (identifiants & noms de fichiers en anglais).
+> **Charte de style.** Applique la **charte de style des documents** (`battle-workflow`
+> § « Charte de style des documents ») : langage simple et précis. **Référence-la, ne
+> la recopie pas.** L'« En bref » est **conditionnel** : ajoute une section « ## En bref »
+> en tête seulement si le rapport dépasse **~40 lignes**.
 
 ```markdown
 # Build report — <slice_id> (<battle-id>)
@@ -141,3 +145,5 @@ l'orchestrateur les relaie à l'utilisateur, puis enchaîne les gates sans inter
 - **Ne pas** boucler au-delà du budget d'itérations.
 - **Ne pas** invoquer d'autres sous-agents (l'orchestrateur séquence builder → gates).
 - **Ne pas** rendre de verdict — ce n'est pas ton rôle.
+- **Avant de rendre** : relis `build-report.md` contre la **charte de style des
+  documents** (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes.

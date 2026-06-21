@@ -293,3 +293,51 @@ armed.
   is missing the hooks fail silently — the `/battle start` preflight checks it.
 - Iterate in small validated steps; never emit large unvalidated blocks.
 - Delegate, never duplicate — but stay self-contained for core paths.
+
+## Charte de style des documents
+
+**Single source** for the style of every document a battle produces for a human:
+`spec.md`, `plan.md`, `build-report.md`, `gate-*.md`, `pr-feedback.md`, `retro.md`,
+`pr-body.md`, `wi-comment.md`. Each producer **references** this charter — it never
+copies the rules. The charter does **not** cover machine state (`battle.json`,
+`usage.jsonl`, `fleet.d/*.json`, `active-battle`), commit subjects / PR titles
+(Conventional Commits — see ## Conventions), or code identifiers.
+
+The charter is written in English (it is a prompt instruction), but it prescribes
+artifacts **in French** and a French label « En bref » — consistent with ## Conventions.
+
+### Five rules — simple, precise language
+
+1. **One idea per sentence.** Keep sentences short.
+2. **Active voice, present tense.** Prefer "the gate blocks the push" over "the push
+   may be blocked".
+3. **The exact word.** No filler, no hedging ("just", "basically", "I think", "rather").
+4. **Concrete and sourced.** Cite any reference as `file:line`; name the thing, never "it".
+5. **Decisive information first.** Lead with the conclusion; details follow.
+
+### « En bref » summary
+
+A long document opens with an **« En bref »** section, so the reader decides fast
+whether to read on. The label stays French (« En bref »), like every artifact.
+
+- **Systematic** on `spec.md` and `plan.md` (approval documents): always present.
+- **Conditional** on `gate-*.md`, `retro.md`, `build-report.md`, `pr-feedback.md`:
+  add it once the document passes **~40 lines**.
+- **None** on `pr-body.md` and `wi-comment.md`: they are short by design — apply the
+  five rules, but add no separate « En bref ».
+
+**Format.** 1-3 lines or a few bullets, right after the title, before any other
+section. State what matters — the decision, the verdict, the outcome — not a table of
+contents. Reuse the document's existing summary seed instead of duplicating content
+(the spec's "Intention", the plan's approach + "Choix ouverts à arbitrer", a gate's
+verdict block).
+
+An « En bref » **never thins** a reference document: keep every slice, every
+`file:line` signal, every matrix row. The summary is added on top, not as a replacement.
+
+### Self-check before returning
+
+Before handing back an artifact, reread it against this charter:
+- Five rules applied (short active sentences, no filler, sourced, decisive-first)?
+- « En bref » present where required (systematic, or conditional past ~40 lines)?
+- Reference document still complete (no slice, signal or matrix row removed)?
