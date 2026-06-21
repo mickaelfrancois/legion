@@ -55,11 +55,18 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
 4. **Coder la slice** : modifications chirurgicales, une responsabilité par
    classe, noms explicites. Écrire aussi les tests de la matrice couvrant cette
    slice.
-5. **Vérifier le build localement** (depuis le répertoire courant, jamais de
+5. **Cohérence des valeurs récurrentes** : quand une constante, une borne ou une phrase
+   de doctrine apparaît dans **plusieurs** fichiers (une borne de boucle, un seuil, une
+   énumération de gates/phases…), **grep tout l'arbre** (`Grep` sur le repo entier) et
+   normalise **toutes** les occurrences — pas seulement les fichiers de ta slice — avant
+   de rendre la main. Une divergence entre deux copies est un défaut que la gate REVIEW
+   attrape sinon, au prix d'une ronde. (RETEX : une borne de boucle « > 2 » vs « 2 » et
+   « ~6 » vs « 6 » a divergé entre fichiers de doctrine, corrigée au prix de 2 re-gates.)
+6. **Vérifier le build localement** (depuis le répertoire courant, jamais de
    `cd`) : `dotnet build` (ou `dotnet build <cible build>` si l'orchestrateur l'a
    fournie — repo sans `.sln`). Politique d'erreur → § Self-correction. **Relever
    le nombre de warnings** du résumé final (`N Warning(s)`).
-6. **Rédiger `build-report.md`** dans le dossier de la battle (dont le compte de
+7. **Rédiger `build-report.md`** dans le dossier de la battle (dont le compte de
    warnings).
 
 ## Self-correction (politique sur build cassé)
@@ -145,5 +152,8 @@ l'orchestrateur les relaie à l'utilisateur, puis enchaîne les gates sans inter
 - **Ne pas** boucler au-delà du budget d'itérations.
 - **Ne pas** invoquer d'autres sous-agents (l'orchestrateur séquence builder → gates).
 - **Ne pas** rendre de verdict — ce n'est pas ton rôle.
+- **Langue des fichiers édités** : un *command-file* de plugin (`commands/*.md`) que la
+  slice crée ou modifie se rédige en **anglais** (c'est une instruction-prompt) ; seuls
+  les artefacts de battle (`build-report.md`…) et les README sont en français (RETEX).
 - **Avant de rendre** : relis `build-report.md` contre la **charte de style des
   documents** (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes.

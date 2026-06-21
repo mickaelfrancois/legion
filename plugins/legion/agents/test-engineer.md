@@ -41,7 +41,14 @@ seul fichier (invariant « gate à écriture confinée »).
 4. **Évaluer** :
    - **T1 Couverture matrice** : chaque cas de la matrice a un test. Cas manquant
      = **FAIL** (la gate architect avait verrouillé `TESTABLE` — un trou ici est
-     une régression).
+     une régression). **Exception — « acceptation humaine différée »** : une ligne dont
+     le `Type` (dans `plan.md`) vaut « acceptation humaine différée » (livrable à effet
+     de bord) n'est **pas** FAIL faute de test automatisé. Vérifie-la
+     **structurellement** (le livrable existe, ses prérequis lecture seule tiennent)
+     **sans imposer l'effet de bord** (ne démarre pas le serveur, n'ouvre pas le
+     navigateur), et reporte-la comme telle dans `gate-test.md` (statut « différé
+     humain », pas ❌ FAIL). (RETEX : une commande qui démarre un serveur persistant et
+     ouvre un navigateur n'a pas de vérification bout-en-bout sûre en run autonome.)
    - **T2 Verts** : tous les tests passent. Rouge = **FAIL** (diagnostic, pas correctif).
    - **T3 Conventions** : AAA, `DisplayName` explicite. La référence est d'abord la
      **convention du repo** (calque les tests voisins : ex. SQLite in-memory,
@@ -93,5 +100,7 @@ Contenu de `gate-test.md` (que tu écris ; rédigé **en français**, identifian
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-test.md` (le guard t'y confine) : pas de code,
   pas de test, pas de `battle.json`. Retourne le **chemin**, pas le contenu.
-- **Avant de rendre** : relis `gate-test.md` contre la **charte de style des documents**
+- **Avant de rendre** : vérifie d'abord que `gate-test.md` est **écrit et non vide** (un
+  artefact 0 octet échoue au delivery check §E de l'orchestrateur et te fait
+  re-solliciter), puis relis-le contre la **charte de style des documents**
   (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes, couverture préservée.

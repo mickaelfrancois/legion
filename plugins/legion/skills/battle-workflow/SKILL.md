@@ -74,7 +74,7 @@ L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants :
 | Cas | Déclencheur | Action |
 |-----|-------------|--------|
 | **1. `reject`** | Une gate rend un verdict `reject`. | Escalade immédiate, zéro tentative. |
-| **2. Boucle non convergente** | FAIL-count stable/en hausse, ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail du blocage. |
+| **2. Boucle non convergente** | Aucun FAIL ciblé résolu d'une tentative à l'autre (progrès = identité des FAIL, pas le compte brut), ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail du blocage. |
 | **3. Déviation du plan** | La correction sort du périmètre de `plan.md` ou `guard.allow`. | Escalade : re-planification nécessaire. |
 | **4. Filets DELIVER** | Base en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit. | Escalade : résoudre le filet d'abord. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
@@ -87,8 +87,9 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   builder ne décide pas d'escalader — il rapporte `build_ok: false`. Un `build_ok:
   false` après 3 essais **compte pour 1 tentative** de la boucle orchestrateur.
 - **Orchestrateur (re-gate)** : 2 tentatives par gate (maximum ferme), plafond global de 6 tentatives au global (maximum ferme).
-  Progrès = baisse du FAIL-count entre deux tentatives ; stable ou en hausse →
-  escalade immédiate.
+  Progrès = au moins un FAIL ciblé résolu entre deux tentatives (mesuré par l'identité
+  des FAIL — `fichier:ligne` + dimension —, pas le compte brut) ; aucun FAIL précédent
+  résolu → escalade immédiate.
 
 ## Two natures of actor
 
@@ -104,8 +105,8 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   the rest (`battle.json`, `spec.md`, PR artifacts) and reads gate artifacts from disk
   on demand. (`pr-triage` also returns its TRIAGE JSON for routing.) Because a verdict
   no longer proves the artifact exists, the orchestrator runs a deterministic
-  **delivery check** before trusting it (artifact exists, canonical path, freshly
-  written this pass via mtime) — see `battle.md` §E.
+  **delivery check** before trusting it (artifact exists, non-empty, canonical path,
+  freshly written this pass via mtime) — see `battle.md` §E.
 
 Sequencing rule: the **orchestrator** (`/battle`) chains `builder → gates`. A gate
 never invokes another agent; the builder never invokes a gate.
@@ -281,9 +282,15 @@ armed.
 
 ## Conventions
 
-- **Every markdown artifact is written in French** (`spec.md`, `plan.md`,
+- **Every markdown *battle artifact* is written in French** (`spec.md`, `plan.md`,
   `build-report.md`, `gate-*.md`, `pr-body.md`, `wi-comment.md`, `retro.md`).
   English stays for identifiers, file names, commit messages **and PR titles**.
+- **Command-files are English, not French.** The plugin's own `commands/*.md` (prompt
+  instructions to the orchestrator — e.g. `battle.md`, `retro.md`) are written in
+  **English**. The "every battle artifact in French" rule above covers the *artifacts a
+  run produces*, **not** the plugin's command-files. A builder that creates or edits a
+  default-plugin command-file writes it in English. (RETEX: a command-file drafted in
+  French was bounced by REVIEW — the convention read too broadly.)
 - **Commit subjects and PR titles follow Conventional Commits** — English,
   `type(scope): subject` (imperative, no trailing period); `type` ∈
   `feat|fix|refactor|perf|docs|test|build|ci|chore`.

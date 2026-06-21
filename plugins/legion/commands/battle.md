@@ -333,8 +333,12 @@ spares):
    re-loop round),
    capture its current modified-time (`(Get-Item <path>).LastWriteTimeUtc`).
 2. The gate returns `VERDICT … ARTIFACT: <path>`.
-3. **After** the return, verify **all three** — metadata only, no content read:
+3. **After** the return, verify **all four** — metadata only, no content read:
    - the file at the expected path **exists**;
+   - it is **non-empty** — `(Get-Item <path>).Length > 0`. A gate can return a verdict
+     yet leave a **0-byte** artifact (the `Write` never landed, or wrote nothing); such
+     an empty file still **exists**, so the existence check alone would wave it through.
+     (RETEX: an empty `gate-review.md` would have passed the literal check.)
    - the returned `ARTIFACT:` path **equals** the expected canonical path (the guard
      already blocks a wrong *write*; this catches a wrong path in the *returned* string);
    - it was **written this pass** — it either did not exist before, or its
@@ -389,10 +393,14 @@ gate ran.
           par gate atteint, 2 tentatives maximum).
         - Si `run.autocorrect.total >= 6` → **escalade** (cas 2 : plafond global
           atteint, 6 tentatives maximum au global).
-     c. **Détecter le progrès** : comparer le nombre de FAIL du nouveau `gate-*.md`
-        avec celui du run précédent. Si le FAIL-count est **stable ou en hausse** →
-        **escalade immédiate** (cas 2 : non-progrès). Un FAIL-count en baisse = progrès,
-        on continue.
+     c. **Détecter le progrès par l'identité des FAIL, pas par le compte brut.**
+        Compare l'**ensemble** des FAIL du nouveau `gate-*.md` à celui du run précédent,
+        par cible (`fichier:ligne` + dimension, ex. `R2`/`S3`). **Progrès** = au moins
+        un FAIL ciblé au run précédent a **disparu** (résolu) — même si le compte total
+        est stable parce qu'un nouveau FAIL d'une autre cause est apparu. **Non-progrès**
+        = aucun FAIL précédent résolu (le même ensemble persiste ou grossit) →
+        **escalade immédiate** (cas 2). Le compte brut seul est trompeur : « 1 FAIL
+        corrigé, 1 autre découvert » est un compte stable mais un vrai progrès.
      d. Passer au builder le **chemin de l'artefact** `gate-*.md` (lire depuis le
         disque, ne pas injecter le contenu dans ce contexte) et relancer BUILD pour
         cette slice. Puis re-invoquer la gate. Retour à l'étape (a).
@@ -441,9 +449,9 @@ Toute correction déterministe se fait sans lui.
 | Cas | Déclencheur | Action |
 |-----|-------------|--------|
 | **1. `reject`** | Une gate rend un verdict `reject` (régression majeure, redesign requis). | Escalade **immédiate**, zéro tentative de correction. Relayer le verdict + RAISON. |
-| **2. Boucle non convergente** | FAIL-count stable/en hausse après une tentative, ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL-count avant/après, tentatives effectuées. |
+| **2. Boucle non convergente** | Aucun FAIL ciblé résolu d'une tentative à l'autre (progrès = identité des FAIL, pas le compte brut), ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL résolus/persistants/nouveaux, tentatives effectuées. |
 | **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`). | Escalade : re-planification nécessaire. Ne pas modifier `plan.md` en cours de run. |
-| **4. Filets DELIVER déclenchés** | Base locale en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit à arbitrer (§G.0). | Escalade : résoudre le filet d'abord, puis DELIVER peut reprendre. |
+| **4. Filets DELIVER déclenchés** | Base en retard sur `origin` **avec delta d'arbre intersectant** les fichiers touchés (un delta vide ou disjoint est waivé sans escalade — §G.0.a), remote vide, fichier hors whitelist, `.gitignore` auto-induit à arbitrer (§G.0). | Escalade : résoudre le filet d'abord, puis DELIVER peut reprendre. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë (§A.preflight). | Escalade : résoudre l'environnement avant toute battle. |
 
 > **Hors liste = pas d'escalade.** Toute autre situation (warning de build,
@@ -484,12 +492,34 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
       then `git rev-list --count HEAD..origin/<default>` (resolve `<default>` via
       `git symbolic-ref refs/remotes/origin/HEAD`, fallback
       `gh repo view --json defaultBranchRef`). **> 0 → the local base is behind
-      origin** (work already merged elsewhere under another SHA, or a dependency/SDK
-      migration you don't have locally): **stop, integrate first** (rebase or merge
-      origin), then **re-run BUILD + the review/test gates on the updated base**
-      before delivering. A rebase changes what ships, so gate verdicts on the stale
-      base do **not** carry over. (RETEX: a base behind origin's default was only
-      caught at deliver, after the gates had validated a base that wasn't shipped.)
+      origin.** But "behind by N commits" is **not** the same as "the shipped tree
+      differs": a pure merge commit (the branch was already merged elsewhere) leaves
+      origin's tree **byte-identical** to yours. So before forcing a full re-run, **test
+      the actual tree delta**, not just the commit count —
+      `git diff --quiet HEAD origin/<default>` (exit 0 = identical tree):
+
+      - **Tree delta empty** (`git diff --quiet` exits 0) — the divergence is commits
+        only (a pure merge); the tree the gates judged is byte-identical to the base you
+        ship. **Waive the re-gate** — a re-run would re-test the exact same code. Run a
+        **sanity `dotnet build`/`dotnet test`**, rebase the work onto `origin/<default>`,
+        then continue to step 1. (RETEX: HEAD was 1 pure-merge commit behind with an
+        empty tree diff — a full re-gate would have judged byte-identical code.)
+      - **Tree delta non-empty** — origin changed the shipped base. Compare the **base
+        delta** (`git diff --name-only HEAD origin/<default>`) against the files this
+        battle touched (`build-report.md`):
+        - **Disjoint** — the incoming delta touches **no** file the slice changed or
+          depends on (e.g. an unrelated `.gitignore` or docs commit). The gated surface
+          is unaffected, so you **may skip the full re-gate**; **document the
+          justification** (the disjoint delta file list) in the relay, rebase onto
+          `origin/<default>`, then continue. (RETEX: the net forced a full re-run on a
+          base delta that was a single orthogonal `.gitignore` commit.)
+        - **Intersecting** — the delta touches a file the slice changed or depends on
+          (work merged under another SHA, a dependency/SDK migration): **stop, integrate
+          first** (rebase or merge origin), then **re-run BUILD + the review/test gates
+          on the updated base** before delivering. A rebase changes what ships, so gate
+          verdicts on the stale base do **not** carry over. (RETEX: a base behind
+          origin's default was only caught at deliver, after the gates had validated a
+          base that wasn't shipped.)
 
    b. **Empty remote** — the flow assumes the remote already has a base branch.
       Check `git ls-remote --heads origin` — **no heads** means an uninitialized
@@ -529,6 +559,16 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    of this commit (it is repo hygiene this battle introduced). Confirm the choice
    with the user. (RETEX: this self-induced change was ambiguous at commit time.)
 
+   **Version bump grouped in the PR (manifest edit).** If this battle groups a version
+   bump into its PR — editing a manifest such as `.claude-plugin/plugin.json` (or the
+   target repo's package/version file) — note that `guard.allow` is **derived from the
+   plan's slices** and does **not** cover the manifest path, so `guard.py` **blocks** the
+   edit until the perimeter is widened. **Before editing the manifest**, add its glob to
+   the write scope via `/legion:freeze <current globs> <manifest glob>` (or re-run
+   `/legion:guard`), then edit it and add the manifest to this commit's path whitelist.
+   (RETEX: a `0.3.1` bump grouped with the fix was blocked because
+   `plugins/legion/.claude-plugin/**` sat outside the slice-derived perimeter.)
+
    **`<summary>` — English, Conventional Commits format** `type(scope): subject`
    (imperative mood, no trailing period, ≤ ~70 chars). `type` ∈
    `feat|fix|refactor|perf|docs|test|build|ci|chore`; `scope` = the touched area.
@@ -566,8 +606,10 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
 
 4. **CONFIRM (mode `step` uniquement)** — En mode `step`, avant de pousser, afficher
    à l'utilisateur **tout l'effet sortant** : branche cible, message de commit,
-   `git diff --stat`, titre/cible de la PR. **Attendre un OK explicite.** Ne pas
-   pousser avant.
+   `git diff --stat`, titre/cible de la PR, **et le commentaire d'issue** (§G.6, pour
+   une issue numérique). **Attendre un OK explicite** — un seul OK couvre alors push +
+   PR + commentaire d'issue, sans re-solliciter l'humain à l'étape 6. Ne pas pousser
+   avant.
 
    En mode `autonomous`, sauter ce CONFIRM : passer directement à l'étape 5. Les
    filets §G.0 sont la seule barrière — la discipline de staging (whitelist de chemins,
@@ -594,7 +636,12 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    gh issue comment <n> --body-file ".legion/battles/<id>/wi-comment.md"
    ```
    The issue itself closes on merge via `Closes #<n>` — do not close it here. On
-   failure → **warn and continue**: the PR is already created.
+   failure → **warn and continue**: the PR is already created. A constrained/headless
+   session may also **refuse** this comment (an auto-mode classifier blocks an outward
+   write under the user's identity that the run's authorization did not explicitly
+   cover). That refusal is **acceptable, not an error**: the comment is best-effort and
+   `Closes #<n>` already links the PR to the issue. Note it and move on. (RETEX: the
+   comment was refused in an autonomous session; the PR was already created and linked.)
 
 7. **Close the phase** — set `phases.deliver.status = "done"` in `battle.json`
    (record `delivery.pr_url`). Report the PR URL; if the PR draws review comments,

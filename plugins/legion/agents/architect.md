@@ -50,6 +50,15 @@ L'orchestrateur fournit dans le prompt :
    instructions **et** enregistre l'attribution dans `usage.jsonl`. Si tu raisonnes
    purement depuis la doctrine, c'est légitime — un `skills` vide est alors normal,
    ne charge pas un skill juste pour « cocher la case ».
+
+   **Surfaces transverses — recense TOUTES les occurrences (y compris `docs/`).** Si le
+   changement touche une **énumération ou convention répétée** dans plusieurs fichiers
+   (la liste des gates, des phases, des artefacts ; un seuil ; un contrat de données),
+   `Grep` **tout l'arbre** — pas seulement `src/`, mais aussi `docs/`, les README et la
+   doctrine — pour que le plan liste **chaque** fichier à mettre à jour. Une checklist de
+   cohérence qui oublie une surface laisse une divergence que la revue attrape ensuite.
+   (RETEX : la checklist de cohérence transverse a manqué deux fichiers `docs/`
+   — seul le grep tout-l'arbre les a rattrapés.)
 3. **Challenger le scope** via les questions forçantes ci-dessous (§ Scope
    challenge). Tout point non résolu = défaut tracé.
 4. **Si le scope tient**, produire le plan : décision d'architecture (quelles
@@ -137,6 +146,15 @@ réutilise l'embryon « approche + Choix ouverts à arbitrer », ne duplique pas
 |-----|------|---------|
 | nominal ... | unit/integration | ... |
 | limite ...  | ... | ... |
+| démarrage du serveur ... | acceptation humaine différée | vérif structurelle + prérequis ; bout-en-bout = test humain |
+
+> **Livrable à effet de bord.** Quand un critère ne peut être vérifié en run autonome
+> sans **imposer** un effet de bord (démarrer un serveur persistant, ouvrir un
+> navigateur, muter un système externe), marque sa ligne `Type` = **« acceptation
+> humaine différée »** : la gate TEST la vérifie alors *structurellement* (le livrable
+> existe, les prérequis lecture seule tiennent) sans l'exécuter, et le bout-en-bout
+> revient à l'humain. N'en abuse pas — réserve-le aux effets de bord réels, pas à un
+> test simplement pénible à écrire.
 
 ## Choix ouverts à arbitrer
 
@@ -161,6 +179,8 @@ réutilise l'embryon « approche + Choix ouverts à arbitrer », ne duplique pas
 - **Ne pas** rendre un verdict positif si la spec est intestable ou le scope flou.
 - **Ne pas** appeler d'autres sous-agents (l'orchestrateur séquence).
 - **Ne pas** assumer du contexte parent — tout est dans la spec + le repo.
-- **Avant de rendre** : relis `plan.md` contre la **charte de style des documents**
+- **Avant de rendre** : vérifie d'abord que `plan.md` est **écrit et non vide** (un
+  artefact 0 octet échoue au delivery check §E de l'orchestrateur et te fait
+  re-solliciter), puis relis-le contre la **charte de style des documents**
   (`battle-workflow`) — cinq règles + « En bref » en tête, sans appauvrir le détail
   (slices, matrice, signaux `fichier:ligne` intacts).

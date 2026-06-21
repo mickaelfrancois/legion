@@ -129,8 +129,8 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 > **Contrepartie : vérif de livraison.** Comme le verdict ne *prouve* plus que
 > l'artefact existe, l'orchestrateur applique un **check de livraison** déterministe
 > autour de chaque gate (métadonnées seules — il ne lit pas le contenu) : l'artefact
-> attendu doit **exister**, au **chemin canonique**, et avoir été **écrit à ce passage**
-> (mtime postérieur — pas un résidu d'un round précédent). À défaut, il ne persiste pas
+> attendu doit **exister**, être **non vide**, au **chemin canonique**, et avoir été
+> **écrit à ce passage** (mtime postérieur — pas un résidu d'un round précédent). À défaut, il ne persiste pas
 > le verdict, re-invoque la gate une fois, puis bloque la phase. Détail : `battle.md` §E.
 
 | Verdict | Sens | Effet sur le pipeline |
@@ -423,7 +423,7 @@ Toute correction déterministe se fait sans lui.
 | Cas | Déclencheur | Action |
 |-----|-------------|--------|
 | **1. `reject`** | Une gate rend un verdict `reject`. | Escalade immédiate, zéro tentative. |
-| **2. Boucle non convergente** | FAIL-count stable/en hausse après une tentative, ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL-count avant/après, tentatives. |
+| **2. Boucle non convergente** | Aucun FAIL ciblé résolu d'une tentative à l'autre (progrès = identité des FAIL, pas le compte brut), ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL résolus/persistants/nouveaux, tentatives. |
 | **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`). | Escalade : re-planification nécessaire. |
 | **4. Filets DELIVER** | Base locale en retard sur `origin`, remote vide, fichier hors whitelist de commit, `.gitignore` auto-induit. | Escalade : résoudre le filet, puis DELIVER reprend. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
@@ -435,15 +435,19 @@ Hors liste = pas d'escalade.
 | Niveau | Acteur | Budget | Unité mesurée | Décision d'escalade |
 |--------|--------|--------|---------------|---------------------|
 | Interne (build-fix) | `builder` | 3 tentatives | Erreurs `dotnet build` | Le builder rapporte `build_ok: false`, **ne décide pas d'escalader** |
-| Externe (re-gate) | Orchestrateur | 2/gate, 6 au global (maximums fermes) | FAIL-count du `gate-*.md` | L'orchestrateur escalade si non-progrès ou plafond |
+| Externe (re-gate) | Orchestrateur | 2/gate, 6 au global (maximums fermes) | Ensemble des FAIL du `gate-*.md` (par identité) | L'orchestrateur escalade si non-progrès ou plafond |
 
 Les deux budgets sont **non additionnés** : un `build_ok: false` du builder après ses 3
 essais **compte pour 1 tentative** de la boucle orchestrateur. La boucle interne repart
 de 0 à chaque nouvelle demande de correction.
 
-**Détection de progrès :** progrès = baisse du FAIL-count du `gate-*.md` entre deux
-tentatives. FAIL-count stable ou en hausse = non-progrès → escalade immédiate (pas
-d'attente du plafond).
+**Détection de progrès (par identité, pas par compte) :** compare l'**ensemble** des
+FAIL du `gate-*.md` entre deux tentatives, par cible (`fichier:ligne` + dimension).
+Progrès = au moins un FAIL ciblé au run précédent a **disparu** (résolu), même si le
+compte total est stable parce qu'un nouveau FAIL d'une autre cause est apparu. Aucun
+FAIL précédent résolu = non-progrès → escalade immédiate (pas d'attente du plafond).
+Le compte brut seul est trompeur : « 1 FAIL corrigé, 1 autre découvert » est un compte
+stable mais un vrai progrès.
 
 ### Choix ouverts exposés par l'architecte
 
