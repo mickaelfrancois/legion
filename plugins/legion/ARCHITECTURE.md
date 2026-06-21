@@ -308,15 +308,20 @@ plugins/legion/
 │   └── pr-triage.md             # gate ADDRESS (triage des retours de PR)
 ├── hooks/
 │   ├── hooks.json               # PreToolUse: guard,careful · PostToolUse: fleet_sync · Stop/SubagentStop: usage_track
-│   ├── guard.py                 # périmètre d'écriture (exit 2 = block)
+│   ├── guard.py                 # périmètre d'écriture + confinement gates + artefact non vide (exit 2 = block)
 │   ├── careful.py               # avertit sur commandes destructrices (warn)
 │   ├── fleet_sync.py            # écrit le shard fleet.d/<battle> à chaque écriture de battle.json
 │   └── usage_track.py           # append tokens + skills réels à la battle active
+├── scripts/
+│   ├── plugin_retex.py          # journal central RETEX outillage (append/list/resolve, --self-test)
+│   └── base_freshness.py        # filet base-freshness §G.0.a (verdict déterministe, --self-test)
 └── skills/battle-workflow/SKILL.md   # la doctrine opérationnelle (résumé de ce doc)
 ```
 
-> Aucun `scripts/` : la couche tickets/PR passe par le CLI **`gh`** appelé
-> directement depuis `battle.md` (auth & JSON gérés par `gh`, zéro script réseau).
+> La couche tickets/PR passe par le CLI **`gh`** appelé directement depuis `battle.md`
+> (auth & JSON gérés par `gh`, zéro script réseau). Le dossier `scripts/` ne contient
+> que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness),
+> chacun couvert par `--self-test` ; aucun n'appelle le réseau.
 
 ---
 
