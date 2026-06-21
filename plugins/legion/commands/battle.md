@@ -355,10 +355,13 @@ gate ran.
    artifacts it needs (`build-report.md`, `plan.md`, touched files), repo root. For
    `lint`, also pass the **format target** (`stack.build_target` when set — a
    `.csproj` is the deterministic choice for `dotnet format`; absent ⇒ format runs
-   from the root) **and**, when the battle is **non-.NET**, tell `lint` to
-   self-retire (it writes a withdrawal banner and returns a neutral `accept` — see
-   §E "Non-.NET stack"). For `test-engineer`, also pass `stack.test_target` when set
-   (repo without a `.sln`) so `dotnet test` targets the test project explicitly.
+   from the root), **the list of .NET files touched by the slice** (from
+   `build-report.md`) so `lint` scopes `dotnet format --include` to the **diff** and
+   **never judges pre-existing formatting outside the slice**, **and**, when the
+   battle is **non-.NET**, tell `lint` to self-retire (it writes a withdrawal banner
+   and returns a neutral `accept` — see §E "Non-.NET stack"). For `test-engineer`,
+   also pass `stack.test_target` when set (repo without a `.sln`) so `dotnet test`
+   targets the test project explicitly.
 2. **Run the gate artifact delivery check** (above) on the gate's artifact, then
    **record the verdict.** The gate already wrote its artifact (`gate-review.md` /
    `gate-test.md` / `gate-security.md`) on disk — do **not** re-write it from a
