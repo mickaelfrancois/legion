@@ -16,7 +16,9 @@ Regles :
 - **Confinement des gates** : un sous-agent gate (`agent_type` =
   `<plugin>:architect`/`lint`/`reviewer`/`test-engineer`/`security`/`pr-triage`) ne peut
   ecrire QUE son unique artefact dans `.legion/battles/<active>/` (ni code, ni
-  `battle.json`) -> hors de la -> exit 2. Rend structurelle (portee par le hook) la
+  `battle.json`) -> hors de la -> exit 2. Et cet artefact ne peut pas etre **vide** :
+  un `Write` a contenu blanc (0 octet) est bloque (RETEX A1 ; le delivery check de
+  l'orchestrateur reste le filet pour le cas ou la gate n'ecrit rien du tout). Rend structurelle (portee par le hook) la
   garantie « une gate ne touche pas le code ». La session principale (`agent_type`
   "claude") et le `builder` (`<plugin>:builder`) ne sont **pas** confines : regles
   de perimetre standard ci-dessous. S'applique meme guard non arme.
@@ -176,6 +178,11 @@ def _gate_decision(agent_type, rel: str | None, battle_id: str | None):
     return rel == f".legion/battles/{battle_id}/{artifact}"
 
 
+def _is_blank_content(content) -> bool:
+    """True si le contenu d'un `Write` est absent ou entierement blanc (artefact 0 octet)."""
+    return content is None or not str(content).strip()
+
+
 def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     """Retourne (exit_code, message). exit 2 = blocage."""
     if data.get("tool_name") not in WRITE_TOOLS:
@@ -190,6 +197,18 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
         battle_id = _active_battle_id(repo_root)
         rel = _relative(repo_root, file_path) if file_path else None
         if _gate_decision(agent_type, rel, battle_id):
+            # Confinement OK (bon artefact). Refuser EN PLUS un artefact vide : un `Write`
+            # a contenu blanc produit un 0 octet qui passe le confinement mais echouerait
+            # le delivery check de l'orchestrateur (RETEX 9c1d10e5a233 / A1).
+            if data.get("tool_name") == "Write" and _is_blank_content(
+                (data.get("tool_input") or {}).get("content")
+            ):
+                return 2, (
+                    f"BLOQUE : la gate `{agent_type}` ne peut pas ecrire un artefact "
+                    f"VIDE (`{GATE_ARTIFACT[agent_type]}`).\nEcris le contenu COMPLET de "
+                    f"l'artefact, relis-le, puis retourne ton verdict.\n(Un artefact "
+                    f"0 octet echouerait au delivery check de l'orchestrateur.)"
+                )
             return 0, ""
         expected = f".legion/battles/{battle_id or '<aucune battle active>'}/{GATE_ARTIFACT[agent_type]}"
         return 2, (
@@ -291,6 +310,27 @@ def _self_test() -> int:
     assert _gate_decision("legion:reviewer", None, "B") is False                                # chemin hors repo
     # decision : pas de write tool -> 0
     assert _decide({"tool_name": "Bash"}, Path.cwd())[0] == 0
+    # artefact vide (RETEX A1) : contenu blanc -> bloque ; contenu reel -> autorise
+    assert _is_blank_content("") and _is_blank_content("  \n\t ") and _is_blank_content(None)
+    assert not _is_blank_content("# Review\nverdict")
+    import tempfile
+    with tempfile.TemporaryDirectory() as _d:
+        _root = Path(_d)
+        (_root / ".legion" / "battles" / "B").mkdir(parents=True)
+        (_root / ".legion" / "active-battle").write_text("B", encoding="utf-8")
+        (_root / ".legion" / "battles" / "B" / "battle.json").write_text(
+            '{"guard":{"allow":[]}}', encoding="utf-8"
+        )
+        _art = {"file_path": ".legion/battles/B/gate-review.md"}
+        # une gate qui Write son artefact VIDE -> bloque (meme guard non arme)
+        assert _decide({"tool_name": "Write", "agent_type": "legion:reviewer",
+                        "tool_input": {**_art, "content": "   \n"}}, _root)[0] == 2
+        # le meme artefact avec un contenu reel -> autorise
+        assert _decide({"tool_name": "Write", "agent_type": "legion:reviewer",
+                        "tool_input": {**_art, "content": "# Review\nverdict"}}, _root)[0] == 0
+        # un Edit (pas de contenu complet) n'est pas soumis a la regle du Write vide
+        assert _decide({"tool_name": "Edit", "agent_type": "legion:reviewer",
+                        "tool_input": _art}, _root)[0] == 0
     print("OK: guard self-test passed", file=sys.stderr)
     return 0
 
