@@ -451,7 +451,7 @@ Toute correction déterministe se fait sans lui.
 | **1. `reject`** | Une gate rend un verdict `reject` (régression majeure, redesign requis). | Escalade **immédiate**, zéro tentative de correction. Relayer le verdict + RAISON. |
 | **2. Boucle non convergente** | Aucun FAIL ciblé résolu d'une tentative à l'autre (progrès = identité des FAIL, pas le compte brut), ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL résolus/persistants/nouveaux, tentatives effectuées. |
 | **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`). | Escalade : re-planification nécessaire. Ne pas modifier `plan.md` en cours de run. |
-| **4. Filets DELIVER déclenchés** | Base locale en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit à arbitrer (§G.0). | Escalade : résoudre le filet d'abord, puis DELIVER peut reprendre. |
+| **4. Filets DELIVER déclenchés** | Base en retard sur `origin` **avec delta d'arbre intersectant** les fichiers touchés (un delta vide ou disjoint est waivé sans escalade — §G.0.a), remote vide, fichier hors whitelist, `.gitignore` auto-induit à arbitrer (§G.0). | Escalade : résoudre le filet d'abord, puis DELIVER peut reprendre. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë (§A.preflight). | Escalade : résoudre l'environnement avant toute battle. |
 
 > **Hors liste = pas d'escalade.** Toute autre situation (warning de build,
@@ -504,13 +504,22 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
         **sanity `dotnet build`/`dotnet test`**, rebase the work onto `origin/<default>`,
         then continue to step 1. (RETEX: HEAD was 1 pure-merge commit behind with an
         empty tree diff — a full re-gate would have judged byte-identical code.)
-      - **Tree delta non-empty** — origin actually changed the shipped base (work merged
-        under another SHA, or a dependency/SDK migration you don't have locally): **stop,
-        integrate first** (rebase or merge origin), then **re-run BUILD + the review/test
-        gates on the updated base** before delivering. A rebase changes what ships, so
-        gate verdicts on the stale base do **not** carry over. (RETEX: a base behind
-        origin's default was only caught at deliver, after the gates had validated a base
-        that wasn't shipped.)
+      - **Tree delta non-empty** — origin changed the shipped base. Compare the **base
+        delta** (`git diff --name-only HEAD origin/<default>`) against the files this
+        battle touched (`build-report.md`):
+        - **Disjoint** — the incoming delta touches **no** file the slice changed or
+          depends on (e.g. an unrelated `.gitignore` or docs commit). The gated surface
+          is unaffected, so you **may skip the full re-gate**; **document the
+          justification** (the disjoint delta file list) in the relay, rebase onto
+          `origin/<default>`, then continue. (RETEX: the net forced a full re-run on a
+          base delta that was a single orthogonal `.gitignore` commit.)
+        - **Intersecting** — the delta touches a file the slice changed or depends on
+          (work merged under another SHA, a dependency/SDK migration): **stop, integrate
+          first** (rebase or merge origin), then **re-run BUILD + the review/test gates
+          on the updated base** before delivering. A rebase changes what ships, so gate
+          verdicts on the stale base do **not** carry over. (RETEX: a base behind
+          origin's default was only caught at deliver, after the gates had validated a
+          base that wasn't shipped.)
 
    b. **Empty remote** — the flow assumes the remote already has a base branch.
       Check `git ls-remote --heads origin` — **no heads** means an uninitialized
