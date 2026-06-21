@@ -144,3 +144,5 @@ La gate `lint` est .NET-only ; la stack détectée n'est pas .NET. Aucune exécu
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-lint.md` (le guard t'y confine) : pas de code, pas
   de `battle.json`. Retourne le **chemin**, pas le contenu.
+- **Avant de rendre** : vérifie que `gate-lint.md` est **écrit et non vide** (un artefact
+  0 octet échoue au delivery check §E de l'orchestrateur et te fait re-solliciter).

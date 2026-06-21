@@ -93,5 +93,7 @@ Contenu de `gate-test.md` (que tu écris ; rédigé **en français**, identifian
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-test.md` (le guard t'y confine) : pas de code,
   pas de test, pas de `battle.json`. Retourne le **chemin**, pas le contenu.
-- **Avant de rendre** : relis `gate-test.md` contre la **charte de style des documents**
+- **Avant de rendre** : vérifie d'abord que `gate-test.md` est **écrit et non vide** (un
+  artefact 0 octet échoue au delivery check §E de l'orchestrateur et te fait
+  re-solliciter), puis relis-le contre la **charte de style des documents**
   (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes, couverture préservée.

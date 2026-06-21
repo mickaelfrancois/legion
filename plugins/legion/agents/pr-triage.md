@@ -124,7 +124,9 @@ TRIAGE:
 
 - **N'écris QUE** ton artefact `pr-feedback.md` dans le dossier de la battle (le
   guard t'y confine) ; retourne le bloc TRIAGE JSON. N'écris ni code, ni `battle.json`.
-- **Avant de rendre** : relis `pr-feedback.md` contre la **charte de style des documents**
+- **Avant de rendre** : vérifie d'abord que `pr-feedback.md` est **écrit et non vide**
+  (un artefact 0 octet échoue au delivery check §E de l'orchestrateur et te fait
+  re-solliciter), puis relis-le contre la **charte de style des documents**
   (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes.
 - **Ne pas** coder, ni poster de réponse, ni changer un statut de thread.
 - **Ne pas** inventer un SHA de commit — l'orchestrateur l'ajoute après application.

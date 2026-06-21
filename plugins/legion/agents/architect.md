@@ -161,6 +161,8 @@ réutilise l'embryon « approche + Choix ouverts à arbitrer », ne duplique pas
 - **Ne pas** rendre un verdict positif si la spec est intestable ou le scope flou.
 - **Ne pas** appeler d'autres sous-agents (l'orchestrateur séquence).
 - **Ne pas** assumer du contexte parent — tout est dans la spec + le repo.
-- **Avant de rendre** : relis `plan.md` contre la **charte de style des documents**
+- **Avant de rendre** : vérifie d'abord que `plan.md` est **écrit et non vide** (un
+  artefact 0 octet échoue au delivery check §E de l'orchestrateur et te fait
+  re-solliciter), puis relis-le contre la **charte de style des documents**
   (`battle-workflow`) — cinq règles + « En bref » en tête, sans appauvrir le détail
   (slices, matrice, signaux `fichier:ligne` intacts).

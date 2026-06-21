@@ -167,5 +167,7 @@ Contenu de `gate-review.md` (que tu écris ; rédigé **en français**, identifi
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-review.md` (le guard t'y confine) : pas de code,
   pas de `battle.json`. Retourne le **chemin**, pas le contenu en clair.
-- **Avant de rendre** : relis `gate-review.md` contre la **charte de style des documents**
+- **Avant de rendre** : vérifie d'abord que `gate-review.md` est **écrit et non vide**
+  (un artefact 0 octet échoue au delivery check §E de l'orchestrateur et te fait
+  re-solliciter), puis relis-le contre la **charte de style des documents**
   (`battle-workflow`) — cinq règles + « En bref » si > ~40 lignes, détail préservé.
