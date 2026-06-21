@@ -491,6 +491,11 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
 0. **Pre-branch safety nets.** Before branching, two checks:
 
    a. **Base freshness** — the gates must have judged the base you actually ship.
+      **Deterministic helper:** after `git fetch origin`, run
+      `python "$CLAUDE_PLUGIN_ROOT/scripts/base_freshness.py" --touched <files from build-report.md>`
+      — it returns a JSON verdict (`fresh` / `waive_pure_merge` / `waive_disjoint` /
+      `regate`) computed by the git logic below, so you don't judge it by hand. The rest
+      of this item explains what each verdict means and how to act on it.
       Fetch and compare HEAD against the remote default branch: `git fetch origin`,
       then `git rev-list --count HEAD..origin/<default>` (resolve `<default>` via
       `git symbolic-ref refs/remotes/origin/HEAD`, fallback
