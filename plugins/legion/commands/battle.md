@@ -596,8 +596,10 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
 
 4. **CONFIRM (mode `step` uniquement)** — En mode `step`, avant de pousser, afficher
    à l'utilisateur **tout l'effet sortant** : branche cible, message de commit,
-   `git diff --stat`, titre/cible de la PR. **Attendre un OK explicite.** Ne pas
-   pousser avant.
+   `git diff --stat`, titre/cible de la PR, **et le commentaire d'issue** (§G.6, pour
+   une issue numérique). **Attendre un OK explicite** — un seul OK couvre alors push +
+   PR + commentaire d'issue, sans re-solliciter l'humain à l'étape 6. Ne pas pousser
+   avant.
 
    En mode `autonomous`, sauter ce CONFIRM : passer directement à l'étape 5. Les
    filets §G.0 sont la seule barrière — la discipline de staging (whitelist de chemins,
