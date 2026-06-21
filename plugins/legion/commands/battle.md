@@ -559,6 +559,16 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    of this commit (it is repo hygiene this battle introduced). Confirm the choice
    with the user. (RETEX: this self-induced change was ambiguous at commit time.)
 
+   **Version bump grouped in the PR (manifest edit).** If this battle groups a version
+   bump into its PR — editing a manifest such as `.claude-plugin/plugin.json` (or the
+   target repo's package/version file) — note that `guard.allow` is **derived from the
+   plan's slices** and does **not** cover the manifest path, so `guard.py` **blocks** the
+   edit until the perimeter is widened. **Before editing the manifest**, add its glob to
+   the write scope via `/legion:freeze <current globs> <manifest glob>` (or re-run
+   `/legion:guard`), then edit it and add the manifest to this commit's path whitelist.
+   (RETEX: a `0.3.1` bump grouped with the fix was blocked because
+   `plugins/legion/.claude-plugin/**` sat outside the slice-derived perimeter.)
+
    **`<summary>` — English, Conventional Commits format** `type(scope): subject`
    (imperative mood, no trailing period, ≤ ~70 chars). `type` ∈
    `feat|fix|refactor|perf|docs|test|build|ci|chore`; `scope` = the touched area.
