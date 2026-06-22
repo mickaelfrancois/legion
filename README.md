@@ -6,7 +6,7 @@
 
 Inspirée de [gstack](https://github.com/garrytan/gstack). `legion` n'écrit (presque)
 pas de code lui-même : c'est un **chef d'orchestre**. Il séquence des sous-agents
-« gates » en lecture seule (qui rendent un verdict `accept` / `revise` / `reject`),
+« gates » en lecture seule sur le code (qui rendent un verdict `accept` / `revise` / `reject`),
 garde l'état de chaque tâche par repo, et **délègue** tout le travail .NET concret à
 [`dotnet-claude-kit`](https://github.com/trossitec/dotnet-claude-kit).
 
@@ -67,7 +67,7 @@ Conception & doctrine : [`plugins/legion/ARCHITECTURE.md`](plugins/legion/ARCHIT
 ## Comment ça marche en bref
 
 - **Gates = sous-agents isolés** : démarrent en session vierge, lisent le livrable,
-  rendent un verdict. Lecture seule — ils ne touchent jamais au code ni à l'état.
+  rendent un verdict. Lecture seule sur le code — ils écrivent seulement leur artefact, jamais le code.
 - **État local par repo** dans `.legion/battles/<id>/` (git-ignoré) ; la trace pérenne
   vit dans la PR + l'issue GitHub.
 - **Vue multi-repo** : `/legion:fleet` agrège un index global (`~/.claude/legion/fleet.d/`)

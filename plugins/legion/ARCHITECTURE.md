@@ -116,7 +116,12 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 > `guard.py` l'y **confine**
 > via `agent_type` (toute autre écriture — code, `battle.json`, artefact d'une autre
 > gate → `exit 2`) : la garantie « une gate ne touche pas le code » est ainsi
-> **structurelle** (portée par le hook), non plus seulement déclarative. La gate
+> **structurelle** (portée par le hook), non plus seulement déclarative.
+> **L'invariant immuable est « une gate ne touche pas le _code_ » (juge ≠ partie) —
+> *pas* « une gate n'écrit rien ».** Qu'une gate écrive son propre artefact ne le viole
+> pas : ce canal sert la **discipline de contexte** (sortir le contenu des artefacts du
+> transcript orchestrateur). Le *pourquoi* complet :
+> [`docs/gate-write-confinement.md`](docs/gate-write-confinement.md) §1. La gate
 > **retourne** alors son verdict + le **chemin** de l'artefact — *jamais* le contenu
 > en clair : c'est ce qui garde le travail des gates **hors du contexte** de la
 > session orchestratrice (le levier de discipline de contexte). L'**orchestrateur**
@@ -333,7 +338,8 @@ plugins/legion/
   pour bloquer, bypass par env var, `--self-test`. (Le launcher `py` marche aussi si
   installé — ajuster `hooks.json`.)
 - **Agents** : frontmatter `name`/`description`/`model`/`tools` (whitelist)/
-  `permissionMode`. Lecture seule stricte pour les gates de revue.
+  `permissionMode`. Lecture seule **sur le code** pour les gates de revue : elles
+  écrivent leur seul artefact, confinées par le guard (cf. §4, §6.1).
 - **Verdict en cascade** `accept | accept_with_opportunity | revise | reject`.
 - **Shell** : pas de `cd`, pas de chaînage `&&`/`;`/`|`, pas de redirection.
 - **Pas de duplication** : toute capacité existante est invoquée via `Skill`.

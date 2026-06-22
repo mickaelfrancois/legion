@@ -101,7 +101,10 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   single artifact** (`plan.md` / `gate-*.md` / `pr-feedback.md`) and returns only its
   **verdict + the artifact path** — never the full content, which keeps it out of the
   orchestrator's context. The `guard.py` hook **confines** each gate to that one file
-  (via `agent_type`): invariant "gate à écriture confinée". The orchestrator persists
+  (via `agent_type`): invariant "gate à écriture confinée". **The immutable invariant is
+"a gate never touches the _code_" (judge ≠ party), not "a gate writes nothing"**; a
+gate writing its own artifact serves context discipline. Rationale:
+[`../../docs/gate-write-confinement.md`](../../docs/gate-write-confinement.md) §1. The orchestrator persists
   the rest (`battle.json`, `spec.md`, PR artifacts) and reads gate artifacts from disk
   on demand. (`pr-triage` also returns its TRIAGE JSON for routing.) Because a verdict
   no longer proves the artifact exists, the orchestrator runs a deterministic
