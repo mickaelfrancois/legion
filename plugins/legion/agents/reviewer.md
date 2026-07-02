@@ -65,7 +65,10 @@ est ton **moteur** ; tu y ajoutes ce que lui ne sait pas : la **conformité au
 4. **Capturer** chaque défaut : signal (citation + fichier:ligne), **sévérité**
    (modèle `code-review` : **Critical → FAIL**, **Warning → WARN**, **Suggestion →
    INFO/opportunity**), correctif **pointé** (pas rédigé). Ne noie jamais un Critical
-   sous des suggestions cosmétiques.
+   sous des suggestions cosmétiques. Une observation **hors du diff de la slice** (dette
+   pré-existante, code non touché) ne va **ni en FAIL ni en WARN** : consigne-la dans la
+   section `## Hors périmètre — candidats issue` de ton artefact (elle ne pèse pas sur le
+   verdict ; l'orchestrateur la matérialise en issue au REFLECT).
 
 > **Checklist performance (R6).** Au-delà des anti-patterns *mécaniques* (Roslyn,
 > étape 2), juge ce que la machine ne voit pas — l'**intention** derrière la requête
@@ -158,6 +161,21 @@ Contenu de `gate-review.md` (que tu écris ; rédigé **en français**, identifi
 
 ### [WARN] R4 — Nom non explicite
 ...
+
+## Hors périmètre — candidats issue
+
+> Optionnel. Observations **hors du diff de la slice** (dette pré-existante, code non
+> touché, amélioration adjacente) qui méritent une issue GitHub de suivi sur le repo
+> cible. **Ne pèse JAMAIS sur le verdict** — il reste imputé au diff. L'orchestrateur
+> agrège ces entrées au REFLECT (`/legion:retro`), dédoublonne et les matérialise en
+> issues. Omettre la section s'il n'y a rien.
+
+### <titre court de l'opportunité>
+- **Zone** : `<fichier ou composant>`
+- **Type** : bug | amélioration | dette | test manquant | perf | sécurité
+- **Observation** : <constat, avec `fichier:ligne`>
+- **Hors périmètre car** : <pourquoi ce n'est pas dans la slice courante>
+- **Piste** : <esquisse de résolution>
 ```
 
 ## Anti-patterns

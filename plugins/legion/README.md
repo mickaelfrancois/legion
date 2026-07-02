@@ -109,7 +109,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 /legion:battle address             ← triage des commentaires → corrige → répond → résout
 
 # 6. Clôturer
-/legion:retro                      ← synthèse, 1 apprentissage durable, ferme la battle
+/legion:retro                      ← synthèse, apprentissage durable, opportunités hors-scope → issues, ferme la battle
 ```
 
 À tout moment :
@@ -135,7 +135,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 | `/legion:battle address` | *(post-deliver, répétable)* Traite les commentaires de revue de la PR : la gate `pr-triage` classe chaque fil, l'orchestrateur corrige (re-gate si besoin), répond et résout. |
 | `/legion:battle resume <id>` | Reprend une battle existante (respecte son `run.mode`). |
 | `/legion:battle status` | État des phases de la battle courante. |
-| `/legion:retro [<id>]` | Rétrospective + apprentissage en mémoire + clôture. |
+| `/legion:retro [<id>]` | Rétrospective + apprentissage en mémoire + opportunités hors-scope → issues GitHub (dédup) + clôture. |
 | `/legion:fleet [all\|prune]` | Vue consolidée des battles multi-repo. |
 | `/legion:legatus` | Lance **Legatus**, l'UI web locale read-only de suivi (http://localhost:5021), depuis n'importe quel repo. |
 | `/legion:freeze <globs>` / `off` | Restreint l'écriture aux globs donnés. |

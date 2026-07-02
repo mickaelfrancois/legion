@@ -131,6 +131,22 @@ et non additive — de la boucle de `revise` portée par l'orchestrateur.
 
 ## Résiduel / à signaler aux gates
 - <warnings non bloquants, dette assumée, point pour reviewer/test-engineer>
+
+## Hors périmètre — candidats issue
+
+> Optionnel. Observations **hors du périmètre de la slice** repérées en codant (dette
+> pré-existante, code adjacent non touché, amélioration) qui méritent une issue GitHub
+> de suivi sur le repo cible. Distincte du `## Résiduel` ci-dessus (qui, lui, signale
+> aux gates ce qui concerne la slice). **Ne pèse JAMAIS sur le verdict** (tu n'en rends
+> pas). L'orchestrateur agrège ces entrées au REFLECT (`/legion:retro`), dédoublonne et
+> les matérialise en issues. Omettre la section s'il n'y a rien.
+
+### <titre court de l'opportunité>
+- **Zone** : `<fichier ou composant>`
+- **Type** : bug | amélioration | dette | test manquant | perf | sécurité
+- **Observation** : <constat, avec `fichier:ligne`>
+- **Hors périmètre car** : <pourquoi ce n'est pas dans la slice courante>
+- **Piste** : <esquisse de résolution>
 ```
 
 ### Valeur de retour (à l'orchestrateur)

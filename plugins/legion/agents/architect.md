@@ -156,6 +156,21 @@ réutilise l'embryon « approche + Choix ouverts à arbitrer », ne duplique pas
 > revient à l'humain. N'en abuse pas — réserve-le aux effets de bord réels, pas à un
 > test simplement pénible à écrire.
 
+## Hors périmètre — candidats issue
+
+> Optionnel. Observations **hors du périmètre de la feature traitée** (dette
+> pré-existante, code non touché, amélioration adjacente) qui méritent une issue GitHub
+> de suivi sur le repo cible. **Ne pèse JAMAIS sur le verdict** — il reste imputé au
+> scope jugé. L'orchestrateur agrège ces entrées au REFLECT (`/legion:retro`),
+> dédoublonne et les matérialise en issues. Omettre la section s'il n'y a rien.
+
+### <titre court de l'opportunité>
+- **Zone** : `<fichier ou composant>`
+- **Type** : bug | amélioration | dette | test manquant | perf | sécurité
+- **Observation** : <constat, avec `fichier:ligne`>
+- **Hors périmètre car** : <pourquoi ce n'est pas dans le scope de cette battle>
+- **Piste** : <esquisse de résolution>
+
 ## Choix ouverts à arbitrer
 
 > Ces décisions de conception ont été figées lors de la planification. Elles doivent
