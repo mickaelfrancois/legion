@@ -1,5 +1,5 @@
 ---
-description: Close a battle with a retrospective — synthesize its artifacts into retro.md, persist one durable code learning to project memory, journal any tooling (plugin) RETEX centrally, and close the battle.
+description: Close a battle with a retrospective — synthesize its artifacts into retro.md, persist one durable code learning to project memory, journal any tooling (plugin) RETEX centrally, file out-of-scope opportunities as deduplicated GitHub issues on the target repo, and close the battle.
 argument-hint: (no args = active battle) | <battle-id>
 ---
 
@@ -11,7 +11,10 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 2. **Read its artifacts** under `.legion/battles/<id>/`: `spec.md`, `plan.md`,
    every `gate-*.md`, `build-report.md`, `pr-body.md`. Reconstruct the story: what
    shipped, what got blocked and why (gate `revise`/`reject` + the FAILs), how
-   many build/gate round-trips, which opportunities were logged.
+   many build/gate round-trips, which opportunities were logged. **Also collect every
+   `## Hors périmètre — candidats issue` section** (out-of-scope observations logged by
+   the gates and the builder) — you turn the actionable ones into GitHub issues at
+   step 7.
 
    Also read **`usage.jsonl`** if present (written by the `usage_track` hook): each
    line is `{scope, agent_type?, skills[], tokens{input,output,…}}`. Aggregate it:
@@ -74,8 +77,9 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    writable), so it is already persisted by step 3 regardless of order.
 
    > **Order matters.** The out-of-repo writes that follow — the memory write (step 5,
-   > `~/.claude/projects/<slug>/memory/`) and the central RETEX journal (step 6,
-   > `~/.claude/legion/plugin-retex.jsonl`) — both land **outside the repo**.
+   > `~/.claude/projects/<slug>/memory/`), the central RETEX journal (step 6,
+   > `~/.claude/legion/plugin-retex.jsonl`), and the opportunity issues (step 7,
+   > `gh issue create` on the target repo) — all land **outside the repo**.
    > `guard.py` now exempts the memory path, but closing the battle here first means
    > the perimeter is already released as a second safety net (RETEX: the memory
    > `Write` was blocked when it ran before the close with a perimeter still active).
@@ -120,12 +124,76 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    — `list` then hides it; `--all` / `--resolved` and the UI's *Résolus* toggle show
    history). This is what keeps the list from re-surfacing already-handled items.
 
-7. **Report**: the outcome summary, the learning persisted (or why none), the
-   plugin-RETEX items journaled (or `RAS`), and the path to `retro.md`. The
+7. **File out-of-scope opportunities as GitHub issues** (the target-repo backlog loop —
+   the **third** REFLECT output, alongside the project-memory learning of step 5 and the
+   central plugin-RETEX journal of step 6). During a battle, gates and the builder log
+   observations that fall **outside** the feature's scope in a
+   `## Hors périmètre — candidats issue` section of their artifact. Turn the actionable
+   ones into follow-up issues on the **target repo**, **without duplicates**. All `gh`
+   writes stay here — the script never touches the network.
+
+   a. **Aggregate** every `## Hors périmètre — candidats issue` section from the artifacts
+      read at step 2 (`plan.md`, each `gate-*.md`, `build-report.md`). No such section
+      anywhere → skip this step entirely (write nothing, report `RAS`).
+
+   b. **Filter** — keep only what is **out of scope** AND **actionable** AND
+      **substantial**. Drop nits, vague remarks, and anything the shipped work already
+      covers. A loose filter spams the repo; be strict.
+
+   c. **Build the candidate list + fetch existing issues.** Write the kept candidates to
+      `.legion/battles/<id>/opportunities.json` (under the battle dir — always writable,
+      git-ignored), each entry `{ title, zone, kind, observation, out_of_scope, lead,
+      phase }` (the section's sub-template). Fetch existing issues in **one** call:
+
+      ```bash
+      gh issue list --state all --label legion-opportunity --json number,title,body,state --limit 500
+      ```
+
+      Write `{ "candidates": [...], "issues": [...] }` to
+      `.legion/battles/<id>/opp-dedup-in.json`, then classify (deterministic, offline):
+
+      ```bash
+      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" dedup --file ".legion/battles/<id>/opp-dedup-in.json"
+      ```
+
+      It returns `{ to_create, duplicates, probable }`. **`duplicates`** (fingerprint
+      already on an issue, **open or closed**) are **skipped** — the GitHub close is the
+      tombstone, never recreate them. **`probable`** (title overlaps an **open** issue) is
+      **advisory**: surface it, let the human decide.
+
+   d. **Render each `to_create` body** — the script owns the format and the fingerprint
+      marker (`<!-- legion-opportunity: <fp> -->`), the pivot of the anti-duplicate net:
+
+      ```bash
+      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> > ".legion/battles/<id>/opp-<fingerprint>.md"
+      ```
+
+   e. **CONFIRM (outward effect).** Show the user the list to create — each title + body,
+      plus any `probable` overlap flag. **Wait for an explicit OK** (same discipline as
+      `recon` / `deliver`). **Never create an issue without it.** The human may drop any
+      candidate (e.g. a confirmed `probable` duplicate).
+
+   f. **Create** each confirmed candidate (create the label once, best-effort):
+
+      ```bash
+      gh label create legion-opportunity --description "Opportunité hors-scope repérée par une battle legion" --color BFD4F2
+      gh issue create --label legion-opportunity --title "<title>" --body-file ".legion/battles/<id>/opp-<fingerprint>.md"
+      ```
+
+      `gh label create` fails harmlessly if the label already exists — ignore that error.
+      Record the created issue URLs for the report.
+
+   g. **Degrade gracefully if `gh` is absent/unauthenticated**: do not fail — print the
+      rendered issues (title + body) **ready to paste** and tell the user to create them
+      manually (same fallback as `recon`'s create path).
+
+8. **Report**: the outcome summary, the learning persisted (or why none), the
+   plugin-RETEX items journaled (or `RAS`), **the opportunity issues created (or why
+   none, or the paste-ready fallback)**, and the path to `retro.md`. The
    tooling-friction notes also stay in `retro.md` — review them when you next
    iterate on the plugin itself.
 
 Delegation: this is the only stack phase that writes to long-term memory. The
 code/project learning goes to Claude memory; the **tooling** learning goes to the
-central plugin-retex journal. Keep battle artifacts in the battle dir; keep memory
-lean.
+central plugin-retex journal; the **out-of-scope opportunities** go to GitHub issues on
+the target repo. Keep battle artifacts in the battle dir; keep memory lean.

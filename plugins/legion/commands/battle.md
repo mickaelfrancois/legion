@@ -381,7 +381,10 @@ gate ran.
    `reviewer` gate writes `phases.review`).
 3. **Branch on the verdict** (cascade):
    - `accept` / `accept_with_opportunity` → `status = "done"`, continue to the
-     next gate. Log any opportunity.
+     next gate. Log any opportunity. **Out-of-scope observations** the gate recorded in
+     its `## Hors périmètre — candidats issue` section are collected at REFLECT
+     (`/legion:retro`, step 7) and filed as deduplicated GitHub issues on the target
+     repo — nothing to do here beyond recording the verdict.
    - `reject` → `status = "blocked"`, **escalade immédiate** (cas 1 de la taxonomie).
      Relay the verdict's one-line RAISON and hand back — zero tentative de correction.
      La replanification est requise.

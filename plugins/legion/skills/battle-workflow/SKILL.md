@@ -136,7 +136,7 @@ never invokes another agent; the builder never invokes a gate.
 | (sec) | `security` gate | `gate-security.md` | `dotnet-claude-kit:security-scan` |
 | DELIVER | `/battle deliver` | `pr-body.md`, `wi-comment.md` | `gh pr create` (PR with `Closes #<n>`), `gh issue comment` |
 | (ADDRESS) | `pr-triage` gate | `pr-feedback.md` | `gh api graphql` (PR review threads); loops fixes back to BUILD/REVIEW/TEST |
-| REFLECT | `/retro` | `retro.md` | Claude memory |
+| REFLECT | `/retro` | `retro.md` | Claude memory · `plugin-retex.jsonl` · GitHub issues (`opportunity.py`) |
 
 Gates are optional per battle **profile** (`feature` / `hotfix` / `security` /
 `spike`); `battle.json.required_gates` declares which ones block.
@@ -268,8 +268,11 @@ shared index, so parallel Claude sessions never overwrite each other). One Claud
 session = one repo; the fleet makes battles observable and resumable, it does not
 multiplex sessions.
 
-A retro feeds one improvement loop: the **code/project** learning → Claude project
-memory. Persist only what would change how the *next* battle is run.
+A retro feeds three capitalization outputs: the **code/project** learning → Claude
+project memory (persist only what would change how the *next* battle is run); the
+**tooling** RETEX → the central `plugin-retex.jsonl` journal; and **out-of-scope
+opportunities** → deduplicated GitHub issues on the target repo (from the
+`## Hors périmètre — candidats issue` sections, materialized via `scripts/opportunity.py`).
 
 ## Guardrails
 

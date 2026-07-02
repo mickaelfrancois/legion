@@ -145,6 +145,14 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 | `revise` | ≥1 FAIL | **Stop**. Correction requise (retour BUILD) avant re-soumission. |
 | `reject` | Régression majeure / livrable inexploitable | **Stop**. Re-conception requise. |
 
+> **Deux canaux distincts d'une gate.** Le verdict ci-dessus juge le **diff de la slice**.
+> En parallèle, une gate (et le `builder`) peut consigner dans son artefact une section
+> `## Hors périmètre — candidats issue` : des observations **hors du diff** (dette
+> pré-existante, code adjacent, amélioration) qui **ne pèsent jamais sur le verdict**. Le
+> REFLECT les agrège, les dédoublonne (`scripts/opportunity.py`) et les matérialise en
+> **issues GitHub** sur le repo cible — c'est la **3ᵉ sortie** du REFLECT, à côté de
+> l'apprentissage code (mémoire projet) et du RETEX outillage (journal central, §8).
+
 ### 4.1 Les cinq gates
 
 | Sous-agent | Lecture seule (sur le code) ? | Modèle | Mandat |
@@ -319,14 +327,17 @@ plugins/legion/
 │   └── usage_track.py           # append tokens + skills réels à la battle active
 ├── scripts/
 │   ├── plugin_retex.py          # journal central RETEX outillage (append/list/resolve, --self-test)
-│   └── base_freshness.py        # filet base-freshness §G.0.a (verdict déterministe, --self-test)
+│   ├── base_freshness.py        # filet base-freshness §G.0.a (verdict déterministe, --self-test)
+│   └── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
 └── skills/battle-workflow/SKILL.md   # la doctrine opérationnelle (résumé de ce doc)
 ```
 
 > La couche tickets/PR passe par le CLI **`gh`** appelé directement depuis `battle.md`
 > (auth & JSON gérés par `gh`, zéro script réseau). Le dossier `scripts/` ne contient
-> que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness),
-> chacun couvert par `--self-test` ; aucun n'appelle le réseau.
+> que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness,
+> dédup des opportunités hors-scope), chacun couvert par `--self-test` ; aucun n'appelle
+> le réseau (la couche `gh` — dont la création des issues d'opportunité — reste dans les
+> command-files).
 
 ---
 

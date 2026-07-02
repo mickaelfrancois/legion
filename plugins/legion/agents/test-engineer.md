@@ -91,6 +91,21 @@ Contenu de `gate-test.md` (que tu écris ; rédigé **en français**, identifian
 
 ## Diagnostic (tests rouges)
 - <test> : <cause observée, sans correctif>
+
+## Hors périmètre — candidats issue
+
+> Optionnel. Observations **hors du diff de la slice** (dette pré-existante, code non
+> couvert par des tests hors slice, amélioration adjacente) qui méritent une issue
+> GitHub de suivi sur le repo cible. **Ne pèse JAMAIS sur le verdict** — il reste imputé
+> au diff. L'orchestrateur agrège ces entrées au REFLECT (`/legion:retro`), dédoublonne
+> et les matérialise en issues. Omettre la section s'il n'y a rien.
+
+### <titre court de l'opportunité>
+- **Zone** : `<fichier ou composant>`
+- **Type** : bug | amélioration | dette | test manquant | perf | sécurité
+- **Observation** : <constat, avec `fichier:ligne`>
+- **Hors périmètre car** : <pourquoi ce n'est pas dans la slice courante>
+- **Piste** : <esquisse de résolution>
 ```
 
 ## Anti-patterns

@@ -75,6 +75,9 @@ Conception & doctrine : [`plugins/legion/ARCHITECTURE.md`](plugins/legion/ARCHIT
 - **Garde-fous exécutables** : `/legion:freeze` (ou `/legion:guard`, périmètre déduit
   du plan) limite réellement la zone d'écriture — un hook bloque toute édition hors
   zone, builder compris ; `/legion:careful` avertit sur les commandes destructrices.
+- **Opportunités hors-scope → issues GitHub** : une amélioration ou anomalie repérée
+  pendant une battle mais **hors du périmètre** de la feature devient, au REFLECT, une
+  **issue de suivi** sur le repo (dédoublonnée) — pour qu'une prochaine battle la traite.
 
 ## Licence
 
