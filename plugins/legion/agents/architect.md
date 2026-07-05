@@ -38,8 +38,42 @@ L'orchestrateur fournit dans le prompt :
 1. **Chemin de `spec.md`** (intent, in/out-scope, hypothèses, critères d'accept.)
 2. **Dossier de la battle** `.legion/battles/<id>/`
 3. **Racine du repo** (pour explorer l'archi existante)
+4. **(revise uniquement) Contexte de reprise** : le prompt signale explicitement un
+   **re-passage sur `revise`** et fournit (a) le fait que `plan.md` existe déjà dans le
+   dossier de la battle, (b) les **FAILs à résoudre** (verbatim, ciblés `fichier:ligne`
+   + dimension), (c) le **delta de `spec.md`** depuis le passage précédent. Absent au
+   premier passage et sur `reject` (une refonte repart à froid).
 
 ## Procédure
+
+> **Deux modes.** Passage **à froid** (premier passage, ou `reject` : refonte) → la
+> procédure complète ci-dessous. Passage **incrémental** (le prompt signale un
+> re-passage sur `revise`, cf. Input 4) → le **mode incrémental** ci-dessous : tu
+> **patches** le `plan.md` existant contre les FAILs, sans re-balayer tout l'arbre.
+> C'est le levier de coût du « retour sur le plan » : à froid, l'exploration est
+> redondante d'un passage à l'autre — en incrémental, tu ne re-explores que les
+> surfaces touchées par les FAILs.
+
+### Mode incrémental (re-passage sur `revise`)
+
+1. **Lire le `plan.md` existant** (dossier de la battle) et le **delta de `spec.md`**.
+2. **Ne cibler que les FAILs fournis.** Pour chaque FAIL, corrige le point précis du
+   plan (une couche mal placée, un critère intestable, un contrat non versionné). Ne
+   re-challenge pas le scope déjà accepté ni les slices déjà valides.
+3. **Explorer uniquement les surfaces touchées par les FAILs** (les fichiers/couches
+   nommés dans les FAILs ou le delta), pas l'arbre entier. Exception unique : si un
+   FAIL porte sur une **énumération/convention transverse** (liste de gates, phases,
+   seuil, contrat de données), applique le grep tout-l'arbre **pour cette surface-là**
+   seulement (cf. RETEX cohérence).
+4. **Réécrire `plan.md`** patché (sections corrigées + « En bref » à jour), puis rendre
+   le verdict. Réutilise tel quel tout ce que les FAILs ne touchent pas.
+
+> **Garde-fou.** Le mode incrémental n'est légitime **que** sur un re-passage `revise`
+> annoncé par l'orchestrateur. Au premier passage, sur `reject`, ou si le delta de spec
+> change le scope de fond (nouvelle couche, nouveau contrat public), repars **à froid** —
+> l'économie ne vaut pas un plan bâti sur une exploration périmée.
+
+### Mode à froid (premier passage / `reject`)
 
 1. **Lire `spec.md`** en entier.
 2. **Explorer l'archi existante** du repo (`Glob`/`Grep`) : couches Clean

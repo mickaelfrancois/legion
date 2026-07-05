@@ -211,7 +211,12 @@ run time**):
   "required_gates": ["architect", "lint", "reviewer", "test-engineer"],
   "phases": {
     "think":   { "status": "done", "artifact": "spec.md" },
-    "plan":    { "status": "in_progress", "artifact": "plan.md", "verdict": null },
+    "plan":    { "status": "in_progress", "artifact": "plan.md", "verdict": null, "fails": [] },
+    // plan.fails — sur `revise`, l'orchestrateur y persiste les FAILs verbatim relayés
+    // (ciblés fichier:ligne + dimension) ET snapshote spec.md → `spec.plan-baseline.md`
+    // dans le dossier de la battle. Les deux forment le contexte de reprise du re-run
+    // incrémental (les FAILs vivent sinon dans le seul contexte live et disparaissent
+    // sur session reprise / compaction). Vidé ([]) dès qu'un passage rend `accept*`.
     "build":   { "status": "pending" },
     "lint":    { "status": "pending" },     // .NET-only — self-retires (neutral accept) on non-.NET
     "review":  { "status": "pending" },

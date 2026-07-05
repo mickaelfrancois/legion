@@ -199,13 +199,35 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    `plan.md` itself (the guard confines it to that single file) and **returns** a
    verdict + the artifact path — not the content.
 
+   **Re-invocation after a `revise` → incremental mode.** If this pass is a
+   **PLAN re-run** (`plan.md` already exists and `phases.plan.verdict == "revise"` on
+   the previous pass), this is the cost lever of the "back to the plan" loop: do **not**
+   re-launch the architect cold. Build the **resume context** (the agent's Input 4)
+   **from disk, not from live memory** — it must survive a resumed session / compaction:
+   - **FAILs**: read `phases.plan.fails` from `battle.json` (persisted verbatim at the
+     previous pass, cf. step 6). If the array is empty/absent (e.g. a battle predating
+     this field), fall back to a **cold pass** — never patch a plan against no FAILs.
+   - **spec delta**: diff the current `spec.md` against `spec.plan-baseline.md` (the
+     snapshot taken at the previous `revise`). That diff **is** the spec delta.
+
+   Add to the prompt: an explicit signal of the `revise` re-pass, that `plan.md` exists,
+   the verbatim FAILs, and the spec delta. The architect then **patches** the plan
+   without re-sweeping the whole tree. On `reject`, or if the spec delta changes the
+   scope of substance (new layer / public contract), fall back to a **cold pass**
+   (standard prompt, no resume context).
+
 6. **Record the result.** First run the **gate artifact delivery check** (§E) on
    `plan.md` — the `architect` must have actually written it this pass. `plan.md` is
    already on disk — do **not** re-write it from a returned blob. Once delivery is
    confirmed, update `battle.json`: `phases.plan.verdict` and `phases.plan.status`.
    Read `plan.md` from disk only if you need its detail to report.
    - `revise` / `reject` → `status = "blocked"`; relay the FAILs verbatim and ask
-     the user how to adjust the spec. Do **not** advance.
+     the user how to adjust the spec. Do **not** advance. On `revise`, **persist the
+     resume context to disk** so step 5's incremental re-run survives a fresh session:
+     write the relayed FAILs verbatim into `phases.plan.fails` (`battle.json`) and copy
+     the current `spec.md` to `spec.plan-baseline.md` in the battle dir. On `reject`,
+     do **not** persist (a rejected plan restarts cold). Clear `phases.plan.fails` back
+     to `[]` on the next `accept` / `accept_with_opportunity`.
    - `accept` / `accept_with_opportunity` → `status = "done"`. Lire `plan.md` pour
      présenter le résumé, les éventuelles opportunités, et la section
      **« Choix ouverts à arbitrer »** (si elle est présente). Puis demander
