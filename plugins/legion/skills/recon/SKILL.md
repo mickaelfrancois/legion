@@ -40,10 +40,19 @@ back as a **« Cadrage »** section on the issue. The payoff is downstream:
      offer a fallback: run the recon now, then **propose** `gh issue create` at the
      end so a battle has something to start from. Pass the body via a `--body-file`
      temp file and **confirm first** (same discipline as §4) — the create path inherits
-     the same cp1252-safe, confirmed-write behaviour as the edit path.
+     the same cp1252-safe, confirmed-write behaviour as the edit path. This create path
+     **also poses the `legion-recon` label**, created idempotently first (same pattern as
+     §4), under the same confirmation — no second OK:
+     ```bash
+     gh label create legion-recon --description "Issue cadrée par /legion:recon" --color 0E8A16
+     gh issue create --label legion-recon --title "<title>" --body-file <path-to-temp-body>
+     ```
+     `gh label create` fails harmlessly if the label already exists — ignore that error.
 2. **Check `gh`.** Run `gh auth status`. If `gh` is missing or unauthenticated →
    **degrade gracefully**: still run the full recon, but at the end **print the
    « Cadrage » block ready to paste** instead of editing the issue. Warn the user once.
+   In this degraded mode **no `legion-recon` label can be posed** — say so plainly; never
+   claim the label was applied when it was not.
 3. **Reading files.** Use the `Read` tool, never `cat`/`type` (a Windows cp1252 console
    crashes on non-ASCII with `UnicodeEncodeError`). Never `cd`; operate from the
    current directory.
@@ -129,14 +138,22 @@ pour l'instant" rather than leaving it blank).
      re-run).
    - Otherwise **append** the « Cadrage » section **below the original idea**, leaving
      the original text **intact**.
-2. **CONFIRM.** Show the user the full new issue body (or a clear diff). **Wait for an
-   explicit OK.** Do not write before that.
-3. **Write** via a temp body file (avoids shell-quoting issues with multi-line French):
+2. **CONFIRM.** Show the user the full new issue body (or a clear diff), and note that
+   the write also **poses the `legion-recon` label**. **Wait for an explicit OK.** Do not
+   write before that. The label follows this **same OK** — never ask a second time for it.
+3. **Write** via a temp body file (avoids shell-quoting issues with multi-line French),
+   and **pose the `legion-recon` label** in the same confirmed write. Create the label
+   first (idempotent, same pattern as `legion-opportunity` in `commands/retro.md`), then
+   edit the body and add the label:
    ```bash
-   gh issue edit <n> --body-file <path-to-temp-body>
+   gh label create legion-recon --description "Issue cadrée par /legion:recon" --color 0E8A16
+   gh issue edit <n> --body-file <path-to-temp-body> --add-label legion-recon
    ```
-   On `gh` failure → fall back to printing the « Cadrage » block for manual paste and
-   warn; never leave the user unsure whether the write happened.
+   `gh label create` fails harmlessly if the label already exists — **ignore that error**.
+   The label is a **non-blocking** signal: if `--add-label` fails, warn and continue — the
+   « Cadrage » body is the output that prevails, never aborted for a label.
+   On `gh` failure for the body itself → fall back to printing the « Cadrage » block for
+   manual paste and warn; never leave the user unsure whether the write happened.
 4. **Hand off.** Point to the next step: `/legion:battle start <n>` will now seed a
    sharp `spec.md` from the refined issue. `recon` stops here — it does not start the
    battle.
@@ -147,4 +164,8 @@ pour l'instant" rather than leaving it blank).
 - One question at a time, recommended answer each, explore the repo before asking.
 - « Cadrage » in French; identifiers English.
 - Confirm before the `gh issue edit`; degrade to paste-ready output if `gh` is absent.
+- Pose the `legion-recon` label at the outward write (both the `gh issue edit` and the
+  `gh issue create` fallback), created idempotently: **non-blocking** (a label failure
+  warns, the « Cadrage » prevails) and under the **same OK** as the body — never a second
+  confirmation, never posed in the degraded `gh`-absent mode.
 - No `cd`; read with the `Read` tool, not `cat`/`type`.
