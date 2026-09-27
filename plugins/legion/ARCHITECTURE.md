@@ -345,9 +345,12 @@ plugins/legion/
 
 - **Prose FR, identifiants/fichiers EN**. **Sujets de commit et titres de PR** :
   anglais, format **Conventional Commits** `type(scope): subject`.
-- **Hooks Python** lancés via `python "$CLAUDE_PLUGIN_ROOT/hooks/<x>.py"`, `exit 2`
-  pour bloquer, bypass par env var, `--self-test`. (Le launcher `py` marche aussi si
-  installé — ajuster `hooks.json`.)
+- **Hooks Python** lancés via `$(command -v python || command -v python3) "$CLAUDE_PLUGIN_ROOT/hooks/<x>.py"`
+  (`python` d'abord — Windows ; `python3` en repli — Linux/macOS sans
+  `python-is-python3`), `exit 2` pour bloquer, bypass par env var, `--self-test`.
+  Les hooks tournent sous `sh` (Linux) / Git Bash (Windows), d'où la substitution
+  POSIX. (`python3` seul est exclu : sous Windows c'est souvent l'alias du
+  Microsoft Store.)
 - **Agents** : frontmatter `name`/`description`/`model`/`tools` (whitelist)/
   `permissionMode`. Lecture seule **sur le code** pour les gates de revue : elles
   écrivent leur seul artefact, confinées par le guard (cf. §4, §6.1).

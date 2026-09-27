@@ -41,16 +41,20 @@ Arguments: `$ARGUMENTS`
 
 **Before anything else:**
 
-1. **Python** — run `python --version`. The plugin's **hooks**
-   (`guard`/`careful`/`fleet_sync`/`usage_track`) are launched by Claude Code as
-   `python "…"` and **fail silently** if `python` is missing — so a battle started
-   without it runs with **no write-scope guardrail, no fleet index, no usage
-   tracking**. If it fails, **stop and tell the user clearly** (do not proceed
-   unless they explicitly ask to continue without the guardrails):
+1. **Python** — run `python --version`, and if it fails `python3 --version`. The
+   plugin's **hooks** (`guard`/`careful`/`fleet_sync`/`usage_track`) are launched
+   by Claude Code with `python`, falling back to `python3` (Linux/macOS), and
+   **fail silently** if neither exists — so a battle started without Python runs
+   with **no write-scope guardrail, no fleet index, no usage tracking**. Use the
+   interpreter that answered for every `python "…"` script call below. If both
+   fail, **stop and tell the user clearly** (do not proceed unless they explicitly
+   ask to continue without the guardrails):
 
-   > ⚠️ `python` introuvable. Sans lui, les garde-fous, l'index *fleet* et le suivi
-   > sont **inactifs**. Installe Python 3 (`winget install Python.Python.3.13`),
-   > puis **rouvre Claude Code** (les hooks se chargent au démarrage de session).
+   > ⚠️ Python introuvable (`python` / `python3`). Sans lui, les garde-fous,
+   > l'index *fleet* et le suivi sont **inactifs**. Installe Python 3
+   > (Windows : `winget install Python.Python.3.13` ; Ubuntu/WSL :
+   > `sudo apt install python3`), puis **rouvre Claude Code** (les hooks se
+   > chargent au démarrage de session).
 
 2. **GitHub CLI** — for a **numeric** `<issue>` intake and for `deliver`, run
    `gh auth status`. If `gh` is missing or unauthenticated → **warn**; numeric
