@@ -307,8 +307,9 @@ armed.
   `feat|fix|refactor|perf|docs|test|build|ci|chore`.
 - No `Set-Location`/`cd`, no `&&`/`;`/`|` chaining, no shell redirection; run
   `dotnet` from the current directory.
-- Hooks are launched via `python "$CLAUDE_PLUGIN_ROOT/hooks/<x>.py"`. If `python`
-  is missing the hooks fail silently — the `/battle start` preflight checks it.
+- Hooks are launched via `python "$CLAUDE_PLUGIN_ROOT/hooks/<x>.py"`, falling back
+  to `python3` when `python` is absent (Linux/macOS). If neither exists the hooks
+  fail silently — the `/battle start` preflight checks it.
 - Iterate in small validated steps; never emit large unvalidated blocks.
 - Delegate, never duplicate — but stay self-contained for core paths.
 
