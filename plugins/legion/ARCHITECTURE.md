@@ -256,7 +256,9 @@ PreToolUse(Edit|Write|MultiEdit) :
      legion:builder et file_path ∈ .legion/** : seul
      .legion/battles/<active>/build-report.md → exit 0 ; tout autre chemin
      (battle.json, active-battle, artefact de gate) → exit 2. Empêche le builder
-     d'élargir son propre `guard.allow`.
+     d'élargir son propre `guard.allow`. Comparaison insensible à la casse, et tout
+     `.legion/` visé hors de la racine du hook (checkout principal vu d'un worktree)
+     est aussi bloqué. Limite : l'outil `Bash` n'est pas couvert (#66).
   1. Lire la battle active (.legion/active-battle → battle.json → guard.allow/deny).
   2. Le file_path visé est-il dans `allow` et hors `deny` ?
      - oui  → exit 0 (autorisé)

@@ -188,17 +188,43 @@ def _gate_decision(agent_type, rel: str | None, battle_id: str | None):
     return rel == f".legion/battles/{battle_id}/{artifact}"
 
 
-def _producer_state_decision(agent_type, rel: str | None, battle_id: str | None):
-    """Decision pour un producteur (builder) visant l'etat `.legion/` (fonction pure).
+def _touches_legion_state(parts) -> bool:
+    """True si un composant du chemin (resolu) est un dossier `.legion`, sans tenir
+    compte de la casse (APFS / dossiers WSL insensibles : `.LEGION` == `.legion`)."""
+    return any(str(p).casefold() == ".legion" for p in parts)
 
-    - None  -> pas un producteur, ou cible hors `.legion/` : regles standard.
+
+def _producer_state_decision(agent_type, rel: str | None, battle_id: str | None, parts=()):
+    """Decision pour un producteur (builder) visant un etat `.legion/` (fonction pure).
+
+    `parts` = composants du chemin **absolu resolu** : un `.legion/` hors de la racine
+    du hook (ex. checkout principal vu depuis un worktree, `rel is None`) reste de
+    l'etat de battle, donc bloque.
+
+    - None  -> pas un producteur, ou cible hors de tout `.legion/` : regles standard.
     - True  -> son rapport dans la battle active : autorise.
-    - False -> tout autre chemin sous `.legion/` (`battle.json`, artefact de gate…).
+    - False -> tout autre chemin sous un `.legion/` (`battle.json`, artefact de gate…).
     """
     artifact = PRODUCER_ARTIFACT.get(agent_type)
-    if artifact is None or rel is None or not (rel == ".legion" or rel.startswith(".legion/")):
+    if artifact is None:
         return None
-    return battle_id is not None and rel == f".legion/battles/{battle_id}/{artifact}"
+    in_repo_state = rel is not None and _touches_legion_state(rel.split("/"))
+    if not (in_repo_state or _touches_legion_state(parts)):
+        return None
+    if battle_id is None or rel is None:
+        return False
+    return rel.casefold() == f".legion/battles/{battle_id}/{artifact}".casefold()
+
+
+def _resolved_parts(repo_root: Path, file_path: str) -> tuple[str, ...]:
+    """Composants du chemin absolu resolu (vide si non calculable)."""
+    try:
+        target = Path(file_path)
+        if not target.is_absolute():
+            target = repo_root / target
+        return target.resolve().parts
+    except (ValueError, OSError):
+        return ()
 
 
 def _is_blank_content(content) -> bool:
@@ -245,7 +271,9 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     if agent_type in PRODUCER_ARTIFACT and file_path:
         battle_id = _active_battle_id(repo_root)
         rel = _relative(repo_root, file_path)
-        decision = _producer_state_decision(agent_type, rel, battle_id)
+        decision = _producer_state_decision(
+            agent_type, rel, battle_id, _resolved_parts(repo_root, file_path.replace("\\", "/"))
+        )
         if decision is False:
             expected = f".legion/battles/{battle_id or '<aucune battle active>'}/{PRODUCER_ARTIFACT[agent_type]}"
             return 2, (
@@ -355,6 +383,13 @@ def _self_test() -> int:
     assert _producer_state_decision("legion:builder", ".legion/battles/B/build-report.md", None) is False
     assert _producer_state_decision("legion:builder", "src/x.cs", "B") is None      # hors .legion -> standard
     assert _producer_state_decision("claude", ".legion/battles/B/battle.json", "B") is None  # orchestrateur libre
+    # casse (disque insensible) : .LEGION est le meme dossier -> bloque ; rapport en casse differente -> ok
+    assert _producer_state_decision("legion:builder", ".LEGION/battles/B/battle.json", "B") is False
+    assert _producer_state_decision("legion:builder", ".Legion/battles/B/Build-Report.md", "B") is True
+    # .legion hors de la racine du hook (checkout principal vu d'un worktree) -> bloque
+    assert _producer_state_decision("legion:builder", None, "B",
+                                    ("/", "main", ".legion", "battles", "B", "battle.json")) is False
+    assert _producer_state_decision("legion:builder", None, "B", ("/", "tmp", "x.cs")) is None
     # decision : pas de write tool -> 0
     assert _decide({"tool_name": "Bash"}, Path.cwd())[0] == 0
     # artefact vide (RETEX A1) : contenu blanc -> bloque ; contenu reel -> autorise
