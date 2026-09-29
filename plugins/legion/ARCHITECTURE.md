@@ -367,7 +367,7 @@ plugins/legion/
 │   ├── artifact_check.py        # delivery check d'artefact de gate §E (snapshot/verify métadonnées-seules, --self-test)
 │   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
-│   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables (--self-test)
+│   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
 └── skills/
     ├── battle-workflow/SKILL.md # la doctrine opérationnelle (résumé de ce doc)

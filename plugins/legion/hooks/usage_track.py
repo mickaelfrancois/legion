@@ -14,8 +14,8 @@ JSONL (chaque tour assistant porte un bloc `message.usage`, chaque skill un
   delta. Attribue l'orchestrateur inline a la battle active.
 
 Sortie = append-only `.legion/battles/<active>/usage.jsonl` (pas de
-read-modify-write partage => sur en concurrence). `active` lu dans
-`<cwd>/.legion/active-battle`. Sans battle active => no-op immediat (le hook tourne
+read-modify-write partage => sur en concurrence). `active` lu via
+`battle_state.active_battle_id` (pointeur de la battle active sous `<cwd>/.legion/`). Sans battle active => no-op immediat (le hook tourne
 dans toutes les sessions, il doit etre quasi gratuit hors battle).
 
 Tests : py usage_track.py --self-test
@@ -29,6 +29,18 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Lecteurs partages de la battle active (source unique : scripts/battle_state.py, GH#85).
+# Chemin resolu depuis `__file__`. Si l'import echoue, le hook est un no-op et son
+# --self-test echoue (exit 1).
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+_IMPORT_ERROR: str | None = None
+try:
+    if str(_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR))
+    from battle_state import active_battle_id, battles_dir
+except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
+    _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
 _TOKEN_KEYS = {
     "input": "input_tokens",
@@ -101,12 +113,15 @@ def _tally(records) -> tuple[dict, list]:
 
 
 def _active_battle_dir(cwd: str) -> Path | None:
-    base = Path(cwd) / ".legion"
-    try:
-        battle_id = (base / "active-battle").read_text(encoding="utf-8").strip()
-    except OSError:
+    """Dossier de la battle active, ou None (import KO, pointeur absent/vide/invalide,
+    dossier absent). Un pointeur vide ne doit jamais viser `.legion/battles/` lui-meme."""
+    if _IMPORT_ERROR is not None:
         return None
-    battle_dir = base / "battles" / battle_id
+    root = Path(cwd)
+    battle_id = active_battle_id(root)
+    if battle_id is None:
+        return None
+    battle_dir = battles_dir(root) / battle_id
     return battle_dir if battle_dir.is_dir() else None
 
 
@@ -170,6 +185,10 @@ def main() -> int:
     except (json.JSONDecodeError, EOFError):
         return 0
 
+    if _IMPORT_ERROR is not None:
+        print(f"[usage_track] suivi d'usage desactive : installation legion incomplete ({_IMPORT_ERROR}).",
+              file=sys.stderr)
+        return 0
     battle_dir = _active_battle_dir(data.get("cwd") or os.getcwd())
     if battle_dir is None:
         return 0  # pas de battle active : no-op
@@ -186,6 +205,11 @@ def main() -> int:
 
 
 def _self_test() -> int:
+    global _IMPORT_ERROR
+    if _IMPORT_ERROR is not None:
+        print(f"FAIL: import de scripts/battle_state.py impossible ({_IMPORT_ERROR})", file=sys.stderr)
+        return 1
+    import battle_state
     line_a = {"type": "assistant", "message": {"usage": {
         "input_tokens": 100, "output_tokens": 20,
         "cache_read_input_tokens": 5, "cache_creation_input_tokens": 0},
@@ -201,12 +225,26 @@ def _self_test() -> int:
         assert skills == ["scaffold", "build-fix"], skills
         # transcript vide / illisible -> zero, pas d'exception
         assert _tally(_iter_records(str(Path(d) / "absent.jsonl"))) == ({k: 0 for k in _TOKEN_KEYS}, [])
-        # active-battle resolution
+        # resolution de la battle active (lecteur partage)
         repo = Path(d) / "repo"
         (repo / ".legion" / "battles" / "b1").mkdir(parents=True)
-        (repo / ".legion" / "active-battle").write_text("b1", encoding="utf-8")
+        battle_state._write_pointer(repo, "b1")
         assert _active_battle_dir(str(repo)).name == "b1"
         assert _active_battle_dir(str(Path(d) / "norepo")) is None
+        # pointeur vide/blanc (ecrit par `close`) : PAS `.legion/battles/` (bug GH#85)
+        for value in ("", "  \n"):
+            battle_state._write_pointer(repo, value)
+            assert _active_battle_dir(str(repo)) is None, value
+        # id invalide
+        battle_state._write_pointer(repo, "../x")
+        assert _active_battle_dir(str(repo)) is None
+        # import simule en echec : no-op
+        saved, _IMPORT_ERROR = _IMPORT_ERROR, "ImportError: simule"
+        try:
+            battle_state._write_pointer(repo, "b1")
+            assert _active_battle_dir(str(repo)) is None
+        finally:
+            _IMPORT_ERROR = saved
     print("OK: usage_track self-test passed", file=sys.stderr)
     return 0
 
