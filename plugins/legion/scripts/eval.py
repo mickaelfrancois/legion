@@ -15,8 +15,12 @@ gates/schémas). Contrat de données confirmé sur artefacts réels :
 - **Shard** (`$LEGION_FLEET`, défaut `~/.claude/legion/fleet.d/*.json`, un par battle) :
   `id, repo, repo_path, status, phase, profile, battle_status` + (si `usage.jsonl` présent)
   `tokens_total`. `tokens_total` **peut manquer** → toujours `.get`, ne compter dans la
-  moyenne coût que les shards qui le portent.
-- **Battle close** : `status == "done"` **ou** `phase == "reflect"` (prédicat de la spec).
+  moyenne coût que les shards qui le portent. `battle_status == "aborted"` marque une battle
+  abandonnée (GH#75).
+- **Battle close** : (`status == "done"` **ou** `phase == "reflect"`) **et** non abandonnée
+  (GH#109) : shard `battle_status != "aborted"`, avec un filet sur `battle.json.aborted`
+  (`battle_state.is_aborted`) pour les shards anciens. `coverage["aborted"]` compte les
+  abandons écartés, et le rapport les annonce.
 - **`battle.json`** (sous `<repo_path>/.legion/battles/<id>/`) : verdicts sous
   `phases.<phase>.verdict`, statut de phase sous `phases.<phase>.status`, rondes revise sous
   `run.autocorrect.per_gate.<phase>`. Clés côté **phase** (`plan`/`review`/`test`/…), pas
@@ -50,7 +54,7 @@ from pathlib import Path
 # sources de métriques) ; la valeur est le libellé de présentation (C1 : gate entre
 # parenthèses, table figée — aucune dépendance de l'agrégation à cette table).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from battle_state import VERDICT_PHASES  # noqa: E402
+from battle_state import VERDICT_PHASES, is_aborted  # noqa: E402
 
 GATE_PHASES: tuple[str, ...] = VERDICT_PHASES
 _GATE_LABEL = {
@@ -67,8 +71,9 @@ _GATE_LABEL = {
 # --------------------------------------------------------------------------- #
 
 def _is_closed(shard: dict) -> bool:
-    """Battle close (spec) : `status == "done"` **ou** `phase == "reflect"`."""
-    if not isinstance(shard, dict):
+    """Battle close (spec) : `status == "done"` **ou** `phase == "reflect"`, sauf battle
+    abandonnée (`battle_status == "aborted"`, GH#109)."""
+    if not isinstance(shard, dict) or shard.get("battle_status") == "aborted":
         return False
     return shard.get("status") == "done" or shard.get("phase") == "reflect"
 
@@ -138,11 +143,14 @@ def _fmt_int(n: float) -> str:
 
 def _render(metrics: dict, cost: dict, coverage: dict) -> str:
     """Rapport markdown : en-tête (indicatif + couverture), tableau par-gate, ligne coût."""
+    aborted = coverage.get("aborted", 0)
+    aborted_str = f", {aborted} abandonnées exclues" if aborted else ""
     lines = [
         "# Éval des gates legion",
         "",
         f"> Chiffres **indicatifs** (faible volume) — {coverage['n_with_artifacts']} battles "
-        f"analysées / {coverage['m_closed']} closes, {coverage['k_with_cost']} au coût connu.",
+        f"analysées / {coverage['m_closed']} closes, {coverage['k_with_cost']} au coût connu"
+        f"{aborted_str}.",
         "",
         "| Gate | tourné | revise-rate | rondes moy. | reject |",
         "|------|--------|-------------|-------------|--------|",
@@ -214,12 +222,22 @@ def _load_battle(shard: dict) -> dict | None:
 
 def analyze() -> tuple[dict, dict, dict]:
     """Pipeline complet : énumère les shards, isole les closes, charge les `battle.json`
-    disponibles, calcule métriques + coût + couverture. Ne crashe sur aucun artefact absent."""
+    disponibles, calcule métriques + coût + couverture. Ne crashe sur aucun artefact absent.
+
+    Une battle abandonnée sort des closes (coût, métriques, M) : par son shard
+    (`battle_status`), ou par son `battle.json` (filet pour un shard ancien)."""
     shards = _iter_shards()
-    closed = [s for s in shards if _is_closed(s)]
+    aborted = sum(1 for s in shards if s.get("battle_status") == "aborted")
+    closed = []
     battles = []
-    for s in closed:
+    for s in shards:
+        if not _is_closed(s):
+            continue
         b = _load_battle(s)
+        if b is not None and is_aborted(b):
+            aborted += 1
+            continue
+        closed.append(s)
         if b is not None:
             battles.append(b)
     metrics = _gate_metrics(battles)
@@ -229,6 +247,7 @@ def analyze() -> tuple[dict, dict, dict]:
         "m_closed": len(closed),
         "n_with_artifacts": len(battles),
         "k_with_cost": cost["k_with_cost"],
+        "aborted": aborted,
     }
     return metrics, cost, coverage
 
@@ -261,6 +280,10 @@ def _self_test() -> int:
     assert _is_closed({"phase": "reflect"})
     assert not _is_closed({"status": "active", "phase": "build"})
     assert not _is_closed("pas un dict")  # type: ignore[arg-type]
+    # GH#109 : une battle abandonnée n'est jamais close, même phase done / reflect.
+    assert not _is_closed({"status": "done", "phase": "reflect", "battle_status": "aborted"})
+    assert _is_closed({"status": "done", "battle_status": "closed"})
+    assert _is_closed({"status": "done"})  # shard ancien sans battle_status
 
     # ---- cœur pur : _gate_metrics ----
     b1 = {"phases": {"review": {"status": "done", "verdict": "accept"},
@@ -301,6 +324,13 @@ def _self_test() -> int:
     assert "| review (reviewer) |" in md and "| plan (architect) |" in md, md
     assert "2 battles analysées / 3 closes" in md, md
     assert "Coût moyen/battle" in md and "150 tokens" in md, md
+    # En-tête inchangé sans abandon (clé absente ou 0), annoncé sinon.
+    assert "abandonnées" not in md, md
+    assert "2 au coût connu." in md, md
+    md0 = _render(m, cs, {"n_with_artifacts": 2, "m_closed": 3, "k_with_cost": 2, "aborted": 0})
+    assert md0 == md, md0
+    md2 = _render(m, cs, {"n_with_artifacts": 2, "m_closed": 3, "k_with_cost": 2, "aborted": 2})
+    assert "2 au coût connu, 2 abandonnées exclues." in md2, md2
 
     # ---- intégration : fleet synthétique en tmpdir, LEGION_FLEET pointé dessus ----
     with tempfile.TemporaryDirectory() as tmp:
@@ -332,6 +362,22 @@ def _self_test() -> int:
         _write(fleet_d / "d.json",
                {"id": "D", "repo_path": str(repo), "status": "active", "phase": "build",
                 "tokens_total": 999})
+        # Battle F : abandonnée (shard), phase done, coût élevé et reject → exclue partout.
+        b_rej = {"phases": {"review": {"status": "done", "verdict": "reject"}}, "run": {}}
+        _write(fleet_d / "f.json",
+               {"id": "F", "repo_path": str(repo), "status": "done", "phase": "plan",
+                "battle_status": "aborted", "tokens_total": 10000})
+        _write(repo / ".legion" / "battles" / "F" / "battle.json", b_rej)
+        # Battle G : shard ancien sans battle_status, mais battle.json abandonné → filet.
+        _write(fleet_d / "g.json",
+               {"id": "G", "repo_path": str(repo), "status": "done", "phase": "reflect",
+                "tokens_total": 10000})
+        _write(repo / ".legion" / "battles" / "G" / "battle.json",
+               {**b_rej, "aborted": {"at": "T", "reason": None}})
+        # Battle H : abandonnée en cours de phase (jamais close) → comptée en abandons (C1).
+        _write(fleet_d / "h.json",
+               {"id": "H", "repo_path": str(repo), "status": "in_progress", "phase": "build",
+                "battle_status": "aborted"})
         # Shard malformé → ignoré, aucun crash.
         (fleet_d / "bad.json").write_text("ceci n'est pas du JSON", encoding="utf-8")
 
@@ -348,18 +394,21 @@ def _self_test() -> int:
         # Couverture : A,B,C closes (D active exclue, bad ignoré) ; A,B avec artefacts.
         assert coverage["m_closed"] == 3, coverage
         assert coverage["n_with_artifacts"] == 2, coverage
-        assert coverage["total_shards"] == 4, coverage  # a,b,c,d (bad non parsé)
+        assert coverage["total_shards"] == 7, coverage  # a..d, f, g, h (bad non parsé)
+        assert coverage["aborted"] == 3, coverage  # F, H (shard) + G (filet battle.json)
         # Coût : {100, 200, 300} closes au coût connu → moyenne 200, K = 3.
         assert cost["avg_tokens"] == 200.0 and cost["k_with_cost"] == 3, cost
         # Métriques identiques au calcul pur (seules A,B ont des artefacts).
         assert metrics["review"]["revise_rate"] == 0.5, metrics
         assert metrics["review"]["avg_rounds"] == 1.0, metrics
         assert metrics["test"]["reject"] == 1, metrics
+        assert metrics["review"]["reject"] == 0, metrics  # rejects de F et G exclus
         # plan n'a de phase dans aucune fixture (A/B) → jamais tourné → None, pas 0.0.
         assert metrics["plan"]["ran"] == 0 and metrics["plan"]["revise_rate"] is None, metrics
         # Le rendu ne crashe pas et annonce la couverture réelle.
         report = _render(metrics, cost, coverage)
         assert "2 battles analysées / 3 closes" in report, report
+        assert "3 au coût connu, 3 abandonnées exclues." in report, report
 
         # `battle.json` présent mais corrompu (dossier existe, JSON cassé) → `_load_battle`
         # dégrade en None sans crash (15e ligne de la matrice : dossier présent ≠ lisible).
