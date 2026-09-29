@@ -125,7 +125,8 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 > **retourne** alors son verdict + le **chemin** de l'artefact — *jamais* le contenu
 > en clair : c'est ce qui garde le travail des gates **hors du contexte** de la
 > session orchestratrice (le levier de discipline de contexte). L'**orchestrateur**
-> (`/battle`) écrit le reste de l'état (`battle.json`, `spec.md`, artefacts de PR) et
+> (`/battle`) écrit le reste de l'état (`spec.md`, artefacts de PR ; `battle.json`
+> uniquement **via** `scripts/battle_state.py`, cf. § 5.1) et
 > **lit** les artefacts de gate sur disque au besoin ; le **builder** écrit le code +
 > `build-report.md`. Cas particulier : `pr-triage` écrit `pr-feedback.md` **et**
 > retourne en plus le bloc TRIAGE JSON (machine-lisible) sur lequel l'orchestrateur
@@ -197,7 +198,7 @@ Deux niveaux : **par repo** (la battle) et **global** (le fleet).
 ├── active-battle          # pointeur : id de la battle active (lu par les hooks)
 └── battles/
     └── 2026-06-08-GH-1234/
-        ├── battle.json        # métadonnées + profil + statut des phases
+        ├── battle.json        # métadonnées + profil + statut des phases (écrit par battle_state.py seul)
         ├── spec.md            # THINK
         ├── plan.md            # PLAN
         ├── build-report.md    # BUILD
@@ -216,6 +217,16 @@ trace pérenne vit dans la PR + l'issue). Une nouvelle session reprend la battle
 lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 [`docs/ui-integration.md §3.1`](docs/ui-integration.md).
 
+**Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
+`scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
+`bump-autocorrect`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`,
+`validate`). Le script vérifie chaque transition de phase (ex. `build` refusé tant que le
+plan n'est pas `accept*` **et** approuvé : `phases.plan.approved_at`), écrit de façon
+atomique (temp + `os.replace`) et resynchronise le shard fleet. Il porte aussi la **source
+unique** des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
+dérivent `guard.py`, `fleet_sync.py` et `eval.py`. Les command-files l'appellent ; ils
+n'éditent plus `battle.json` à la main.
+
 ### 5.2 Global — `~/.claude/legion/fleet.d/` (un shard par battle)
 
 Index des battles **à travers les repos** (actives ET clôturées). Point d'entrée
@@ -227,7 +238,9 @@ en parallèle (1 par repo). Un `fleet.json` partagé impliquait un read-modify-w
 *lost update*. Avec un shard par battle, chaque session n'écrit **que son fichier**
 (atomique, temp + `os.replace`) → aucune perte. Les lecteurs agrègent tous les
 `*.json`. Le coût/skills sont projetés depuis `usage.jsonl` par le hook
-`fleet_sync` à chaque écriture de `battle.json`.
+`fleet_sync` à chaque écriture de `battle.json` : `battle_state.py` appelle la synchro
+lui-même après chaque écriture, et le hook `PostToolUse` reste le filet pour les autres
+écritures.
 
 ---
 
@@ -242,7 +255,8 @@ stderr).
 ```
 PreToolUse(Edit|Write|MultiEdit) :
   0. CONFINEMENT DES GATES (prioritaire, actif même guard non armé).
-     Si `agent_type` ∈ GATE_ARTIFACT (legion:architect → plan.md,
+     Si `agent_type` ∈ GATE_ARTIFACT (table dérivée de `battle_state.GATE_ARTIFACT`,
+     avec repli fail-closed si le script est introuvable ; legion:architect → plan.md,
      legion:lint → gate-lint.md, legion:reviewer → gate-review.md,
      legion:test-engineer → gate-test.md, legion:security → gate-security.md,
      legion:pr-triage → pr-feedback.md) :
@@ -274,6 +288,9 @@ PreToolUse(Edit|Write|MultiEdit) :
 
 ### 6.2 Commandes de pilotage
 
+Les trois commandes écrivent `battle.json.guard` **via** `battle_state.py set-guard`
+(jamais à la main).
+
 | Commande | Effet sur `battle.json.guard` |
 |---|---|
 | `/freeze <glob…>` | Restreint `allow` aux globs fournis. |
@@ -289,8 +306,8 @@ se fait en lançant plusieurs sessions/terminaux. `legion` ne *crée* pas le
 parallélisme — il le **rend observable et reprenable** :
 
 1. Chaque session pilote **sa** battle dans **son** repo (état local `.legion/`).
-2. À chaque transition de phase, le hook `fleet_sync` réécrit le **shard** de la
-   battle dans `fleet.d/`.
+2. À chaque transition de phase, `battle_state.py` (puis le hook `fleet_sync`, en filet)
+   réécrit le **shard** de la battle dans `fleet.d/`.
 3. `/fleet` agrège la vue de tous les repos → quelle battle est bloquée sur quelle
    gate.
 4. `/battle resume <id>` reprend une battle depuis son `battle.json` (cross-session).
@@ -333,12 +350,13 @@ plugins/legion/
 │   ├── hooks.json               # PreToolUse: guard,careful · PostToolUse: fleet_sync · Stop/SubagentStop: usage_track
 │   ├── guard.py                 # périmètre d'écriture + confinement gates + artefact non vide (exit 2 = block)
 │   ├── careful.py               # avertit sur commandes destructrices (warn)
-│   ├── fleet_sync.py            # écrit le shard fleet.d/<battle> à chaque écriture de battle.json
+│   ├── fleet_sync.py            # écrit le shard fleet.d/<battle> à chaque écriture de battle.json (PHASE_ORDER dérivé de battle_state)
 │   └── usage_track.py           # append tokens + skills réels à la battle active
 ├── scripts/
 │   ├── plugin_retex.py          # journal central RETEX outillage (append/list/resolve, --self-test)
 │   ├── base_freshness.py        # filet base-freshness §G.0.a (verdict déterministe, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
+│   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
 └── skills/
     ├── battle-workflow/SKILL.md # la doctrine opérationnelle (résumé de ce doc)
@@ -438,7 +456,7 @@ La phase ADDRESS (commentaires humains post-livraison) garde sa confirmation hum
 
 ### Mode d'exécution (`run.mode`)
 
-`run.mode` ∈ `"autonomous"` | `"step"` — persisté dans `battle.json`.
+`run.mode` ∈ `"autonomous"` | `"step"` — persisté dans `battle.json` (par `battle_state.py init`).
 
 - `"autonomous"` (défaut) : enchaînement automatique de toutes les phases après
   l'approbation du plan.
@@ -475,7 +493,7 @@ Hors liste = pas d'escalade.
 | Niveau | Acteur | Budget | Unité mesurée | Décision d'escalade |
 |--------|--------|--------|---------------|---------------------|
 | Interne (build-fix) | `builder` | 3 tentatives | Erreurs `dotnet build` | Le builder rapporte `build_ok: false`, **ne décide pas d'escalader** |
-| Externe (re-gate) | Orchestrateur | 2/gate, 6 au global (maximums fermes) | Ensemble des FAIL du `gate-*.md` (par identité) | L'orchestrateur escalade si non-progrès ou plafond |
+| Externe (re-gate) | Orchestrateur, via `battle_state.py bump-autocorrect` | 2/gate, 6 au global (maximums fermes) | Ensemble des FAIL du `gate-*.md` (par identité) | Le script rend `continue` ou `escalate` (non-progrès ou plafond) ; l'orchestrateur applique |
 
 Les deux budgets sont **non additionnés** : un `build_ok: false` du builder après ses 3
 essais **compte pour 1 tentative** de la boucle orchestrateur. La boucle interne repart
@@ -486,7 +504,8 @@ FAIL du `gate-*.md` entre deux tentatives, par cible (`fichier:ligne` + dimensio
 Progrès = au moins un FAIL ciblé au run précédent a **disparu** (résolu), même si le
 compte total est stable parce qu'un nouveau FAIL d'une autre cause est apparu. Aucun
 FAIL précédent résolu = non-progrès → escalade immédiate (pas d'attente du plafond).
-Le compte brut seul est trompeur : « 1 FAIL corrigé, 1 autre découvert » est un compte
+Le script `bump-autocorrect` applique cette comparaison et les plafonds (2/gate, 6 au
+global) : ils ne reposent plus sur la discipline de l'orchestrateur. Le compte brut seul est trompeur : « 1 FAIL corrigé, 1 autre découvert » est un compte
 stable mais un vrai progrès.
 
 ### Choix ouverts exposés par l'architecte

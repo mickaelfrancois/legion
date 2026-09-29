@@ -7,11 +7,23 @@ You are the **battle orchestrator** of `legion`. Load the `battle-workflow` skil
 doctrine before acting. Producers and gates each write their **own** artifact: the
 `builder` writes `build-report.md`, every gate writes its single `gate-*.md` /
 `plan.md` / `pr-feedback.md` (the `guard.py` hook **confines** each gate to that one
-file). You persist everything else — `battle.json`, `spec.md`, the PR artifacts —
-and you read the gate artifacts from disk when you need their detail. A gate returns
+file). You persist everything else — `spec.md`, the PR artifacts — and `battle.json`
+through `battle_state.py` only (see the box below); you read the gate artifacts from disk when you need their detail. A gate returns
 only its **verdict + the artifact path** (plus, for `pr-triage`, the TRIAGE JSON),
 never the full content — that keeps the gate's output out of this orchestrating
 session's context.
+
+> **State writes — `battle_state.py` is the only writer of `battle.json`.** Never
+> edit `battle.json` (nor `.legion/active-battle`) by hand. Every mutation goes
+> through the deterministic script, called as
+> `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" <sub> …` (fall back to
+> `python3`, same interpreter as the other script calls). Subcommands: `init`,
+> `transition`, `approve-plan`, `bump-autocorrect`, `set-delivery`, `set-guard`,
+> `set-meta`, `activate`, `close`, `validate`. The script prints one JSON object on
+> stdout; **read it**. Exit code `2` means **refused** (or invalid usage): relay the
+> `reason` to the user and **do not advance**. The script enforces the phase
+> preconditions and the auto-correction budgets; you no longer re-check them by hand.
+> Reading `battle.json` with `Read` stays allowed.
 
 > **Surfacing commands to the user — always namespace them.** This plugin's
 > commands are **namespaced**: the user must type `/legion:battle …`
@@ -103,15 +115,23 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    issue/slug token (sanitize to `[A-Za-z0-9-]`; a numeric issue `1234` → token
    `GH-1234`). If no token is given, ask for one short slug — do not invent it.
 
-2. **Create the battle directory** `.legion/battles/<id>/` in the current repo
-   (relative to the working directory — never `cd`). Write the battle id into
-   `.legion/active-battle` — this pointer is what the `guard.py` / `careful.py`
-   hooks read to know which battle is active.
+2. **Create the battle** with `init` (never `cd`; relative to the working directory):
 
-   **Mark THINK in progress first** (same discipline as BUILD, §D): immediately
-   write a minimal `battle.json` with `phases.think.status = "in_progress"` (id,
-   ticket if known, the default `profile`/`required_gates` — refined at step 4).
-   Seeding `spec.md` can be long (reading the issue, exploring code to scope it);
+   ```bash
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" init <id> --ticket <ticket> --title <title> --profile feature [--step] [--required-gates <g> …]
+   ```
+
+   `init` creates `.legion/battles/<id>/` in the current repo, writes a minimal
+   `battle.json` and points `.legion/active-battle` at the new id — this pointer is
+   what the `guard.py` / `careful.py` hooks read to know which battle is active.
+   `<ticket>` is `GH#<n>` for a numeric intake, else the slug token. The title is
+   refined at step 3 (`set-meta --title`), so a provisional one (the id) is fine.
+   `--step` sets `run.mode = "step"`, otherwise `"autonomous"` (see step 4).
+   `--required-gates` is optional (default gate set otherwise).
+
+   **THINK is marked in progress first** (same discipline as BUILD, §D): `init` seeds
+   the phases with `phases.think.status = "in_progress"` and the default
+   `profile`/`required_gates` (refined at step 4). Seeding `spec.md` can be long (reading the issue, exploring code to scope it);
    until `battle.json` exists, `.legion/active-battle` points at an empty dir and
    `/fleet` (or a resumed session) sees nothing in progress. The battle must never
    be statusless once started.
@@ -135,7 +155,9 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      ```
 
      Seed `spec.md` from its title / body / labels (acceptance criteria & repro
-     steps are usually in the body). Record `ticket = "GH#1234"` in `battle.json`.
+     steps are usually in the body). The ticket `GH#1234` was already recorded by
+     `init` (step 2); record the real issue title with
+     `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-meta --title "<issue title>"`.
      - If `gh` is missing/unauthenticated or the issue can't be read → **warn**,
        fall back to inline intake, and note the degradation at the top of `spec.md`.
 
@@ -149,7 +171,8 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      **warn and continue** — starting the battle never depends on this.
 
    - **Non-numeric** (a label / slug) → **inline intake**: write `spec.md` from the
-     user's request in the conversation. No GitHub call.
+     user's request in the conversation. No GitHub call. Record the title with
+     `set-meta --title "<title>"` (same call as above).
 
    In both cases `spec.md` must contain: a systematic **`## En bref`** section at the
    top (1-3 lines, reusing the "Intention" seed), then intent, in-scope, explicitly
@@ -163,21 +186,29 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    `start` reads it (it appends a « Cadrage » section), so the seed comes in already
    sharp — suggest it when the issue is vague rather than patching `spec.md` here.
 
-4. **Complete `battle.json`** (the minimal one from step 2) following the schema
-   **inlined in the `battle-workflow` doctrine** (State layout) — already in context.
-   Default `profile` to `feature` and `required_gates` to
-   `["architect","lint","reviewer","test-engineer"]` unless the user states a
-   different profile. (`lint` is **.NET-only** — on a **non-.NET** stack it
+4. **Complete `battle.json`** (the minimal one from step 2) through
+   `battle_state.py`; the schema is **inlined in the `battle-workflow` doctrine**
+   (State layout) — already in context. `init` already defaulted `profile` to
+   `feature` and `required_gates` to `["architect","lint","reviewer","test-engineer"]`;
+   change them only if the user states a different profile, with
+   `set-meta --profile <p> --required-gates <g> …`. (`lint` is **.NET-only** — on a **non-.NET** stack it
    self-retires at run time with a withdrawal banner and a neutral `accept`, so
-   keeping it in the default set is safe; see §E.) Flip `phases.think.status` from `in_progress` to `done`, everything
-   else `pending`, `phases.plan.status = "in_progress"`.
+   keeping it in the default set is safe; see §E.) Then record the stack detected in
+   §A.preflight with `set-meta --stack-kind <kind> [--build-target <path>]
+   [--test-target <path>]`, and flip the phases:
 
-   **Write the `run` block.** Set `run.mode` based on the flag passed to `start`:
-   - `--step` → `run.mode = "step"` (pas-à-pas : chaque transition de phase rend la
-     main, comportement des battles antérieures à la feature).
-   - Absent (default) → `run.mode = "autonomous"` (enchaînement autonome après
-     l'approbation du plan).
-   Initialize `run.autocorrect = { "per_gate": {}, "total": 0 }`.
+   ```bash
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition think done
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition plan in_progress
+   ```
+
+   Everything else stays `pending`.
+
+   **The `run` block is written by `init`.** `--step` on `start` → `run.mode = "step"`
+   (pas-à-pas : chaque transition de phase rend la main, comportement des battles
+   antérieures à la feature). Absent (default) → `run.mode = "autonomous"`
+   (enchaînement autonome après l'approbation du plan). `init` also initializes
+   `run.autocorrect = { "per_gate": {}, "total": 0 }`; never write it by hand.
 
    > **`--step` vs `--auto` : deux dimensions orthogonales.**
    > `--step` sur `start` (= `run.mode`) pilote la **cadence d'arrêt** de
@@ -194,7 +225,9 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    (`Glob '**/*.csproj'`, take their containing folders) and set `guard.allow` to
    `["<Proj>/**", "<Proj.Tests>/**", …]`. If the placeholder globs would match no
    path in the repo, **warn the user and propose the derived globs** rather than
-   locking a dead perimeter. (RETEX: the generic default mismatched a root-projects
+   locking a dead perimeter. Write the result with
+   `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-guard --allow "<Proj>/**" "<Proj.Tests>/**" …`
+   (`--deny` is optional). (RETEX: the generic default mismatched a root-projects
    repo on two consecutive battles — the builder would have been blocked without it.)
 
 5. **Invoke the `architect` gate** with the `Agent` tool
@@ -223,16 +256,29 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 6. **Record the result.** First run the **gate artifact delivery check** (§E) on
    `plan.md` — the `architect` must have actually written it this pass. `plan.md` is
    already on disk — do **not** re-write it from a returned blob. Once delivery is
-   confirmed, update `battle.json`: `phases.plan.verdict` and `phases.plan.status`.
-   Read `plan.md` from disk only if you need its detail to report.
+   confirmed, record the result with `transition`. Read `plan.md` from disk only if you
+   need its detail to report.
    - `revise` / `reject` → `status = "blocked"`; relay the FAILs verbatim and ask
-     the user how to adjust the spec. Do **not** advance. On `revise`, **persist the
-     resume context to disk** so step 5's incremental re-run survives a fresh session:
-     write the relayed FAILs verbatim into `phases.plan.fails` (`battle.json`) and copy
-     the current `spec.md` to `spec.plan-baseline.md` in the battle dir. On `reject`,
-     do **not** persist (a rejected plan restarts cold). Clear `phases.plan.fails` back
-     to `[]` on the next `accept` / `accept_with_opportunity`.
-   - `accept` / `accept_with_opportunity` → `status = "done"`. Lire `plan.md` pour
+     the user how to adjust the spec. Do **not** advance.
+
+     ```bash
+     python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition plan blocked --verdict revise --fails '<json array of the FAILs>'
+     ```
+
+     On `revise`, **persist the resume context to disk** so step 5's incremental re-run
+     survives a fresh session: the relayed FAILs go verbatim into `phases.plan.fails`
+     through `--fails` (JSON array), and you copy the current `spec.md` to
+     `spec.plan-baseline.md` in the battle dir (a plain artifact, not `battle.json`). On
+     `reject`, use `--verdict reject` **without** `--fails` (a rejected plan restarts
+     cold). The script clears `phases.plan.fails` back to `[]` on the next `accept` /
+     `accept_with_opportunity`.
+   - `accept` / `accept_with_opportunity` → `status = "done"`:
+
+     ```bash
+     python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition plan done --verdict accept
+     ```
+
+     Lire `plan.md` pour
      présenter le résumé, les éventuelles opportunités, et la section
      **« Choix ouverts à arbitrer »** (si elle est présente). Puis demander
      **l'unique approbation explicite** de l'humain — toujours obligatoire, même si
@@ -241,7 +287,10 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      > « Le plan est prêt. Voici le résumé + les choix ouverts. **OK pour lancer le
      > build ?** »
 
-     **Sur OK** : enchaîner directement vers §D (BUILD) dans la même session, en
+     **Sur OK** : d'abord enregistrer l'approbation avec
+     `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" approve-plan` (elle pose
+     `phases.plan.approved_at` ; sans elle, `transition build in_progress` sera refusé
+     en §D). Puis enchaîner directement vers §D (BUILD) dans la même session, en
      annonçant l'enchaînement — ne plus rendre la main. En mode `--step`, rendre la
      main après l'OK (comportement pas-à-pas, cf. §B).
 
@@ -255,8 +304,11 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 
 ## §B — resume a battle
 
-Read `.legion/battles/<battle-id>/battle.json`. Re-point `.legion/active-battle`
-to this id (so the guard hooks track the resumed battle). Summarize phase
+Re-point the active battle with
+`python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" activate <battle-id>` (so the
+guard hooks track the resumed battle; a refusal means the battle does not exist),
+then check the state with `… battle_state.py validate` (relay any error or warning).
+Read `.legion/battles/<battle-id>/battle.json`. Summarize phase
 statuses and the last verdict. Announce the next pending phase and what it needs.
 Do not re-run completed phases unless asked.
 
@@ -271,6 +323,12 @@ détermine le comportement de la session reprise :
   `"autonomous"` par défaut. N'écrire pas rétroactivement le champ si la battle est
   en cours de progression — ne casser aucune battle existante.
 
+**Battle legacy sans approbation.** Si `transition build in_progress` (§D) est refusé
+avec « plan non approuvé » (battle antérieure à `approved_at`, ou plan relancé depuis),
+ne pas contourner : demander l'**OK humain** (« OK pour lancer le build ? »), puis
+enregistrer avec `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" approve-plan`
+et retenter.
+
 > **Tableau mode × transition → rend la main ?**
 >
 > | Mode | Après approbation plan | Après BUILD | Après chaque gate | Avant push/PR (DELIVER) |
@@ -283,20 +341,24 @@ détermine le comportement de la session reprise :
 ## §C — status
 
 List every battle under `.legion/battles/`, showing id, profile, and the
-current phase with its status/verdict. One line per battle.
+current phase with its status/verdict. One line per battle. Read-only: read each
+`battle.json` with `Read`; no `battle_state.py` call, nothing is written.
 
 ---
 
 ## §D — build a slice (BUILD phase)
 
-Precondition: `phases.plan.status == "done"` with an `accept` /
-`accept_with_opportunity` verdict. Otherwise refuse and point to PLAN.
+Precondition: `transition build in_progress` (below) must succeed. The script checks
+that `phases.plan` is `done` with an `accept` / `accept_with_opportunity` verdict and
+that the human approved the plan (`approve-plan`, §A.1 step 6). On a refusal, relay the
+`reason` and point to PLAN (or, for a missing approval, to §B).
 
 Resolve the target from the argument: a specific `slice-N`, or `all` (every
 slice listed in `plan.md`, in order). Default to the first not-yet-built slice.
 
-**Mark the phase in progress first.** Before coding or delegating, set
-`phases.build.status = "in_progress"` in `battle.json` and **persist it**. The
+**Mark the phase in progress first.** Before coding or delegating, run
+`python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition build in_progress`
+(this is also the precondition check). The
 phase must **never stay `pending`** once a build has started — that's how `/fleet`
 and a resumed session see work happening. You will reclassify it at the end.
 
@@ -317,21 +379,24 @@ dispatch independent slices in parallel with `isolation: worktree`; keep
 dependent slices sequential. Collect each
 `{ slice_id, build_ok, warnings, files_touched }`.
 
-After build (either mode), **classify the result and persist `battle.json`
-immediately** — for `all`, only after **every targeted slice** has a result:
-- **any `build_ok == false`** → `phases.build.status = "blocked"`; relay the
+After build (either mode), **classify the result and record it immediately** with
+`transition` — for `all`, only after **every targeted slice** has a result:
+- **any `build_ok == false`** → `transition build blocked`; relay the
   residual errors. En mode `autonomous`, entrer dans la boucle d'auto-correction
-  (§E — boucle de `revise`) ; en mode `step`, stop. Do not advance until resolved.
-- **all `build_ok` (with or without warnings)** → `phases.build.status = "done"`.
+  (§E — boucle de `revise`), en commençant par
+  `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" bump-autocorrect build --fails '<json array of the residual errors>'`
+  (`continue` ⇒ relancer le build ; `escalate` ⇒ escalade, cf. §E) ; en mode `step`,
+  stop. Do not advance until resolved.
+- **all `build_ok` (with or without warnings)** → `transition build done`.
   Warnings are **non-blocking remarks**: log them (in `build-report.md` and in the
   relay to the user), then **auto-advance straight into §E** (the gate cascade)
   without waiting for a separate command — exactly as for a clean build. Announce
   the chaining and the warning count so the user sees them. En mode `step`, rendre
   la main après avoir annoncé les warnings, sans enchaîner automatiquement.
 
-Persisting the phase status is **not optional**: a build that produced code but
-left `phases.build.status` at `pending`/`in_progress` is a bug — always write the
-final `done`/`blocked` before handing back.
+Recording the phase status is **not optional**: a build that produced code but
+left `phases.build.status` at `pending`/`in_progress` is a bug — always run the
+final `transition build done|blocked` before handing back.
 
 The orchestrator sequences `builder → gates` — the builder never calls a gate.
 
@@ -375,17 +440,21 @@ spares):
      stale artifact from a previous round is never mistaken for a fresh one).
 4. **On any failure** → do **not** record the verdict and do **not** advance.
    Re-invoke the gate **once** with an explicit reminder ("write your artifact to
-   `<exact path>` first, then return your verdict"). If it still fails → set the phase
-   `status = "blocked"`, surface it to the user, and stop. **Never advance the pipeline
+   `<exact path>` first, then return your verdict"). If it still fails → run
+   `transition <phase-key> blocked` (no verdict), surface it to the user, and stop. **Never advance the pipeline
    on a verdict whose fresh artifact you could not confirm.**
 
 The gate identifier (used for `subagent_type` and `required_gates`) is **not**
-the phase key written to `battle.json.phases`. Map gate → phase key before
-persisting: `lint → lint`, `reviewer → review`, `test-engineer → test`,
-`security → security`. Writing under the gate name
-(`phases.reviewer`/`phases.test-engineer`) is a bug — the UI reads the canonical
-keys `lint`/`review`/`test` and would show the phase as pending even though the
-gate ran.
+the phase key written to `battle.json.phases`. The mapping gate → phase key is
+**derived from `GATE_PHASE` in `scripts/battle_state.py`** (single source of truth;
+the list below is a readable copy of it): `architect → plan`, `lint → lint`,
+`reviewer → review`, `test-engineer → test`, `security → security`,
+`pr-triage → address`. Pass the **phase key** (never the gate name) to
+`battle_state.py`: the script rejects an unknown phase, and
+`bump-autocorrect` answers with a `suggestion` when given a gate name. Writing under
+the gate name (`phases.reviewer`/`phases.test-engineer`) would be a bug — the UI reads
+the canonical keys `lint`/`review`/`test` and would show the phase as pending even
+though the gate ran.
 
 1. **Invoke** the gate via `Agent` (`subagent_type`: `lint` | `reviewer` |
    `test-engineer` | `security`). Self-contained prompt: battle dir, the upstream
@@ -402,49 +471,64 @@ gate ran.
 2. **Run the gate artifact delivery check** (above) on the gate's artifact, then
    **record the verdict.** The gate already wrote its artifact (`gate-review.md` /
    `gate-test.md` / `gate-security.md`) on disk — do **not** re-write it from a
-   returned blob. Once delivery is confirmed, record `phases.<phase-key>.verdict` +
-   `status` in `battle.json` (using the phase key from the mapping above, e.g. the
-   `reviewer` gate writes `phases.review`).
+   returned blob. Once delivery is confirmed, record the verdict with
+   `battle_state.py transition <phase-key> done|blocked --verdict <verdict>` (phase
+   key from the mapping above, e.g. the `reviewer` gate → `transition review …`).
+   Use `done` for `accept` / `accept_with_opportunity`, `blocked` for `revise` /
+   `reject`; the script refuses an incoherent verdict/status pair. Mark the gate
+   started with `transition <phase-key> in_progress` before invoking it.
 3. **Branch on the verdict** (cascade):
-   - `accept` / `accept_with_opportunity` → `status = "done"`, continue to the
+   - `accept` / `accept_with_opportunity` → `transition <phase-key> done`, continue to the
      next gate. Log any opportunity. **Out-of-scope observations** the gate recorded in
      its `## Hors périmètre — candidats issue` section are collected at REFLECT
      (`/legion:retro`, step 7) and filed as deduplicated GitHub issues on the target
      repo — nothing to do here beyond recording the verdict.
-   - `reject` → `status = "blocked"`, **escalade immédiate** (cas 1 de la taxonomie).
+   - `reject` → `transition <phase-key> blocked --verdict reject`, **escalade immédiate** (cas 1 de la taxonomie).
      Relay the verdict's one-line RAISON and hand back — zero tentative de correction.
      La replanification est requise.
-   - `revise` → `status = "blocked"`. En mode `step`, relay the RAISON and hand back
+   - `revise` → `transition <phase-key> blocked --verdict revise`. En mode `step`, relay the RAISON and hand back
      (the fix loops back to BUILD). En mode `autonomous`, entrer dans la **boucle
      d'auto-correction** :
 
      **Boucle d'auto-correction** (mode `autonomous` uniquement) :
-     a. Incrémenter `run.autocorrect.per_gate[<phase-key>]` et `run.autocorrect.total`.
-        La clé est la **clé de phase** (`lint` / `review` / `test` / `security` — même
-        mapping gate → phase que ci-dessus), **jamais** le nom de gate (`reviewer`,
-        `test-engineer`) : `scripts/eval.py` lit `per_gate.<phase>`.
+     a. Construire le JSON des FAIL : **lire** le `gate-*.md` frais (depuis le disque,
+        sans en recopier le contenu dans la conversation) et en extraire chaque FAIL
+        comme un objet `{"target": "fichier:ligne", "dimension": "R2"}` (`dimension` =
+        le code de la dimension du gate, ex. `R2`/`S3`). Exemple :
+        `'[{"target":"src/A.cs:42","dimension":"R2"},{"target":"src/B.cs:7","dimension":"S3"}]'`.
+        Une liste vide `'[]'` est valide.
+     b. Appeler
+        `battle_state.py bump-autocorrect <phase-key> --fails '<json des FAIL>'`.
+        La clé est la **clé de phase** (`build` / `lint` / `review` / `test` /
+        `security` — même mapping gate → phase que ci-dessus), **jamais** le nom de gate
+        (`reviewer`, `test-engineer`) : `scripts/eval.py` lit `per_gate.<phase>`.
         Un `build_ok: false` survenu **pendant la correction d'une gate** compte sous la
-        clé de cette gate (c'est la même tentative). Un `build_ok: false` **hors de toute
+        clé de cette gate (c'est la même tentative) : appeler
+        `battle_state.py bump-autocorrect <phase-key> --build-failure` (au lieu de `--fails`),
+        ce qui compte la tentative **sans remplacer** les FAIL enregistrés de la gate ni
+        déclencher le contrôle de non-progrès. Un `build_ok: false` **hors de toute
         gate** (premier build d'une slice, §D) compte sous la clé `build`.
-     b. Vérifier les bornes **avant** de relancer :
-        - Si `run.autocorrect.per_gate[<phase-key>] >= 2` → **escalade** (cas 2 : plafond
-          par gate atteint, 2 tentatives maximum).
-        - Si `run.autocorrect.total >= 6` → **escalade** (cas 2 : plafond global
-          atteint, 6 tentatives maximum au global).
-     c. **Détecter le progrès par l'identité des FAIL, pas par le compte brut.**
-        Compare l'**ensemble** des FAIL du nouveau `gate-*.md` à celui du run précédent,
-        par cible (`fichier:ligne` + dimension, ex. `R2`/`S3`). **Progrès** = au moins
-        un FAIL ciblé au run précédent a **disparu** (résolu) — même si le compte total
-        est stable parce qu'un nouveau FAIL d'une autre cause est apparu. **Non-progrès**
-        = aucun FAIL précédent résolu (le même ensemble persiste ou grossit) →
-        **escalade immédiate** (cas 2). Le compte brut seul est trompeur : « 1 FAIL
-        corrigé, 1 autre découvert » est un compte stable mais un vrai progrès.
+        Le script applique lui-même, **avant** toute relance, les bornes (2 tentatives
+        par clé, 6 au global — §F) et la détection de progrès par **identité des FAIL**
+        (`cible` + `dimension`, pas le compte brut : « 1 FAIL corrigé, 1 autre découvert »
+        est un vrai progrès). Il incrémente `run.autocorrect` uniquement sur `continue`.
+        Ne recalcule rien à la main.
+     c. Lire la décision dans le JSON de sortie :
+        - `continue` → étape (d).
+        - `escalate` → **escalade** (cas 2 de la taxonomie, §F) : plafond atteint ou
+          non-progrès. Rendre la main en relayant `reason` et le détail
+          `resolved` / `persisting` / `new` (les identités de FAIL) plus les compteurs
+          (`per_phase`, `total`).
+        - exit `2` sans `decision` (clé invalide, `fails` mal formé) → corriger l'appel
+          et le rejouer ; ne pas avancer.
      d. Passer au builder le **chemin de l'artefact** `gate-*.md` (lire depuis le
         disque, ne pas injecter le contenu dans ce contexte) et relancer BUILD pour
-        cette slice. Puis re-invoquer la gate. Retour à l'étape (a).
+        cette slice. Puis re-invoquer la gate (`transition <phase-key> in_progress`,
+        puis verdict comme ci-dessus). Retour à l'étape (a).
 
-     **Escalade** : `status = "blocked"`, relayer le détail du blocage (gate, FAIL-count,
-     tentatives effectuées), rendre la main. **Pass the builder the artifact path**
+     **Escalade** : la phase reste `blocked` (déjà posée par `transition … blocked`),
+     relayer le détail du blocage (gate, FAIL résolus/persistants/nouveaux, tentatives
+     effectuées), rendre la main. **Pass the builder the artifact path**
      (`gate-review.md` / `gate-test.md`) so it reads the FAIL detail from disk — do not
      pull the full gate content into this session just to brief it (that would refill
      the context the confinement is meant to spare).
@@ -503,7 +587,9 @@ Les deux budgets sont **indépendants et non additionnés** :
   Gérée par le builder lui-même ; le builder ne décide pas d'escalader (il rapporte
   `build_ok: false` si son budget est épuisé).
 - **Boucle orchestrateur (re-gate)** : 2 tentatives par gate (maximum ferme), plafond global de 6 tentatives au global (maximum ferme)
-  sur le run. Un `build_ok: false` du builder après ses 3 essais **compte pour
+  sur le run. Ces budgets sont **appliqués par le script** (`bump-autocorrect`, §E :
+  `CAP_PER_PHASE = 2`, `CAP_TOTAL = 6` dans `battle_state.py`) ; l'orchestrateur lit la
+  décision `continue` / `escalate` et ne compte pas à la main. Un `build_ok: false` du builder après ses 3 essais **compte pour
   1 tentative** de la boucle orchestrateur.
 
 La boucle orchestrateur opère un cran au-dessus : elle borne les **re-gate**, pas
@@ -513,8 +599,10 @@ les re-builds internes du builder.
 
 ## §G — deliver (branch, commit, push, PR) — final step
 
-Precondition: every required review/test/security gate `done`. This step **writes
-and pushes**. En mode `autonomous` (chemin heureux), la PR est composée, poussée et
+Precondition: every required review/test/security gate `done`. Enter the phase with
+`battle_state.py transition deliver in_progress` — the script checks that every
+required gate is `done` and **refuses** otherwise (exit `2`: relay the `reason`, do not
+push). This step **writes and pushes**. En mode `autonomous` (chemin heureux), la PR est composée, poussée et
 ouverte **sans OK bloquant** — l'humain relit le code sur GitHub. Les filets §G.0
 (ci-dessous) sont la **dernière barrière** : chacun, s'il se déclenche, **escalade**
 (cas 4 de la taxonomie — §F). En mode `step`, le comportement historique est
@@ -670,8 +758,8 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    gh pr create --title "<summary>" --body-file ".legion/battles/<id>/pr-body.md" --fill-first --base <default-branch>
    ```
    Use the repo's default branch as `--base` (read it once, e.g.
-   `gh repo view --json defaultBranchRef`). Record the printed PR URL in
-   `battle.json` (`delivery.pr_url`). If `gh` is unavailable → give the user the
+   `gh repo view --json defaultBranchRef`). Record the printed PR URL with
+   `battle_state.py set-delivery --pr-url <url>` (writes `delivery.pr_url`). If `gh` is unavailable → give the user the
    push command + a ready-to-paste PR body and stop.
 
 6. **Comment the issue** (numeric issue only; best-effort, never blocking). Write a
@@ -691,8 +779,8 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    `Closes #<n>` already links the PR to the issue. Note it and move on. (RETEX: the
    comment was refused in an autonomous session; the PR was already created and linked.)
 
-7. **Close the phase** — set `phases.deliver.status = "done"` in `battle.json`
-   (record `delivery.pr_url`). Report the PR URL; if the PR draws review comments,
+7. **Close the phase** — `battle_state.py transition deliver done` (`delivery.pr_url`
+   was recorded at step 5). Report the PR URL; if the PR draws review comments,
    point to `/legion:battle address` (§H); suggest `/legion:retro` once the PR is
    stabilized.
 
@@ -705,7 +793,7 @@ address, or deliver hasn't happened).
 
 This phase is **optional and repeatable**: the human may comment in several waves.
 Each run is a **round** (`phases.address.round`, incremented). All battle-state
-writes stay yours; `pr-triage` only returns. Battle artifacts live under `.legion/`
+writes stay yours, made through `battle_state.py`; `pr-triage` only returns. Battle artifacts live under `.legion/`
 (git-ignored), so the temp files below are never committed.
 
 Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWithOwner`.
@@ -736,8 +824,9 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    that one file) and **returns** the `TRIAGE:` JSON block. **Run the gate artifact
    delivery check** (§E) on `pr-feedback.md` — the modified-time guard especially
    matters here, since the file usually exists from a previous round and the gate must
-   have **re-written** it this round (appended). Then set `phases.address =
-   { "status": "in_progress", "round": <n> }` and parse the returned `TRIAGE` JSON
+   have **re-written** it this round (appended). Then run
+   `battle_state.py transition address in_progress --round <n>` (the script refuses
+   without a `delivery.pr_url`) and parse the returned `TRIAGE` JSON
    to route. You complete `pr-feedback.md` later (step 4: commit SHAs + resolutions)
    — that later write is yours (the orchestrator is not guard-confined), not the
    gate's.
@@ -793,9 +882,10 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    mismatch → re-issue the resolve (or surface it to the user); do not mark the
    round `done` while a thread you meant to close is still unresolved server-side.
 
-8. **Persist `battle.json`** — `phases.address = { "status": "done", "round": <n>,
-   "threads": [ { "id", "target", "kind", "commit": "<sha|null>",
-   "resolution": "fixed|active|wontFix" } ] }` using the **re-fetched** statuses from
+8. **Persist `battle.json`** —
+   `battle_state.py transition address done --round <n> --threads '<json>'`, where
+   `<json>` is the array `[ { "id", "target", "kind", "commit": "<sha|null>",
+   "resolution": "fixed|active|wontFix" } ]` using the **re-fetched** statuses from
    step 7. Delete the temp file (`_threads.json`).
 
 9. **Report** — threads handled / resolved / left open, commits pushed, and the
@@ -805,7 +895,8 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
 ## Guardrails
 
 - Never `cd` / `Set-Location`; operate from the current directory.
-- Persist `battle.json` / `spec.md` / PR artifacts yourself; each gate writes **only
+- Mutate `battle.json` (and `.legion/active-battle`) **only through `battle_state.py`** —
+  never by hand. Persist `spec.md` / PR artifacts yourself; each gate writes **only
   its own** `gate-*.md` / `plan.md` / `pr-feedback.md` (guard-confined) and returns
   verdict + path — nothing else.
 - Never **advance** on `revise`/`reject`. `reject` → immediate escalation. `revise` on a

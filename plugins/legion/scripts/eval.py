@@ -45,10 +45,14 @@ import os
 import sys
 from pathlib import Path
 
-# Phases-gates rapportées, dans l'ordre du pipeline. Clé = nom de **phase** (natif des deux
+# Phases-gates rapportées, dans l'ordre du pipeline : source unique `battle_state.py`
+# (GH#69, même dossier `scripts/`, import direct). Clé = nom de **phase** (natif des deux
 # sources de métriques) ; la valeur est le libellé de présentation (C1 : gate entre
 # parenthèses, table figée — aucune dépendance de l'agrégation à cette table).
-GATE_PHASES: tuple[str, ...] = ("plan", "review", "test", "lint", "security")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from battle_state import VERDICT_PHASES  # noqa: E402
+
+GATE_PHASES: tuple[str, ...] = VERDICT_PHASES
 _GATE_LABEL = {
     "plan": "plan (architect)",
     "review": "review (reviewer)",
@@ -247,6 +251,9 @@ def main() -> int:
 # --------------------------------------------------------------------------- #
 
 def _self_test() -> int:
+    import battle_state
+    assert GATE_PHASES == battle_state.VERDICT_PHASES, GATE_PHASES  # source unique, ordre pipeline
+    assert set(_GATE_LABEL) == set(GATE_PHASES), (set(_GATE_LABEL), GATE_PHASES)
     import tempfile
 
     # ---- cœur pur : _is_closed ----

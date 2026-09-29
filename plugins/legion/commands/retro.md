@@ -71,10 +71,14 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    `blocker|friction|annoyance|idea`; `area` like `gate:reviewer`, `hook:guard`,
    `command:/battle deliver`, `skill:scaffold`.
 
-4. **Close the battle first** (release the guard before writing out-of-repo): set
-   `phases.reflect.status = "done"` in `battle.json` (this resyncs the fleet,
-   dropping it from the active view), and clear `.legion/active-battle` (the guard
-   relaxes — the battle is over). `retro.md` lives under `.legion/` (always
+4. **Close the battle first** (release the guard before writing out-of-repo):
+   ```bash
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" close --battle <id>
+   ```
+   It sets `phases.reflect.status = "done"` (and resyncs the fleet, dropping the
+   battle from the active view), and clears `.legion/active-battle` when it points at
+   this battle (the guard relaxes — the battle is over). Never edit `battle.json` by
+   hand; exit `2` = refused → relay the JSON `reason`. `retro.md` lives under `.legion/` (always
    writable), so it is already persisted by step 3 regardless of order.
 
    > **Order matters.** The out-of-repo writes that follow — the memory write (step 5,
