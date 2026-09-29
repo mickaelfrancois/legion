@@ -142,8 +142,8 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 |---|---|---|
 | `accept` | 0 FAIL, critères passés | Phase fermée, on avance. |
 | `accept_with_opportunity` | 0 FAIL mais ≥1 amélioration repérée | On avance ; l'opportunité est tracée dans l'artefact. |
-| `revise` | ≥1 FAIL | **Stop**. Correction requise (retour BUILD) avant re-soumission. |
-| `reject` | Régression majeure / livrable inexploitable | **Stop**. Re-conception requise. |
+| `revise` | ≥1 FAIL | **N'avance pas**. Gate de revue (lint/reviewer/test/security) : correction (retour BUILD) puis re-soumission — automatique en `autonomous` (boucle bornée, §12), rend la main en `step`. Gate PLAN (`architect`) : rend **toujours** la main pour ajuster la spec. |
+| `reject` | Régression majeure / livrable inexploitable | **Stop — escalade immédiate** (cas 1, §12), quel que soit le mode. Re-conception requise. |
 
 > **Deux canaux distincts d'une gate.** Le verdict ci-dessus juge le **diff de la slice**.
 > En parallèle, une gate (et le `builder`) peut consigner dans son artefact une section

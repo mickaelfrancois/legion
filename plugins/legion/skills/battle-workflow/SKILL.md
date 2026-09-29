@@ -120,8 +120,8 @@ never invokes another agent; the builder never invokes a gate.
 |---|---|---|
 | `accept` | 0 FAIL, criteria met | Phase closed, advance. |
 | `accept_with_opportunity` | 0 FAIL, ≥1 improvement spotted | Advance; opportunity logged in the artifact. |
-| `revise` | ≥1 FAIL | **Stop.** Fix (back to BUILD) and re-run the gate. |
-| `reject` | Major regression / unusable | **Stop.** Redesign required. |
+| `revise` | ≥1 FAIL | **Does not advance.** Review-cascade gate (lint/reviewer/test/security): fix (back to BUILD) and re-run the gate — automatically in `autonomous` (bounded auto-correction loop), by hand-back in `step`. PLAN gate (`architect`): **always** hands back to adjust the spec. |
+| `reject` | Major regression / unusable | **Stop — immediate escalation** (case 1), in every mode. Redesign required. |
 
 ## Phases and delegation
 
