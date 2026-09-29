@@ -47,8 +47,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-ACTIVE_POINTER = Path(".legion/active-battle")
-BATTLES_DIR = Path(".legion/battles")
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit")
 ALWAYS_ALLOW = (".legion/**", ".gitignore")  # etat de la battle + .gitignore (setup orchestrateur)
 
@@ -72,6 +70,8 @@ try:
         sys.path.insert(0, str(_SCRIPTS_DIR))
     from battle_state import GATE_ARTIFACT as _GATE_ARTIFACT_SRC
     from battle_state import PRODUCER_ARTIFACT as _PRODUCER_ARTIFACT_SRC
+    # Lecteurs partages de la battle active (GH#85) : le hook ne lit plus le pointeur lui-meme.
+    from battle_state import active_battle_id, load_active_battle
     GATE_ARTIFACT = {PLUGIN_PREFIX + g: a for g, a in _GATE_ARTIFACT_SRC.items()}
     # Producteur : hors `.legion/`, regles de perimetre standard ; SOUS `.legion/`, seul
     # son rapport est autorise (jamais `battle.json` -> pas d'auto-elargissement du guard).
@@ -114,19 +114,10 @@ def _matches(rel_path: str, patterns) -> bool:
 
 def _load_active_guard(repo_root: Path):
     """Retourne (battle_id, allow, deny) de la battle active, ou None."""
-    pointer = repo_root / ACTIVE_POINTER
-    if not pointer.is_file():
+    active = load_active_battle(repo_root)
+    if active is None:
         return None
-    battle_id = pointer.read_text(encoding="utf-8").strip()
-    if not battle_id:
-        return None
-    battle_json = repo_root / BATTLES_DIR / battle_id / "battle.json"
-    if not battle_json.is_file():
-        return None
-    try:
-        data = json.loads(battle_json.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    battle_id, data = active
     guard = data.get("guard") or {}
     allow = guard.get("allow") or []
     deny = guard.get("deny") or []
@@ -167,19 +158,6 @@ def _is_claude_memory(file_path: str) -> bool:
         return False
     parts = rel.parts  # attendu : <slug>/memory/<...>
     return len(parts) >= 3 and parts[1] == "memory"
-
-
-def _active_battle_id(repo_root: Path) -> str | None:
-    """Id de la battle active (pointeur seul), independamment de `guard.allow`.
-
-    `_load_active_guard` renvoie None des que `guard.allow` est vide ; le confinement
-    des gates doit s'appliquer meme guard non arme, d'ou ce lecteur dedie du pointeur.
-    """
-    pointer = repo_root / ACTIVE_POINTER
-    if not pointer.is_file():
-        return None
-    battle_id = pointer.read_text(encoding="utf-8").strip()
-    return battle_id or None
 
 
 def _gate_decision(agent_type, rel: str | None, battle_id: str | None):
@@ -239,27 +217,20 @@ def _resolved_parts(repo_root: Path, file_path: str) -> tuple[str, ...]:
 def _fallback_decision(data: dict, repo_root: Path) -> tuple[int, str] | None:
     """Repli quand la source unique est introuvable (C1, option B) : fermer, sans copie.
 
-    - `<plugin>:builder` : bloque sous un `.legion/` (casse ignoree, racine ou non), regles
-      standard ailleurs (retourne None) ;
+    - `<plugin>:builder` : bloque pour TOUTE ecriture (le perimetre `/freeze` ne peut plus
+      etre evalue sans lecteur de la battle active) ;
     - tout autre `<plugin>:*` (gates) : bloque ;
-    - session principale et autres agents : None (regles standard).
+    - session principale et autres agents : None (le perimetre n'est pas applique,
+      cf. l'avertissement de `_decide`).
     """
     agent_type = data.get("agent_type")
     if not isinstance(agent_type, str) or not agent_type.startswith(PLUGIN_PREFIX):
         return None
-    file_path = (data.get("tool_input") or {}).get("file_path", "")
     detail = "installation legion incomplete (scripts/battle_state.py introuvable)"
     if agent_type == PLUGIN_PREFIX + "builder":
-        if not file_path:
-            return None
-        rel = _relative(repo_root, file_path)
-        parts = _resolved_parts(repo_root, file_path.replace("\\", "/"))
-        in_state = (rel is not None and _touches_legion_state(rel.split("/"))) or _touches_legion_state(parts)
-        if not in_state:
-            return None
         return 2, (
-            f"BLOQUE : {detail}.\nLe `{agent_type}` ne peut pas ecrire sous `.legion/` "
-            f"tant que l'installation n'est pas reparee ({_IMPORT_ERROR})."
+            f"BLOQUE : {detail}.\nLe `{agent_type}` ne peut rien ecrire tant que "
+            f"l'installation n'est pas reparee ({_IMPORT_ERROR})."
         )
     return 2, (
         f"BLOQUE : {detail}.\nLa gate `{agent_type}` ne peut pas ecrire tant que "
@@ -283,12 +254,16 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
         fallback = _fallback_decision(data, repo_root)
         if fallback is not None:
             return fallback
+        # Session principale : edition libre, mais le perimetre /freeze ne peut plus etre lu.
+        return 0, (
+            f"[guard] /freeze non applique : installation legion incomplete ({_IMPORT_ERROR})."
+        )
 
     # Confinement des gates : une gate n'ecrit QUE son artefact (cf. GATE_ARTIFACT).
     # Prioritaire sur tout le reste, et actif meme guard non arme.
     agent_type = data.get("agent_type")
     if agent_type in GATE_ARTIFACT:
-        battle_id = _active_battle_id(repo_root)
+        battle_id = active_battle_id(repo_root)
         rel = _relative(repo_root, file_path) if file_path else None
         if _gate_decision(agent_type, rel, battle_id):
             # Confinement OK (bon artefact). Refuser EN PLUS un artefact vide : un `Write`
@@ -314,7 +289,7 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
 
     # Producteur sous `.legion/` : seul son rapport (pas d'auto-elargissement du guard).
     if agent_type in PRODUCER_ARTIFACT and file_path:
-        battle_id = _active_battle_id(repo_root)
+        battle_id = active_battle_id(repo_root)
         rel = _relative(repo_root, file_path)
         decision = _producer_state_decision(
             agent_type, rel, battle_id, _resolved_parts(repo_root, file_path.replace("\\", "/"))
@@ -389,6 +364,58 @@ def main() -> int:
     return code
 
 
+def _ev(tool: str, agent: str, path: str, **extra) -> dict:
+    return {"tool_name": tool, "agent_type": agent, "tool_input": {"file_path": path, **extra}}
+
+
+def _t_guard_pointer_blank(bs) -> None:
+    """Pointeur vide (ecrit par `close`) : aucune battle active."""
+    for value in ("", "  \n"):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            bs._write_pointer(root, value)
+            code, msg = _decide(_ev("Write", "legion:reviewer", ".legion/battles/B/gate-review.md",
+                                    content="x"), root)
+            assert code == 2 and "<aucune battle active>" in msg, (code, msg)
+            assert _decide(_ev("Edit", "claude", "src/x.cs"), root)[0] == 0
+            assert _decide(_ev("Edit", "legion:builder", ".legion/battles/B/battle.json"), root)[0] == 2
+
+
+def _t_guard_invalid_id(bs) -> None:
+    """Id invalide dans le pointeur : gate bloquee, /freeze non applique a la session principale."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        bs._write_pointer(root, "../x")
+        assert _decide(_ev("Write", "legion:reviewer", ".legion/battles/B/gate-review.md",
+                           content="x"), root)[0] == 2
+        assert _decide(_ev("Edit", "claude", "src/x.cs"), root)[0] == 0
+
+
+def _t_guard_unreadable_battle_json(bs) -> None:
+    """`battle.json` malforme : le confinement des gates reste actif (pointeur seul)."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / ".legion" / "battles" / "B").mkdir(parents=True)
+        bs._write_pointer(root, "B")
+        (root / ".legion" / "battles" / "B" / "battle.json").write_text("{oops", encoding="utf-8")
+        art = _ev("Write", "legion:reviewer", ".legion/battles/B/gate-review.md", content="# R")
+        assert _decide(art, root)[0] == 0
+        assert _decide(_ev("Write", "legion:reviewer", "src/x.cs", content="x"), root)[0] == 2
+
+
+def _t_guard_freeze_nominal(bs) -> None:
+    """/freeze arme (`allow: ["src/**"]`) : perimetre applique via le lecteur partage."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / ".legion" / "battles" / "B").mkdir(parents=True)
+        bs._write_pointer(root, "B")
+        (root / ".legion" / "battles" / "B" / "battle.json").write_text(
+            '{"guard":{"allow":["src/**"]}}', encoding="utf-8")
+        assert _decide(_ev("Edit", "claude", "src/x.cs"), root)[0] == 0
+        assert _decide(_ev("Edit", "claude", "docs/x.md"), root)[0] == 2
+        assert _decide(_ev("Edit", "claude", ".legion/battles/B/battle.json"), root)[0] == 0
+
+
 def _self_test() -> int:
     global _IMPORT_ERROR
     if _IMPORT_ERROR is not None:
@@ -433,7 +460,7 @@ def _self_test() -> int:
     # producteur (builder) sous .legion/ : seul build-report.md de la battle active
     assert _producer_state_decision("legion:builder", ".legion/battles/B/build-report.md", "B") is True
     assert _producer_state_decision("legion:builder", ".legion/battles/B/battle.json", "B") is False
-    assert _producer_state_decision("legion:builder", ".legion/active-battle", "B") is False
+    assert _producer_state_decision("legion:builder", battle_state._pointer_path(Path(".")).as_posix(), "B") is False
     assert _producer_state_decision("legion:builder", ".legion/battles/B/gate-review.md", "B") is False
     assert _producer_state_decision("legion:builder", ".legion/battles/B/build-report.md", None) is False
     assert _producer_state_decision("legion:builder", "src/x.cs", "B") is None      # hors .legion -> standard
@@ -453,7 +480,7 @@ def _self_test() -> int:
     with tempfile.TemporaryDirectory() as _d:
         _root = Path(_d)
         (_root / ".legion" / "battles" / "B").mkdir(parents=True)
-        (_root / ".legion" / "active-battle").write_text("B", encoding="utf-8")
+        battle_state._write_pointer(_root, "B")
         (_root / ".legion" / "battles" / "B" / "battle.json").write_text(
             '{"guard":{"allow":[]}}', encoding="utf-8"
         )
@@ -496,13 +523,21 @@ def _self_test() -> int:
                             "tool_input": {"file_path": ".legion/battles/B/build-report.md"}}, _root)[0] == 2
             assert _decide({**_w, "agent_type": "legion:builder",
                             "tool_input": {"file_path": ".LEGION/battles/B/battle.json"}}, _root)[0] == 2
+            # C1 (option B) : le builder est bloque pour TOUTE ecriture en repli
             assert _decide({**_w, "agent_type": "legion:builder",
-                            "tool_input": {"file_path": "src/x.cs"}}, _root)[0] == 0
-            assert _decide({**_w, "agent_type": "claude",
-                            "tool_input": {"file_path": ".legion/battles/B/battle.json"}}, _root)[0] == 0
+                            "tool_input": {"file_path": "src/x.cs"}}, _root)[0] == 2
+            # session principale : libre, avec un avertissement stderr
+            code, msg = _decide({**_w, "agent_type": "claude",
+                                 "tool_input": {"file_path": ".legion/battles/B/battle.json"}}, _root)
+            assert code == 0 and "/freeze non applique" in msg, (code, msg)
             assert _decide({"tool_name": "Bash", "agent_type": "legion:reviewer"}, _root)[0] == 0
     finally:
         _IMPORT_ERROR = saved
+
+    _t_guard_pointer_blank(battle_state)
+    _t_guard_invalid_id(battle_state)
+    _t_guard_unreadable_battle_json(battle_state)
+    _t_guard_freeze_nominal(battle_state)
 
     print("OK: guard self-test passed", file=sys.stderr)
     return 0

@@ -17,6 +17,11 @@ Source unique des listes de phases / gates / artefacts (importée par `fleet_syn
 - `CAP_PER_PHASE`, `CAP_TOTAL` ;
 - `SUBCOMMANDS` (sous-commandes du CLI, dans l'ordre du parser ; la doctrine est testée contre elle).
 
+Lecteurs partagés (hooks, GH#85), en lecture seule, sans exception : `active_battle_id(repo_root)
+-> str | None` (pointeur + liste blanche d'id, ne lit pas `battle.json`),
+`load_active_battle(repo_root) -> (id, dict) | None` (dict brut de `battle.json`) et
+`battles_dir(root)`.
+
 Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
 - `apply_transition(..., now_iso=None) -> battle` (copie ; lève `ValueError` si la transition est refusée) ;
@@ -659,7 +664,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _battles_dir(root: Path) -> Path:
+def battles_dir(root: Path) -> Path:
     return root / ".legion" / "battles"
 
 
@@ -670,7 +675,7 @@ def _pointer_path(root: Path) -> Path:
 def _battle_dir(root: Path, battle_id: str) -> Path:
     if not isinstance(battle_id, str) or not _ID_RE.fullmatch(battle_id):
         raise _Refuse(f"identifiant de battle invalide : {battle_id!r} (attendu : [A-Za-z0-9-])")
-    base = _battles_dir(root)
+    base = battles_dir(root)
     target = base / battle_id
     try:
         target.resolve().relative_to(base.resolve())
@@ -682,8 +687,43 @@ def _battle_dir(root: Path, battle_id: str) -> Path:
 def _read_pointer(root: Path) -> str:
     try:
         return _pointer_path(root).read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, ValueError):   # ValueError : UnicodeDecodeError sur un pointeur non UTF-8
         return ""
+
+
+def active_battle_id(repo_root: Path) -> str | None:
+    """Id de la battle active (pointeur `.legion/active-battle`), ou `None`.
+
+    Lecture seule, ne lève jamais : `None` si le pointeur est absent, vide, blanc, illisible
+    ou si l'id ne passe pas la liste blanche `_ID_RE`. Ne lit pas `battle.json`.
+    """
+    try:
+        value = _read_pointer(repo_root)
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return None
+    if not value or not _ID_RE.fullmatch(value):
+        return None
+    return value
+
+
+def load_active_battle(repo_root: Path) -> tuple[str, dict] | None:
+    """`(id, battle.json brut)` de la battle active, ou `None`.
+
+    Lecture seule, ne lève jamais : `None` si pas de battle active, dossier hors de
+    `.legion/battles/`, `battle.json` absent/illisible/invalide ou racine non-dict.
+    Renvoie le dict brut (sans `normalize`).
+    """
+    battle_id = active_battle_id(repo_root)
+    if battle_id is None:
+        return None
+    try:
+        path = _battle_dir(repo_root, battle_id) / "battle.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (_Refuse, OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return battle_id, data
 
 
 def _write_pointer(root: Path, value: str) -> None:
@@ -2337,13 +2377,75 @@ def _t_set_slices_replace_empty_cli() -> None:
         assert "re-plan" in r.refused("set-slices", "--replace")   # fenêtre refermée
 
 
+def _t_active_battle_id() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        assert active_battle_id(root) is None                      # pas de .legion
+        for raw in ("", "  \n"):
+            _write_pointer(root, raw)
+            assert active_battle_id(root) is None, raw
+        for bad in ("../x", "a/b", "-x", "a b"):
+            _write_pointer(root, bad)
+            assert active_battle_id(root) is None, bad
+        _pointer_path(root).write_bytes(b"\xff\xfe\x80b1")        # non UTF-8
+        assert active_battle_id(root) is None
+        _pointer_path(root).unlink()
+        _pointer_path(root).mkdir()                                # dossier
+        assert active_battle_id(root) is None
+        _pointer_path(root).rmdir()
+        _write_pointer(root, "b1\n")
+        assert active_battle_id(root) == "b1"
+
+
+def _t_load_active_battle() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        assert load_active_battle(root) is None
+        for raw in ("", "  \n", "../x", "a/b", "-x", "a b"):
+            _write_pointer(root, raw)
+            assert load_active_battle(root) is None, raw
+        _write_pointer(root, "b1")
+        assert load_active_battle(root) is None                    # battle.json absent
+        bdir = battles_dir(root) / "b1"
+        bdir.mkdir(parents=True)
+        (bdir / "battle.json").write_text("{ pas du json", encoding="utf-8")
+        assert load_active_battle(root) is None
+        (bdir / "battle.json").write_text("[]", encoding="utf-8")
+        assert load_active_battle(root) is None
+        content = {"guard": {"allow": ["src/**"]}, "x": 1}
+        (bdir / "battle.json").write_text(json.dumps(content), encoding="utf-8")
+        assert load_active_battle(root) == ("b1", content)
+        # lien symbolique sortant de .legion/battles/
+        outside = root / "dehors"
+        outside.mkdir()
+        (outside / "battle.json").write_text("{}", encoding="utf-8")
+        try:
+            (battles_dir(root) / "lnk").symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return
+        _write_pointer(root, "lnk")
+        assert load_active_battle(root) is None
+
+
+def _t_active_reader_after_close() -> None:
+    with _Repo() as r:
+        r.init()
+        assert active_battle_id(r.root) == "b1"
+        assert load_active_battle(r.root) is not None
+        r.ok("close")
+        assert _pointer_path(r.root).read_text(encoding="utf-8") == ""
+        assert active_battle_id(r.root) is None
+        assert load_active_battle(r.root) is None
+
+
 _INTEGRATION_TESTS = (
     _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_atomic_and_corrupt,
     _t_fleet_sync_called, _t_phases_cs, _t_cli_exit_codes, _t_import_no_side_effect,
     _t_id_whitelist, _t_atomic_keeps_mode, _t_fleet_sync_explicit_path,
     _t_bump_build_failure_keeps_fails, _t_invalidate_cli, _t_slices_cli,
     _t_check_cascade_cli, _t_set_slices_replace_cli, _t_replan_invalidates_cli,
-    _t_set_slices_replace_empty_cli,
+    _t_set_slices_replace_empty_cli, _t_active_battle_id, _t_load_active_battle,
+    _t_active_reader_after_close,
 )
 
 

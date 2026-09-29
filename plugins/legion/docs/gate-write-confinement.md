@@ -123,6 +123,9 @@ GATE_ARTIFACT = {
 Deux helpers — un lecteur du pointeur **indépendant de `guard.allow`** (le confinement
 doit s'appliquer même guard non armé), et une **fonction pure testable** :
 
+> Dans legion, ce lecteur est `battle_state.active_battle_id` (partagé par `guard.py`, `careful.py` et
+> `usage_track.py`, id validé par liste blanche). Le bloc ci-dessous reste une illustration.
+
 ```python
 def _active_battle_id(repo_root):
     pointer = repo_root / ACTIVE_POINTER
