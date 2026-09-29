@@ -204,20 +204,25 @@ contenu : sa présence *prouvait* l'artefact. Maintenant la gate écrit elle-mê
 
 L'orchestrateur applique donc, **autour de chaque invocation de gate**, un check
 **déterministe** et **métadonnées-seules** (il ne lit jamais le contenu — sinon il
-re-remplirait le contexte que le confinement épargne) :
+re-remplirait le contexte que le confinement épargne). Le calcul est porté par le script
+`scripts/artifact_check.py` (Python stdlib, identique sous Windows, Linux, WSL et macOS,
+sans PowerShell) :
 
 1. **Avant** d'invoquer : résoudre le chemin canonique
    `.legion/battles/<id>/<artefact>` et, **s'il existe déjà** (round de re-loop),
-   capturer son mtime (`(Get-Item <path>).LastWriteTimeUtc`).
+   capturer son mtime avec `artifact_check.py snapshot <chemin>` (JSON
+   `{exists, mtime_ns, size}` ; ne garder `mtime_ns` que si `exists` est vrai).
 2. La gate retourne `VERDICT … ARTIFACT: <chemin>`.
-3. **Après** : vérifier **les quatre** — (a) le fichier **existe** ; (b) il est **non
-   vide** (`(Get-Item <path>).Length > 0` — une gate peut rendre un verdict en laissant
+3. **Après** : lancer
+   `artifact_check.py verify <chemin> [--since <mtime_ns>] --returned <ARTIFACT: retourné>`
+   (toujours passer `--returned`), qui vérifie **les quatre** — (a) le fichier **existe** ; (b) il est **non
+   vide** (taille > 0 — une gate peut rendre un verdict en laissant
    un artefact **0 octet** ; le fichier existe alors, mais ne prouve rien) ; (c) le
    `ARTIFACT:` retourné **== le chemin canonique** attendu (le guard bloque déjà une
    mauvaise *écriture* ; ceci attrape un mauvais chemin dans la *chaîne retournée*) ;
    (d) il a été **écrit à ce passage** (n'existait pas avant, ou mtime **strictement
    postérieur** à l'étape 1 — un résidu de round précédent ne doit jamais passer pour frais).
-4. **À tout échec** → ne pas enregistrer le verdict, ne pas avancer ; **re-invoquer la
+4. **À tout échec** (`ok:false`, exit `2`) → ne pas enregistrer le verdict, ne pas avancer ; **re-invoquer la
    gate une fois** (rappel explicite « écris ton artefact à `<chemin exact>` d'abord ») ;
    si l'échec persiste → phase `blocked`, remonter à l'humain, stop. **Jamais
    d'avancée sur un verdict dont l'artefact frais n'est pas confirmé.**
