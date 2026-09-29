@@ -96,8 +96,8 @@ autonome.
 
 **Boucle ADDRESS** (optionnelle, post-deliver, §11) : une fois la PR ouverte, les
 commentaires de revue humaine sont traités par `/battle address` — la gate
-`pr-triage` classe chaque fil, l'orchestrateur applique les corrections (re-gate
-`review`/`test` selon le rayon d'impact) puis répond/résout. Pas de commentaire → la
+`pr-triage` classe chaque fil, l'orchestrateur applique les corrections (invalidation puis
+cascade depuis `lint` selon le rayon d'impact ; `lint` seul pour `code-trivial`) puis répond/résout. Pas de commentaire → la
 phase n'existe pas.
 
 ---
@@ -219,7 +219,7 @@ lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
-`bump-autocorrect`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`,
+`bump-autocorrect`, `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`,
 `validate`). Le script vérifie chaque transition de phase (ex. `build` refusé tant que le
 plan n'est pas `accept*` **et** approuvé : `phases.plan.approved_at`), écrit de façon
 atomique (temp + `os.replace`) et resynchronise le shard fleet. Il porte aussi la **source
@@ -428,8 +428,8 @@ Découpage acteur/orchestrateur, fidèle à l'invariant « gate à écriture con
   (`builder`/`architect`/`none`), `kind` (`code-trivial`/`code-logic`/`test`/
   `question`/`disagreement`), `requires_regate` — plus un brouillon de réponse FR.
   Il ne code pas, ne poste rien, ne résout rien.
-- **Orchestrateur (`/battle address`)** : route chaque fil (un commit par fil,
-  re-gate `review`/`test` pour `code-logic`/`test`), **confirme** les effets sortants,
+- **Orchestrateur (`/battle address`)** : route chaque fil (un commit par fil ;
+  `code-logic`/`test` : `invalidate` puis cascade complète depuis `lint` ; `code-trivial` : `lint` seul), **confirme** les effets sortants,
   pousse, puis **répond + résout** chaque fil via `gh api graphql`, et persiste
   `phases.address`.
 
@@ -507,6 +507,22 @@ FAIL précédent résolu = non-progrès → escalade immédiate (pas d'attente d
 Le script `bump-autocorrect` applique cette comparaison et les plafonds (2/gate, 6 au
 global) : ils ne reposent plus sur la discipline de l'orchestrateur. Le compte brut seul est trompeur : « 1 FAIL corrigé, 1 autre découvert » est un compte
 stable mais un vrai progrès.
+
+**Invalidation de la cascade.** Toute correction de code rend caducs les verdicts déjà
+rendus. Sur `continue`, `bump-autocorrect` invalide d'office les phases de cascade
+présentes (`lint`, `review`, `test`, `security`) qui sont `done` ou `blocked` : statut
+`pending`, `verdict` à `null`, `fails` conservés (le contrôle de progrès reste correct),
+`invalidated_at` posé, et une entrée `{at, reason, phases}` ajoutée à `run.invalidations`
+si au moins une phase a changé. Après le BUILD correctif, l'orchestrateur relance **toute
+la cascade requise depuis `lint`**. La sous-commande `invalidate [--reason R]` applique la
+même règle hors boucle (raisons : `rebase`, `address:<n>`, `polish`, `manual`). `transition
+… pending` reste refusé.
+
+**Ronde de polissage.** Une seule fois par battle, quand toutes les gates sont `accept*` et
+avant DELIVER : `invalidate --reason polish`, BUILD correctif, cascade depuis `lint`. Elle
+est **hors budget** 2/6 (elle ne touche pas `run.autocorrect`) ; un `revise` pendant la
+ronde entre dans la boucle normale. Le script refuse une seconde ronde, ou une ronde
+demandée alors que DELIVER n'est pas prêt.
 
 ### Choix ouverts exposés par l'architecte
 

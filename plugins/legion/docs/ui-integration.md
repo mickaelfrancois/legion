@@ -164,6 +164,13 @@ antérieure peut ne pas les avoir) :
   présent sur `plan` et sur les phases de cascade (`lint`, `review`, `test`, `security`).
 - `run` : `mode` (`autonomous` | `step`) et `autocorrect` (`per_gate` par clé de phase,
   `total`) — compteurs de la boucle d'auto-correction.
+- `phases.<phase>.invalidated_at` : horodatage ISO-8601 de la dernière invalidation de la
+  phase (cascade repassée à `pending` après une correction). Posé par
+  `battle_state.py invalidate` et par `bump-autocorrect` sur `continue`.
+- `run.invalidations` : `[{at, reason, phases}]`, trace des invalidations ayant changé au
+  moins une phase (`reason` : `polish`, `rebase`, `address:<n>`, `autocorrect:<phase>`,
+  `manual`). Une phase invalidée peut donc repasser de `done` à `pending` : ne pas
+  supposer un statut monotone.
 
 Ce fichier est écrit **uniquement** par `scripts/battle_state.py` (transitions vérifiées,
 écriture atomique) ; l'UI le lit, ne l'écrit jamais.

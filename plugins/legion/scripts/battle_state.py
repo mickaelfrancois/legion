@@ -20,8 +20,12 @@ Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
 - `apply_transition(...) -> battle` (copie ; lève `ValueError` si la transition est refusée) ;
 - `approve_plan(battle, now_iso) -> (ok, reason, battle)` ;
-- `bump_autocorrect(battle, phase, fails, keep_fails=False) -> (decision, reason, battle, detail)`,
-  decision ∈ `continue | escalate | refuse` ;
+- `bump_autocorrect(battle, phase, fails, keep_fails=False, now_iso=None) -> (decision, reason, battle, detail)`,
+  decision ∈ `continue | escalate | refuse` ; sur `continue`, invalide d'office la cascade
+  (detail gagne la cle `invalidated`) ;
+- `invalidate(battle, reason, now_iso) -> (ok, reason, battle, detail)` : remet a `pending`
+  les gates de cascade `done`/`blocked` (les FAIL sont conserves), trace dans
+  `run.invalidations` ; `reason == "polish"` = ronde de polissage, une seule fois, hors budget ;
 - `fail_identity(item) -> str`, `normalize(battle)`, `validate(battle) -> (errors, warnings)`,
   `derive_required_phases(battle)`.
 
@@ -32,6 +36,7 @@ Usage (options globales `--battle <id>` défaut : pointeur `.legion/active-battl
                                       [--round n] [--threads json]
     python battle_state.py approve-plan | close | validate
     python battle_state.py bump-autocorrect <phase> (--fails <json> | --build-failure)
+    python battle_state.py invalidate [--reason R]     # defaut R = manual
     python battle_state.py set-delivery --pr-url <url>
     python battle_state.py set-guard [--allow [g…]] [--deny [g…]] [--careful on|off]
     python battle_state.py set-meta [--title] [--profile] [--required-gates …] [--stack-kind]
@@ -155,7 +160,7 @@ def check_transition(battle: dict, phase: str, status: str, verdict: str | None 
     if status not in STATUSES:
         return False, f"statut inconnu : {status!r}"
     if status == "pending":
-        return False, "retour à 'pending' refusé (pas de retour arrière)"
+        return False, "retour à 'pending' refusé (pas de retour arrière) ; utiliser `invalidate`"
     if phase == "reflect":
         return False, "la phase reflect passe uniquement par `close`"
 
@@ -251,16 +256,65 @@ def approve_plan(battle: dict, now_iso: str) -> tuple[bool, str, dict]:
     return True, "", out
 
 
+# --- Invalidation de la cascade ----------------------------------------------------------
+
+def _invalidate_cascade(out: dict, reason: str, now_iso) -> list[str]:
+    """Remet a `pending` chaque phase de cascade PRESENTE `done`/`blocked` (verdict -> null,
+    `fails` conserves, `invalidated_at` pose). Mute `out` (copie deja faite). Trace un
+    evenement dans `run.invalidations` seulement si une phase a change. Retourne les phases."""
+    phases = out.get("phases")
+    changed: list[str] = []
+    if isinstance(phases, dict):
+        for p in CASCADE_PHASES:
+            entry = phases.get(p)
+            if isinstance(entry, dict) and entry.get("status") in ("done", "blocked"):
+                entry["status"] = "pending"
+                entry["verdict"] = None
+                entry["invalidated_at"] = now_iso
+                changed.append(p)
+    if changed:
+        out.setdefault("run", {}).setdefault("invalidations", []).append(
+            {"at": now_iso, "reason": reason, "phases": list(changed)})
+    return changed
+
+
+def invalidate(battle: dict, reason: str, now_iso) -> tuple[bool, str, dict, dict]:
+    """Invalide les gates de cascade deja acceptees/bloquees apres une correction. Pur.
+
+    Retourne (ok, raison du refus, battle, detail) ; detail = {"invalidated": [phases]}.
+    `reason == "polish"` (ronde de polissage) : refusee si deja faite, si une gate requise
+    n'est pas `done` (DELIVER pas pret) ou si `deliver` n'est pas `pending`. Ne touche jamais
+    `run.autocorrect` (hors budget 2/6)."""
+    if not isinstance(reason, str) or not reason.strip():
+        return False, "raison d'invalidation vide", battle, {}
+    run = battle.get("run") if isinstance(battle.get("run"), dict) else {}
+    if reason == "polish":
+        prior = run.get("invalidations")
+        if isinstance(prior, list) and any(isinstance(e, dict) and e.get("reason") == "polish"
+                                           for e in prior):
+            return False, "ronde de polissage déjà effectuée (une seule autorisée)", battle, {}
+        ok, why = check_transition(battle, "deliver", "in_progress")
+        if not ok:
+            return False, f"polish exige DELIVER prêt : {why}", battle, {}
+        if _status(battle, "deliver") != "pending":
+            return False, "polish exige deliver pending (avant DELIVER)", battle, {}
+    out = copy.deepcopy(battle)
+    changed = _invalidate_cascade(out, reason, now_iso)
+    return True, "", out, {"invalidated": changed}
+
+
 # --- Auto-correction ---------------------------------------------------------------------
 
-def bump_autocorrect(battle: dict, phase: str, fails, keep_fails: bool = False) -> tuple[str, str, dict, dict]:
+def bump_autocorrect(battle: dict, phase: str, fails, keep_fails: bool = False,
+                     now_iso=None) -> tuple[str, str, dict, dict]:
     """Décide continue / escalate pour une ronde d'auto-correction. Pur.
 
     Retourne (decision, reason, battle, detail). `refuse` = clé invalide (battle inchangée).
     `escalate` n'incrémente pas les compteurs mais enregistre les FAIL. `keep_fails=True` (échec
     de build survenu pendant la correction d'une gate) compte la tentative sous la clé mais
     laisse `phases.<clé>.fails` intacts et saute le contrôle de non-progrès. detail =
-    {per_phase, total, resolved, persisting, new}.
+    {per_phase, total, resolved, persisting, new} (+ `invalidated` sur `continue` : la cascade
+    est invalidee d'office, raison `autocorrect:<phase>`, cf. `invalidate`).
     """
     if phase not in AUTOCORRECT_KEYS:
         reason = f"clé d'auto-correction invalide : {phase!r} (attendu : {', '.join(AUTOCORRECT_KEYS)})"
@@ -306,6 +360,8 @@ def bump_autocorrect(battle: dict, phase: str, fails, keep_fails: bool = False) 
     if decision == "continue":
         per_gate[phase] = per + 1
         ac["total"] = total + 1
+    invalidated = _invalidate_cascade(out, f"autocorrect:{phase}", now_iso) \
+        if decision == "continue" else None
     detail = {
         "per_phase": per_gate.get(phase, per),
         "total": ac["total"],
@@ -313,6 +369,8 @@ def bump_autocorrect(battle: dict, phase: str, fails, keep_fails: bool = False) 
         "persisting": persisting,
         "new": added,
     }
+    if invalidated is not None:
+        detail["invalidated"] = invalidated
     return decision, reason, out, detail
 
 
@@ -546,6 +604,8 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--build-failure", action="store_true",
                    help="échec de build pendant la correction d'une gate : compte sous la clé "
                         "sans remplacer ses FAIL")
+    s = add("invalidate")
+    s.add_argument("--reason", default="manual")
     s = add("set-delivery")
     s.add_argument("--pr-url", required=True)
     s = add("set-guard")
@@ -608,10 +668,16 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
             raise _Refuse("usage invalide : exactement un de --fails / --build-failure")
         fails = [] if args.build_failure else _json_arg(args.fails, "--fails")
         decision, reason, out, detail = bump_autocorrect(battle, args.phase, fails,
-                                                         keep_fails=args.build_failure)
+                                                         keep_fails=args.build_failure,
+                                                         now_iso=_now_iso())
         if decision == "refuse":
             raise _Refuse(reason, **detail)
         return out, {"decision": decision, "reason": reason, **detail}
+    if cmd == "invalidate":
+        ok, reason, out, detail = invalidate(battle, args.reason, _now_iso())
+        if not ok:
+            raise _Refuse(reason)
+        return out, {"reason": args.reason, **detail}
     out = copy.deepcopy(battle)
     if cmd == "set-delivery":
         out.setdefault("delivery", {})["pr_url"] = args.pr_url
@@ -1001,6 +1067,124 @@ def _t_replan_requires_reapproval() -> None:
     assert check_transition(b, "build", "in_progress")[0]
 
 
+def _casc(**st):
+    """Fixture cascade : build done + statuts donnes (phase=(statut, verdict) | statut)."""
+    return _fx({"build": "done", **st})
+
+
+def _t_invalidate_cascade() -> None:
+    b = _casc(plan=("done", "accept"), lint=("done", "accept"), test="pending",
+              deliver="pending")
+    b["phases"]["review"] = {"status": "blocked", "verdict": "revise",
+                             "fails": [{"target": "A", "dimension": "R1"}]}
+    snap = copy.deepcopy(b)
+    ok, _, out, det = invalidate(b, "manual", "T1")
+    assert ok and det == {"invalidated": ["lint", "review"]}, det
+    assert b == snap  # entree non mutee
+    for p in ("lint", "review"):
+        e = out["phases"][p]
+        assert e["status"] == "pending" and e["verdict"] is None and e["invalidated_at"] == "T1"
+    assert out["phases"]["review"]["fails"] == [{"target": "A", "dimension": "R1"}]
+    assert out["phases"]["test"] == {"status": "pending"} and "security" not in out["phases"]
+    for p in ("plan", "build", "deliver"):
+        assert out["phases"][p] == b["phases"][p], p
+    assert out["run"]["invalidations"] == [{"at": "T1", "reason": "manual",
+                                            "phases": ["lint", "review"]}]
+
+
+def _t_invalidate_noop() -> None:
+    b = _casc(lint="in_progress", review="pending")
+    ok, _, out, det = invalidate(b, "manual", "T1")
+    assert ok and det["invalidated"] == [] and "run" not in out, (det, out)
+    assert out["phases"] == b["phases"]
+
+
+def _t_invalidate_empty_reason() -> None:
+    b = _casc(lint=("done", "accept"))
+    for r in ("", "   ", None):
+        ok, reason, same, _ = invalidate(b, r, "T")
+        assert not ok and reason and same is b, r
+
+
+def _t_bump_continue_invalidates() -> None:
+    b = _casc(lint=("done", "accept"), review=("done", "accept"), test=("blocked", "revise"))
+    for kw in ({}, {"keep_fails": True}):
+        d, _, out, det = bump_autocorrect(b, "test", [{"target": "A", "dimension": "R1"}],
+                                          now_iso="T", **kw)
+        assert d == "continue", (kw, det)
+        assert det["invalidated"] == ["lint", "review", "test"], det
+        for p in ("lint", "review", "test"):
+            assert out["phases"][p]["status"] == "pending", (kw, p)
+        assert out["run"]["invalidations"][0]["reason"] == "autocorrect:test"
+        assert out["run"]["invalidations"][0]["at"] == "T"
+
+
+def _t_bump_escalate_no_invalidation() -> None:
+    b = _casc(lint=("done", "accept"), review=("blocked", "revise"))
+    _, _, b, _ = _bump(b, "review", ["A"])
+    b["phases"]["review"]["status"] = "blocked"   # re-passe par la gate, toujours en echec
+    b["phases"]["lint"]["status"] = "done"
+    before = copy.deepcopy(b["phases"])
+    n_events = len(b["run"]["invalidations"])
+    d, _, out, det = _bump(b, "review", ["A"])   # non-progres
+    assert d == "escalate" and "invalidated" not in det
+    assert {p: {k: v for k, v in e.items() if k != "fails"} for p, e in out["phases"].items()} == \
+        {p: {k: v for k, v in e.items() if k != "fails"} for p, e in before.items()}
+    assert len(out["run"]["invalidations"]) == n_events
+    d, _, out, det = _bump(_casc(lint=("done", "accept")), "plan", ["A"])
+    assert d == "refuse" and "run" not in out
+
+
+def _t_deliver_after_invalidation() -> None:
+    b = _fx({"build": "done", "plan": ("done", "accept"), "lint": ("done", "accept"),
+             "review": ("done", "accept"), "test": ("done", "accept")})
+    assert check_transition(b, "deliver", "in_progress")[0]
+    _, _, b, _ = invalidate(b, "manual", "T")
+    assert "lint" in _refused(b, "deliver", "in_progress")
+    for p in ("lint", "review", "test"):
+        b = apply_transition(b, p, "in_progress")
+        b = apply_transition(b, p, "done", "accept")
+    assert check_transition(b, "deliver", "in_progress")[0]
+
+
+def _t_progress_after_invalidation() -> None:
+    b = _casc(review=("blocked", "revise"))
+    d, _, b, _ = _bump(b, "review", ["A"])
+    assert d == "continue" and b["phases"]["review"]["status"] == "pending"
+    assert b["phases"]["review"]["fails"] == [{"target": "A", "dimension": "R1"}]
+    b = apply_transition(b, "review", "in_progress")
+    b = apply_transition(b, "review", "blocked", "revise")
+    d, _, b2, _ = _bump(b, "review", ["A"])
+    assert d == "escalate"
+    d, _, _, det = _bump(b, "review", ["B"])
+    assert d == "continue" and det["resolved"] == ["A|R1"], det
+
+
+def _t_polish_once() -> None:
+    done = {"build": "done", "plan": ("done", "accept"), "lint": ("done", "accept"),
+            "review": ("done", "accept"), "test": ("done", "accept"), "deliver": "pending"}
+    b = _fx(done, run={"autocorrect": {"per_gate": {"review": 1}, "total": 1}})
+    ok, reason, out, det = invalidate(b, "polish", "T")
+    assert ok, reason
+    assert det["invalidated"] == ["lint", "review", "test"]
+    assert out["run"]["autocorrect"] == {"per_gate": {"review": 1}, "total": 1}
+    for p in ("lint", "review", "test"):
+        out = apply_transition(out, p, "in_progress")
+        out = apply_transition(out, p, "done", "accept")
+    ok, reason, _, _ = invalidate(out, "polish", "T2")
+    assert not ok and "polissage" in reason, reason
+    # gate requise non done
+    bad = _fx({**done, "test": "pending"})
+    ok, reason, _, _ = invalidate(bad, "polish", "T")
+    assert not ok and "test" in reason, reason
+    # deliver deja entame
+    bad = _fx({**done, "deliver": "done"})
+    ok, reason, _, _ = invalidate(bad, "polish", "T")
+    assert not ok and "pending" in reason, reason
+    # une autre raison n'est pas soumise a ces controles
+    assert invalidate(bad, "rebase", "T")[0]
+
+
 _CORE_TESTS = (
     _t_source_consistency, _t_unknown_phase_status, _t_verdict_status_coherence,
     _t_plan_requires_think, _t_build_refused_without_approval,
@@ -1011,6 +1195,9 @@ _CORE_TESTS = (
     _t_bump_first_round_no_progress_check, _t_bump_progress_by_identity,
     _t_bump_no_progress_escalates, _t_bump_cap_per_phase, _t_bump_cap_total, _t_bump_keys,
     _t_fail_identity, _t_legacy_battle, _t_validate,
+    _t_invalidate_cascade, _t_invalidate_noop, _t_invalidate_empty_reason,
+    _t_bump_continue_invalidates, _t_bump_escalate_no_invalidation,
+    _t_deliver_after_invalidation, _t_progress_after_invalidation, _t_polish_once,
 )
 
 
@@ -1307,11 +1494,39 @@ def _t_import_no_side_effect() -> None:
         assert p.returncode == 0 and p.stdout.strip() == "0" and not p.stderr, (p.stdout, p.stderr)
 
 
+def _t_invalidate_cli() -> None:
+    with _Repo() as r:
+        r.init()
+        b = r.load()
+        b["phases"]["build"]["status"] = "done"
+        b["phases"]["lint"] = {"status": "done", "verdict": "accept"}
+        b["phases"]["review"] = {"status": "done", "verdict": "accept"}
+        b["phases"]["test"] = {"status": "done", "verdict": "accept"}
+        b["phases"]["plan"] = {"status": "done", "verdict": "accept", "approved_at": "T"}
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        n = len(r.calls)
+        res = r.ok("invalidate")
+        assert res["reason"] == "manual" and res["invalidated"] == ["lint", "review", "test"], res
+        assert len(r.calls) == n + 1   # synchro fleet appelee
+        assert r.load()["run"]["invalidations"][0]["reason"] == "manual"
+        for p in ("lint", "review", "test"):
+            r.ok("transition", p, "in_progress")
+            r.ok("transition", p, "done", "--verdict", "accept")
+        assert r.ok("invalidate", "--reason", "polish")["reason"] == "polish"
+        for p in ("lint", "review", "test"):
+            r.ok("transition", p, "in_progress")
+            r.ok("transition", p, "done", "--verdict", "accept")
+        assert "polissage" in r.refused("invalidate", "--reason", "polish")
+        assert "invalidate" in r.refused("transition", "review", "pending")
+        code, res = r.run("validate")
+        assert code == 0 and res["errors"] == [], res
+
+
 _INTEGRATION_TESTS = (
     _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_atomic_and_corrupt,
     _t_fleet_sync_called, _t_phases_cs, _t_cli_exit_codes, _t_import_no_side_effect,
     _t_id_whitelist, _t_atomic_keeps_mode, _t_fleet_sync_explicit_path,
-    _t_bump_build_failure_keeps_fails,
+    _t_bump_build_failure_keeps_fails, _t_invalidate_cli,
 )
 
 
