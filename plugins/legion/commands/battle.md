@@ -18,7 +18,7 @@ session's context.
 > through the deterministic script, called as
 > `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" <sub> …` (fall back to
 > `python3`, same interpreter as the other script calls). Subcommands: `init`,
-> `transition`, `approve-plan`, `set-slices`, `slice`, `next-slice`, `bump-autocorrect`,
+> `transition`, `approve-plan`, `set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`,
 > `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`, `validate`. The script prints one JSON object on
 > stdout; **read it**. Exit code `2` means **refused** (or invalid usage): relay the
 > `reason` to the user and **do not advance**. The script enforces the phase
@@ -287,13 +287,22 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      > « Le plan est prêt. Voici le résumé + les choix ouverts. **OK pour lancer le
      > build ?** »
 
-     **Sur OK** : d'abord enregistrer l'approbation avec
+     **Sur OK** : d'abord déclarer les slices avec
+     `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-slices --replace <id>…` :
+     les ids sont ceux des lignes `[slice-N]` de `plan.md`, dans l'ordre. Un plan sans
+     ligne `[slice-…]` : pas d'appel, le BUILD reste agrégé (une seule unité). Ensuite
+     seulement, enregistrer l'approbation avec
      `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" approve-plan` (elle pose
      `phases.plan.approved_at` ; sans elle, `transition build in_progress` sera refusé
-     en §D). Ensuite, déclarer les slices avec
-     `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-slices <id>…` : les ids
-     sont ceux des lignes `[slice-N]` de `plan.md`, dans l'ordre. Un plan sans ligne
-     `[slice-…]` : pas d'appel, le BUILD reste agrégé (une seule unité). Puis enchaîner directement vers §D (BUILD) dans la même session, en
+     en §D). **L'ordre compte** : `--replace` n'est accepté que tant que `build` est
+     `pending` ou qu'un re-plan est ouvert (`approved_at` à `null`), et `approve-plan`
+     referme cette fenêtre. Le même ordre sert au premier passage (où `--replace`
+     équivaut à une déclaration simple) et à un re-plan (les slices d'id conservé gardent
+     leur statut, les nouvelles sont `pending`, les retirées disparaissent). Si `build`
+     était déjà `done` et qu'une slice du résultat n'est pas `done`, `build` passe à
+     `blocked` et la cascade est invalidée (raison `replan`) : enchaîner `approve-plan`,
+     puis `transition build in_progress`, et rejouer la cascade après le BUILD. Un refus du
+     script est relayé à l'humain, sans contournement. Puis enchaîner directement vers §D (BUILD) dans la même session, en
      annonçant l'enchaînement — ne plus rendre la main. En mode `--step`, rendre la
      main après l'OK (comportement pas-à-pas, cf. §B).
 
@@ -329,8 +338,8 @@ détermine le comportement de la session reprise :
   en cours de progression — ne casser aucune battle existante.
 
 **Battle legacy sans approbation.** Si `transition build in_progress` (§D) est refusé
-avec « plan non approuvé » (battle antérieure à `approved_at`, ou plan relancé depuis),
-ne pas contourner : demander l'**OK humain** (« OK pour lancer le build ? »), puis
+avec « plan non approuvé » (battle antérieure à `approved_at`, ou plan relancé depuis ;
+le même refus vaut pour `transition build blocked`), ne pas contourner : demander l'**OK humain** (« OK pour lancer le build ? »), puis
 enregistrer avec `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" approve-plan`
 et retenter.
 
@@ -355,7 +364,8 @@ current phase with its status/verdict. One line per battle. Read-only: read each
 
 Precondition: `transition build in_progress` (below) must succeed. The script checks
 that `phases.plan` is `done` with an `accept` / `accept_with_opportunity` verdict and
-that the human approved the plan (`approve-plan`, §A.1 step 6). On a refusal, relay the
+that the human approved the plan (`approve-plan`, §A.1 step 6). The approval is
+required for every exit from `pending` (`in_progress`, `done` and `blocked`). On a refusal, relay the
 `reason` and point to PLAN (or, for a missing approval, to §B).
 
 Resolve the target from the argument: a specific `slice-N`, or `all` (every
@@ -905,7 +915,8 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
      (fix, re-commit) before the thread may be resolved. `code-trivial`
      (`requires_regate: false`) re-runs `lint` only, without invalidating the other
      gates. Do not push (step 6) until the required gates are back to `done`: `deliver`
-     is already `done` here, so the script will not stop a premature push.
+     is already `done` here, so the phase table alone will not stop a premature push —
+     step 6 runs `battle_state.py check-cascade` for that.
 
 4. **Update `pr-feedback.md`** — fill each thread's **Commit** (SHA) and target
    **Resolution**.
@@ -916,7 +927,10 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    require **per-thread** confirmation — never close a disagreement without the
    user's agreement.
 
-6. **Push**: `git push origin <me>/<token>` (the commits join the existing PR).
+6. **Push**: first run `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" check-cascade`
+   (read-only). Exit `2` (incomplete cascade) → **do not push**: relay `missing`
+   (`[{phase, status}]`) and re-run the cascade (step 3). Exit `0` →
+   `git push origin <me>/<token>` (the commits join the existing PR).
 
 7. **Reply + resolve** each thread via `gh api graphql` (**best-effort per thread**:
    one failure does not abort the others — warn and continue):
@@ -945,7 +959,9 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    `battle_state.py transition address done --round <n> --threads '<json>'`, where
    `<json>` is the array `[ { "id", "target", "kind", "commit": "<sha|null>",
    "resolution": "fixed|active|wontFix" } ]` using the **re-fetched** statuses from
-   step 7. Delete the temp file (`_threads.json`).
+   step 7. Delete the temp file (`_threads.json`). `transition address done` carries the
+   same precondition as `check-cascade` (every required phase `done`); a refusal
+   (exit `2`) means the cascade is incomplete: go back to step 3.
 
 9. **Report** — threads handled / resolved / left open, commits pushed, and the
    reminder: new comments → re-run `/legion:battle address` (next round). Once the
