@@ -203,8 +203,8 @@ gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
 
 `battle.json` schema (**no need to open `ARCHITECTURE.md` at run time**). It is written
 **only by `scripts/battle_state.py`** (subcommands `init`, `transition`, `approve-plan`,
-`bump-autocorrect`, `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`,
-`validate`), which checks every phase transition, writes atomically and resyncs the fleet
+`set-slices`, `slice`, `next-slice`, `bump-autocorrect`, `invalidate`, `set-delivery`,
+`set-guard`, `set-meta`, `activate`, `close`, `validate`), which checks every phase transition, writes atomically and resyncs the fleet
 shard — never edit it by hand. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
 single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
 
@@ -216,6 +216,8 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
   "title": "…",
   "profile": "feature",                 // feature | hotfix | security | spike
   "required_gates": ["architect", "lint", "reviewer", "test-engineer"],
+  // slices (optionnel) — [{ "id": "slice-1", "status": "pending|in_progress|done|blocked", "warnings"?: n, "files"?: [...] }],
+  // posé par `set-slices`, tenu par `slice`. Absent = BUILD agrégé. `build done` exige toutes les slices `done`.
   "phases": {
     "think":   { "status": "done", "artifact": "spec.md" },
     "plan":    { "status": "in_progress", "artifact": "plan.md", "verdict": null, "fails": [], "approved_at": null },
@@ -229,7 +231,9 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
     // incrémental (les FAILs vivent sinon dans le seul contexte live et disparaissent
     // sur session reprise / compaction). Vidé ([]) dès qu'un passage rend `accept*`.
     // Les phases de cascade (lint|review|test|security) portent aussi `verdict` et `fails`
-    // (FAILs ciblés du dernier passage, alimentés par `bump-autocorrect --fails`).
+    // (FAILs ciblés du dernier passage, alimentés par `bump-autocorrect --fails`) et `covers`
+    // (ids des slices `done` couvertes par le verdict ; remis à null avec le verdict ;
+    // absent si la battle ne déclare pas de slices).
     "build":   { "status": "pending" },
     "lint":    { "status": "pending" },     // .NET-only — self-retires (neutral accept) on non-.NET
     "review":  { "status": "pending" },
@@ -272,7 +276,8 @@ Status ∈ `pending | in_progress | done | blocked`; gate `verdict` ∈
 **skills actually used** — written by the `usage_track` hook on `Stop`
 (main session, delta) and `SubagentStop` (delegated builder/gates, which are
 invisible to the main session's hooks). `/retro` aggregates it; `fleet_sync`
-projects `tokens_total` + `skills` into the shard for the UI.
+projects `tokens_total` + `skills` into the shard for the UI (plus `slices_done` /
+`slices_total` when the battle declares slices).
 
 > A skill is recorded **only when invoked via the `Skill` tool**. The gates and
 > the builder therefore carry `Skill` in their tool whitelist so "load

@@ -112,36 +112,49 @@ et non additive — de la boucle de `revise` portée par l'orchestrateur.
 > la recopie pas.** L'« En bref » est **conditionnel** : ajoute une section « ## En bref »
 > en tête seulement si le rapport dépasse **~40 lignes**.
 
+> **Un seul fichier, une section par slice.** `build-report.md` est partagé par toutes les
+> slices. Tu **ajoutes** ta section `## <slice_id>` juste **avant** la section finale
+> « Hors périmètre — candidats issue » si elle existe, sinon à la fin du fichier ; tu ne
+> réécris jamais la section d'une autre slice. Si le fichier n'existe pas encore, écris d'abord le
+> titre `# Build report (<battle-id>)`. Tu n'écris jamais `battle.json` : l'orchestrateur
+> enregistre l'état de la slice avec ta valeur de retour.
+
 ```markdown
-# Build report — <slice_id> (<battle-id>)
+## <slice_id>
 
 **build_ok** : true | false
 **Warnings** : <n>   (compte du résumé `dotnet build` — 0 = build propre)
 **Itérations build** : <n>
 
-## Fichiers touchés
+### Fichiers touchés
 - src/...
 - tests/...
 
-## Ce qui a été fait
+### Ce qui a été fait
 - <résumé par fichier>
 
-## Tests ajoutés
+### Tests ajoutés
 - <ClasseTests.Méthode_Scénario> — <cas couvert de la matrice>
 
-## Résiduel / à signaler aux gates
+### Résiduel / à signaler aux gates
 - <warnings non bloquants, dette assumée, point pour reviewer/test-engineer>
+```
 
+Section finale **unique**, en fin de fichier (créée par la première slice qui a une
+entrée, complétée par les suivantes) :
+
+```markdown
 ## Hors périmètre — candidats issue
 
 > Optionnel. Observations **hors du périmètre de la slice** repérées en codant (dette
 > pré-existante, code adjacent non touché, amélioration) qui méritent une issue GitHub
-> de suivi sur le repo cible. Distincte du `## Résiduel` ci-dessus (qui, lui, signale
+> de suivi sur le repo cible. Distincte du `### Résiduel` ci-dessus (qui, lui, signale
 > aux gates ce qui concerne la slice). **Ne pèse JAMAIS sur le verdict** (tu n'en rends
 > pas). L'orchestrateur agrège ces entrées au REFLECT (`/legion:retro`), dédoublonne et
 > les matérialise en issues. Omettre la section s'il n'y a rien.
 
 ### <titre court de l'opportunité>
+- **Slice** : `<slice_id>`
 - **Zone** : `<fichier ou composant>`
 - **Type** : bug | amélioration | dette | test manquant | perf | sécurité
 - **Observation** : <constat, avec `fichier:ligne`>

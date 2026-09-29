@@ -40,7 +40,8 @@ columns: `title`, `profile`, `battle_status` (`active` | `blocked` | `closed`),
 `pr_url`, and `repo_path` + `id` (which locate the artifacts at
 `<repo_path>/.legion/battles/<id>/`), plus an approximate usage snapshot
 `tokens_total` (Σ input+output), `tokens` (breakdown) and `skills` (the skills
-actually used, main + subagents — projected from `usage.jsonl`). A consumer (a
+actually used, main + subagents — projected from `usage.jsonl`), plus `slices_done` /
+`slices_total` (absent when the battle declares no slices). A consumer (a
 local UI) lists every battle across repos by reading all shards, then opens the
 markdown artifacts in place — the files stay in their repo, the index just points
 to them. Fields may be `null`/absent on entries not yet rewritten since the schema

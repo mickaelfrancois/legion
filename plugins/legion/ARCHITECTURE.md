@@ -219,8 +219,9 @@ lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
-`bump-autocorrect`, `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`,
-`validate`). Le script vérifie chaque transition de phase (ex. `build` refusé tant que le
+`set-slices`, `slice`, `next-slice`, `bump-autocorrect`, `invalidate`, `set-delivery`,
+`set-guard`, `set-meta`, `activate`, `close`, `validate`). `build done` exige que toutes les
+slices déclarées (`set-slices`) soient `done`. Le script vérifie chaque transition de phase (ex. `build` refusé tant que le
 plan n'est pas `accept*` **et** approuvé : `phases.plan.approved_at`), écrit de façon
 atomique (temp + `os.replace`) et resynchronise le shard fleet. Il porte aussi la **source
 unique** des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
@@ -238,7 +239,8 @@ en parallèle (1 par repo). Un `fleet.json` partagé impliquait un read-modify-w
 *lost update*. Avec un shard par battle, chaque session n'écrit **que son fichier**
 (atomique, temp + `os.replace`) → aucune perte. Les lecteurs agrègent tous les
 `*.json`. Le coût/skills sont projetés depuis `usage.jsonl` par le hook
-`fleet_sync` à chaque écriture de `battle.json` : `battle_state.py` appelle la synchro
+`fleet_sync` à chaque écriture de `battle.json` (les compteurs `slices_done` /
+`slices_total` y sont aussi projetés, absents si la battle ne déclare pas de slices) : `battle_state.py` appelle la synchro
 lui-même après chaque écriture, et le hook `PostToolUse` reste le filet pour les autres
 écritures.
 

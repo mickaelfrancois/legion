@@ -65,6 +65,8 @@ Chaque fichier contient **une** entrée, pas un tableau :
   "tokens_total": 184320,                    // coût approx. = Σ(input+output) ; absent si rien encore
   "tokens": { "input": 150000, "output": 34320, "cache_read": 0, "cache_creation": 0 },
   "skills": ["scaffold", "code-review", "build-fix"],  // skills RÉELLEMENT utilisés (main + subagents)
+  "slices_done": 2,                          // slices `done` ; absent si la battle ne déclare pas de slices
+  "slices_total": 3,                         // slices déclarées ; absent si la battle ne déclare pas de slices
   "updated": "2026-06-08T10:00:00+00:00"    // ISO-8601 UTC du dernier upsert
 }
 ```
@@ -162,6 +164,11 @@ antérieure peut ne pas les avoir) :
   (`null` tant que non approuvé). Posé par `battle_state.py approve-plan`.
 - `phases.<phase>.fails` : FAILs ciblés du dernier passage (`{target, dimension}`) ;
   présent sur `plan` et sur les phases de cascade (`lint`, `review`, `test`, `security`).
+- `slices` (racine) : `[{id, status, warnings?, files?}]`, posé par `battle_state.py
+  set-slices` et tenu par `battle_state.py slice`. Absent ou vide : BUILD agrégé. Le statut
+  d'une slice n'est pas monotone (une slice `done` peut être relancée en `in_progress`).
+- `phases.<phase>.covers` : ids des slices `done` couvertes par le verdict d'une phase de
+  cascade ; suit `verdict` (`null` quand le verdict est remis à `null`).
 - `run` : `mode` (`autonomous` | `step`) et `autocorrect` (`per_gate` par clé de phase,
   `total`) — compteurs de la boucle d'auto-correction.
 - `phases.<phase>.invalidated_at` : horodatage ISO-8601 de la dernière invalidation de la

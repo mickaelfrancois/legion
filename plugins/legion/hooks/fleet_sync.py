@@ -138,7 +138,8 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 def upsert(battle_dir: Path, repo_root: Path, fleet_dir: Path) -> bool:
     """Ecrit le shard de CETTE battle (un fichier dedie). Aucune lecture/reecriture
-    d'un index partage => sur en concurrence multi-sessions. Retourne True si ecrit."""
+    d'un index partage => sur en concurrence multi-sessions. Retourne True si ecrit.
+    Projette aussi `slices_done` / `slices_total` quand la battle declare des slices."""
     battle = _read_json(battle_dir / "battle.json")
     if battle is None:
         return False
@@ -162,9 +163,22 @@ def upsert(battle_dir: Path, repo_root: Path, fleet_dir: Path) -> bool:
         "pr_url": delivery.get("pr_url"),
         "updated": _now_iso(),
     }
+    entry.update(_slice_counts(battle.get("slices")))  # absent si pas de slices
     entry.update(_read_usage(battle_dir))  # tokens_total, tokens, skills (snapshot)
     _atomic_write(fleet_dir / _shard_name(key), entry)
     return True
+
+
+def _slice_counts(slices) -> dict:
+    """Compteurs de slices pour le shard (lecture defensive, jamais d'exception).
+    Liste non vide -> {slices_total, slices_done} sur les seules entrees dict ; sinon {}."""
+    if not isinstance(slices, list) or not slices:
+        return {}
+    entries = [s for s in slices if isinstance(s, dict)]
+    return {
+        "slices_total": len(entries),
+        "slices_done": sum(1 for s in entries if s.get("status") == "done"),
+    }
 
 
 def _read_usage(battle_dir: Path) -> dict:
@@ -326,6 +340,20 @@ def _self_test() -> int:
         b1 = next(e for e in read_fleet(fleet_dir) if e["id"] == "b1")
         assert b1["tokens_total"] == 135 and b1["skills"] == ["scaffold", "build-fix"]
         assert b1["battle_status"] == "active", b1
+        assert "slices_total" not in b1 and "slices_done" not in b1, b1  # pas de slices -> absents
+
+        # slices -> compteurs dans le shard (entrees malformees ignorees)
+        bj = json.loads((bp1 / "battle.json").read_text(encoding="utf-8"))
+        bj["slices"] = [{"id": "slice-1", "status": "done"}, {"id": "slice-2", "status": "pending"}, "x"]
+        (bp1 / "battle.json").write_text(json.dumps(bj), encoding="utf-8")
+        upsert(bp1, base / "b1", fleet_dir)
+        b1 = next(e for e in read_fleet(fleet_dir) if e["id"] == "b1")
+        assert b1["slices_total"] == 2 and b1["slices_done"] == 1, b1
+        bj["slices"] = "slice-1"  # type invalide -> cles absentes, aucune exception
+        (bp1 / "battle.json").write_text(json.dumps(bj), encoding="utf-8")
+        upsert(bp1, base / "b1", fleet_dir)
+        b1 = next(e for e in read_fleet(fleet_dir) if e["id"] == "b1")
+        assert "slices_total" not in b1 and "slices_done" not in b1, b1
 
     # repli simule (import echoue) : main() ne fait rien, exit 0, avertit sur stderr, n'ecrit rien
     saved, _IMPORT_ERROR = _IMPORT_ERROR, "ImportError: simule"
