@@ -285,7 +285,9 @@ opportunities** → deduplicated GitHub issues on the target repo (from the
 `/freeze`, `/guard`, `/careful` set `battle.json.guard`. PreToolUse hooks enforce:
 `guard.py` **blocks** edits outside `guard.allow` (`exit 2`), `careful.py`
 **warns** (never blocks) on destructive shell commands. Bypass:
-`LEGION_GUARD_OFF=1`. The `builder` is subject to the same guard. **Gate
+`LEGION_GUARD_OFF=1`. The `builder` is subject to the same guard, and under `.legion/`
+it may write **only** its `build-report.md` (never `battle.json` — so it cannot widen
+its own perimeter). **Gate
 confinement**: `guard.py` also reads `agent_type` and restricts each gate
 (`architect`/`lint`/`reviewer`/`test-engineer`/`security`/`pr-triage`) to writing
 **only** its own artifact under `.legion/battles/<active>/` — any other write (code,
