@@ -7,6 +7,6 @@ public enum Phase { Unknown = 0, Think, Plan, Build, Lint, Review, Test, Securit
 
 public enum PhaseStatus { Unknown = 0, Pending, InProgress, Done, Blocked }
 
-public enum BattleStatus { Unknown = 0, Active, Blocked, Closed }
+public enum BattleStatus { Unknown = 0, Active, Blocked, Closed, Aborted }
 
 public enum Verdict { Unknown = 0, Accept, AcceptWithOpportunity, Revise, Reject }

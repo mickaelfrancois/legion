@@ -1,6 +1,6 @@
 ---
-description: Orchestrate a legion battle (start | build | review | test | deliver | address | resume | status). Creates per-repo battle state, runs the gate pipeline, persists artifacts.
-argument-hint: start <issue|slug> | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status
+description: Orchestrate a legion battle (start | build | review | test | deliver | address | resume | status | abort). Creates per-repo battle state, runs the gate pipeline, persists artifacts.
+argument-hint: start <issue|slug> | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status | abort [<battle-id>] [--reason <text>]
 ---
 
 You are the **battle orchestrator** of `legion`. Load the `battle-workflow` skill
@@ -19,7 +19,7 @@ session's context.
 > `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" <sub> …` (fall back to
 > `python3`, same interpreter as the other script calls). Subcommands: `init`,
 > `transition`, `approve-plan`, `set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`,
-> `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`, `validate`. The script prints one JSON object on
+> `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`. The script prints one JSON object on
 > stdout; **read it**. Exit code `2` means **refused** (or invalid usage): relay the
 > `reason` to the user and **do not advance**. The script enforces the phase
 > preconditions and the auto-correction budgets; you no longer re-check them by hand.
@@ -44,6 +44,7 @@ Arguments: `$ARGUMENTS`
 - `address` → §H (handle human PR review comments — repeatable, post-deliver)
 - `resume <battle-id>` → §B
 - `status` (or empty) → §C
+- `abort [<battle-id>] [--reason <text>]` → §I (abandon a battle that will not be delivered)
 
 ---
 
@@ -328,6 +329,10 @@ guard hooks track the resumed battle; a refusal means the battle does not exist)
 then check the state with `… battle_state.py validate` (relay any error or warning).
 Read `.legion/battles/<battle-id>/battle.json`. Summarize phase
 statuses and the last verdict. Announce the next pending phase and what it needs.
+**An aborted battle is not resumed**: if `activate` is refused because the battle carries
+`aborted` (exit `2`), relay the `reason` and stop — do not work around it. To consult it,
+use `Read` and `… battle_state.py validate --battle <battle-id>` (the only command an
+aborted battle still accepts).
 Do not re-run completed phases unless asked. If `build` is `in_progress` or `blocked`,
 run `… battle_state.py next-slice`: it names the slice to resume from (read-only, JSON
 `{slice, slices_done, slices_total}`). Never replay slices already `done`.
@@ -362,7 +367,8 @@ et retenter.
 
 List every battle under `.legion/battles/`, showing id, profile, and the
 current phase with its status/verdict. One line per battle. Read-only: read each
-`battle.json` with `Read`; no `battle_state.py` call, nothing is written.
+`battle.json` with `Read`; no `battle_state.py` call, nothing is written. Add the
+marker `aborted` to the line of a battle whose `battle.json` carries an `aborted` field.
 
 ---
 
@@ -980,6 +986,43 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
 9. **Report** — threads handled / resolved / left open, commits pushed, and the
    reminder: new comments → re-run `/legion:battle address` (next round). Once the
    PR is merged/stabilized, `/legion:retro` closes the battle.
+
+## §I — abort a battle
+
+Use when a battle will never be delivered (dead end, superseded, wrong scope). Only the
+human decides: never abort on your own initiative.
+
+**Allowed arguments** — nothing else: an optional `<battle-id>` and an optional
+`--reason <text>`. Never paste `$ARGUMENTS` into a shell command. Read the two values
+out of it, refuse anything else (unknown option, extra word) and ask the user to
+correct, then pass each value as its own quoted argument:
+
+```bash
+python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" abort [--battle "<battle-id>"] [--reason "<text>"]
+```
+
+Without `<battle-id>` the script targets the active battle (the `.legion/active-battle`
+pointer). Without `--reason` the reason is stored as `null`.
+
+1. **Run the script and read its JSON.** Exit `2` means **refused** (the battle is
+   already closed, already aborted, or does not exist): relay the `reason` and stop.
+2. **On success** the script wrote `aborted = { at, reason }` in `battle.json`, cleared
+   `.legion/active-battle` if it pointed at this battle, and resynced the fleet shard
+   (`battle_status = "aborted"`). From now on every command except `validate` is refused
+   for this battle (`activate` and `next-slice` included).
+3. **Release the issue** (only if `ticket` is `GH#<n>`; best-effort, never blocking):
+
+   ```bash
+   gh issue edit <n> --remove-assignee @me
+   ```
+
+   `<n>` is the number read from `battle.json.ticket`, never from user input. On failure
+   (or if `gh` is missing / unauthenticated) → **warn and continue**: the abort is already
+   recorded. **Do not close the issue and do not touch the PR.**
+4. **If `delivery.pr_url` is set**, tell the human the PR is still open and that closing
+   it is their call. A retrospective (`/legion:retro`) is optional, not required.
+5. The artifacts stay on disk under `.legion/battles/<id>/`. Report: battle id, reason,
+   assignee released or not, PR to handle or not.
 
 ## Guardrails
 

@@ -121,18 +121,21 @@ else
     }
 
     // Default view keeps what's still live plus today's closures; the History switch adds
-    // the older closed battles. Ordering (doc §2): blocked first, then most recently updated.
+    // the older finished battles. Ordering (doc §2): blocked first, then most recently updated.
     private IEnumerable<FleetEntry> Visible() =>
         _fleet!.Battles
-            .Where(s => State.ShowHistory || s.BattleStatus != BattleStatus.Closed || IsClosedToday(s))
+            .Where(s => State.ShowHistory || !IsFinished(s.BattleStatus) || IsFinishedToday(s))
             .Where(Matches)
             .OrderByDescending(s => s.BattleStatus == BattleStatus.Blocked)
             .ThenByDescending(s => s.Updated ?? DateTimeOffset.MinValue);
 
-    // No closed_at field exists; Updated is bumped when /retro closes the battle, so it is
-    // the closure-time proxy. "Today" is the local calendar day.
-    private static bool IsClosedToday(FleetEntry s)
-        => s.BattleStatus == BattleStatus.Closed
+    // A battle is finished once closed by /retro or aborted (/legion:battle abort).
+    private static bool IsFinished(BattleStatus s) => s is BattleStatus.Closed or BattleStatus.Aborted;
+
+    // No closed_at field exists; Updated is bumped when the battle is closed or aborted, so
+    // it is the finish-time proxy. "Today" is the local calendar day.
+    private static bool IsFinishedToday(FleetEntry s)
+        => IsFinished(s.BattleStatus)
         && s.Updated?.ToLocalTime().Date == DateTime.Today;
 
     private bool Matches(FleetEntry s)

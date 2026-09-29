@@ -1,6 +1,6 @@
 ---
 description: Consolidated view of legion battles across all repos (the multi-repo Conductor view). Reads the global fleet index (per-battle shards).
-argument-hint: (no args = active) | all | prune
+argument-hint: (no args = active) | all | prune | stale=<hours>
 ---
 
 Show the **fleet**: every battle tracked across repos, from the global shard index
@@ -13,7 +13,7 @@ Arguments: `$ARGUMENTS`
    stop. (One file per battle — never a shared index — so concurrent Claude
    sessions never overwrite each other's entries.)
 
-2. Render one line per battle, sorted by `updated` descending:
+2. Render one line per battle, ordered as below (step 2b):
 
    ```
    REPO              BATTLE                       PHASE     STATUS       UPDATED
@@ -21,11 +21,27 @@ Arguments: `$ARGUMENTS`
    orders-api        2026-06-08-GH-1240           review    blocked      09:30
    ```
 
-   - default (no arg): show only battles with `battle_status != "closed"` —
-     i.e. still in flight.
-   - `all`: show every entry (including closed battles — the index keeps history).
+   - default (no arg): show only battles with `battle_status` not in
+     `{closed, aborted}` — i.e. still in flight.
+   - `all`: show every entry (including closed and aborted battles — the index keeps
+     history).
    - highlight `blocked` battles first — those need attention (a gate returned
      `revise`/`reject`).
+
+2b. **Flag stale battles** (computed by you at read time — no new field in the shard).
+   A battle is **stale** when `battle_status` is `active` or `blocked` **and**
+   `now - updated` is greater than the threshold: **24 hours** by default, or the
+   integer given by `stale=<hours>`. If `<hours>` is not an integer greater than 0, use
+   24 and say so in one warning line. If `updated` is missing or unreadable, the battle
+   is **not** stale. `updated` is the time of the last shard upsert, not of the last
+   real activity: it is a proxy, say so when you report stale battles. A stale battle
+   is probably orphaned; the user can end it with `/legion:battle abort <id>` (from its
+   repo).
+
+   Mark it with `stale` after the status. **Order**: `blocked` battles first (a `blocked`
+   and stale battle stays in this group, with the `stale` mark), then the stale ones
+   (all `active`), then the rest, each group by `updated` descending. `stale=<hours>`
+   can be combined with `all`.
 
 3. `prune`: for each shard whose `repo_path` no longer contains the battle
    (`.legion/battles/<id>/battle.json` absent), **delete that shard file** —
@@ -36,7 +52,7 @@ Arguments: `$ARGUMENTS`
 ## Index schema (for downstream consumers)
 
 Each shard (`fleet.d/*.json`) is **one battle entry** carrying, beyond the CLI
-columns: `title`, `profile`, `battle_status` (`active` | `blocked` | `closed`),
+columns: `title`, `profile`, `battle_status` (`active` | `blocked` | `closed` | `aborted`),
 `pr_url`, and `repo_path` + `id` (which locate the artifacts at
 `<repo_path>/.legion/battles/<id>/`), plus an approximate usage snapshot
 `tokens_total` (Σ input+output), `tokens` (breakdown) and `skills` (the skills

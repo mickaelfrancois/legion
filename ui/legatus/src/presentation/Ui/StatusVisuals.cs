@@ -21,6 +21,7 @@ public static class StatusVisuals
         BattleStatus.Active => Color.Info,
         BattleStatus.Blocked => Color.Error,
         BattleStatus.Closed => Color.Default,
+        BattleStatus.Aborted => Color.Default,
         _ => Color.Default,
     };
 
@@ -57,6 +58,7 @@ public static class StatusVisuals
         BattleStatus.Active => "En cours",
         BattleStatus.Blocked => "Bloquée",
         BattleStatus.Closed => "Terminée",
+        BattleStatus.Aborted => "Abandonnée",
         _ => "Inconnu",
     };
 

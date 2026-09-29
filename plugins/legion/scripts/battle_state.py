@@ -135,7 +135,10 @@ CAP_TOTAL = 6
 SUBCOMMANDS: tuple[str, ...] = ("init", "transition", "approve-plan", "bump-autocorrect",
                                 "invalidate", "set-delivery", "set-guard", "set-meta",
                                 "set-slices", "slice", "next-slice", "check-cascade",
-                                "activate", "close", "validate")
+                                "activate", "close", "abort", "validate")
+
+# Commandes encore permises sur une battle abandonnée (GH#75) : lecture de diagnostic seule.
+ABORT_ALLOWED: tuple[str, ...] = ("validate",)
 
 # Motif des identifiants (battle et slice) : liste blanche, aucun séparateur de chemin.
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
@@ -223,9 +226,40 @@ def _plan_approved(battle: dict) -> bool:
     return "approved_at" not in plan and _status(battle, "build") != "pending"
 
 
+def is_aborted(battle) -> bool:
+    """Vrai si la battle est abandonnée (GH#75) : clé `aborted` présente et non `null`. Pur.
+    Une valeur malformée compte aussi comme abandonnée : on bloque plutôt que de laisser passer."""
+    return isinstance(battle, dict) and battle.get("aborted") is not None
+
+
+_ABORTED_REASON = "battle abandonnée : plus aucune transition (seul `validate` passe)"
+
+
+def aborted_refusal(battle, cmd: str) -> str | None:
+    """Raison du refus si la battle est abandonnée et que `cmd` n'est pas dans `ABORT_ALLOWED`,
+    sinon None. Pur."""
+    if is_aborted(battle) and cmd not in ABORT_ALLOWED:
+        return f"{_ABORTED_REASON} ; commande refusée : {cmd}"
+    return None
+
+
+def abort_battle(battle: dict, reason, now_iso: str) -> tuple[bool, str, dict]:
+    """Abandonne la battle (GH#75). Pur, même forme que `approve_plan`. Refus si la battle est
+    close (`reflect` done) ou déjà abandonnée. `reason` absent ou vide -> `null`."""
+    if is_aborted(battle):
+        return False, "battle déjà abandonnée", battle
+    if _status(battle, "reflect") == "done":
+        return False, "abort refusé : la battle est close (reflect done)", battle
+    out = copy.deepcopy(battle)
+    out["aborted"] = {"at": now_iso, "reason": reason or None}
+    return True, "", out
+
+
 def check_transition(battle: dict, phase: str, status: str, verdict: str | None = None,
                      fails=None, round_=None, threads=None) -> tuple[bool, str]:
     """Précondition d'une transition de phase. Pur. Retourne (ok, raison du refus)."""
+    if is_aborted(battle):
+        return False, _ABORTED_REASON
     if phase not in PHASES:
         return False, f"phase inconnue : {phase!r}"
     if status not in STATUSES:
@@ -672,6 +706,9 @@ def validate(battle) -> tuple[list[str], list[str]]:
         problem = _guard_problem(battle["guard"])
         if problem:
             errors.append(problem)
+    ab = battle.get("aborted")
+    if ab is not None and not (isinstance(ab, dict) and ab.get("at")):
+        warnings.append("aborted n'est pas un objet avec `at`")
     rg = battle.get("required_gates")
     if rg is not None:
         if not isinstance(rg, list):
@@ -922,6 +959,8 @@ def _build_parser_parts():
     s = add("activate")
     s.add_argument("id")
     add("close")
+    s = add("abort")
+    s.add_argument("--reason", default=None)
     add("validate")
     return p, sub
 
@@ -1052,6 +1091,11 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
             out["phases"]["reflect"] = entry
         entry["status"] = "done"
         return out, {"phase": "reflect", "status": "done"}
+    if cmd == "abort":
+        ok, reason, out = abort_battle(battle, args.reason, _now_iso())
+        if not ok:
+            raise _Refuse(reason)
+        return out, {"aborted": out["aborted"]}
     raise _Refuse(f"sous-commande inconnue : {cmd}")  # pragma: no cover
 
 
@@ -1079,7 +1123,9 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None) -> tuple[int, dict
             result.update(battle=args.id)
         elif args.cmd == "activate":
             bdir = _battle_dir(root, args.id)
-            _load(bdir)
+            refusal = aborted_refusal(_load(bdir), "activate")
+            if refusal:
+                raise _Refuse(refusal)
             _write_pointer(root, args.id)
             return 0, {"ok": True, "battle": args.id, "active": args.id}
         else:
@@ -1088,6 +1134,9 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None) -> tuple[int, dict
                 raise _Refuse("aucune battle active (utiliser --battle <id> ou `activate`)")
             bdir = _battle_dir(root, bid)
             battle = _load(bdir)
+            refusal = aborted_refusal(battle, args.cmd)
+            if refusal:
+                raise _Refuse(refusal)
             if args.cmd == "validate":
                 errors, warnings = validate(battle)
                 return (0 if not errors else 2), {"ok": not errors, "battle": bid,
@@ -1107,7 +1156,7 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None) -> tuple[int, dict
             new, extra = _mutation(args, battle)
             _save(bdir, new)
             result.update(battle=bid, **extra)
-            if args.cmd == "close" and _read_pointer(root) == bid:
+            if args.cmd in ("close", "abort") and _read_pointer(root) == bid:
                 _write_pointer(root, "")
                 result["pointer_cleared"] = True
 
@@ -1900,6 +1949,20 @@ def _t_doc_subcommands() -> None:
         assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
 
 
+def _t_doc_abort_stale() -> None:
+    root = Path(__file__).resolve().parents[1]
+    battle_md, fleet_md = root / "commands/battle.md", root / "commands/fleet.md"
+    if not (battle_md.is_file() and fleet_md.is_file()):
+        print("SKIP: _t_doc_abort_stale (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    battle = battle_md.read_text(encoding="utf-8")
+    assert re.search(r"^## §I — abort", battle, re.M), "section abort absente de battle.md"
+    assert "--remove-assignee" in battle, "désassignation gh absente de battle.md"
+    fleet = fleet_md.read_text(encoding="utf-8")
+    assert "stale=" in fleet and "24" in fleet, "stale / seuil absents de fleet.md"
+
+
 def _t_cascade_refused_during_replan() -> None:
     b = _fx({"think": "done", "plan": ("done", "accept"), "build": "done"})
     b["phases"]["plan"]["approved_at"] = "T0"
@@ -2013,6 +2076,62 @@ def _t_set_guard_repair() -> None:
         assert code == 0 and res["errors"] == [], res
 
 
+def _t_is_aborted() -> None:
+    assert not is_aborted(_fx())
+    assert not is_aborted(_fx(aborted=None))
+    assert is_aborted(_fx(aborted={"at": "T", "reason": None}))
+    assert is_aborted(_fx(aborted="x"))
+    assert not is_aborted("pas un objet")
+
+
+def _t_abort_core() -> None:
+    b = _fx({"think": "in_progress"})
+    snap = copy.deepcopy(b)
+    ok, reason, out = abort_battle(b, "piste morte", "T")
+    assert ok and out["aborted"] == {"at": "T", "reason": "piste morte"}, (ok, reason, out)
+    assert b == snap   # entrée non mutée
+    for empty in ("", None):
+        ok, _, out = abort_battle(b, empty, "T")
+        assert ok and out["aborted"] == {"at": "T", "reason": None}
+
+
+def _t_abort_refused_closed() -> None:
+    b = _fx({"reflect": "done"})
+    ok, reason, out = abort_battle(b, "x", "T")
+    assert not ok and "close" in reason and out == b and "aborted" not in out
+
+
+def _t_abort_refused_twice() -> None:
+    ok, _, out = abort_battle(_fx({"think": "in_progress"}), "x", "T")
+    ok2, reason, out2 = abort_battle(out, "y", "T2")
+    assert ok and not ok2 and "déjà abandonnée" in reason and out2 == out
+
+
+def _t_transition_refused_after_abort() -> None:
+    b = _fx({"think": "done", "plan": ("done", "accept")}, aborted={"at": "T", "reason": None})
+    for phase, status in (("think", "in_progress"), ("plan", "in_progress"), ("build", "in_progress"),
+                          ("lint", "done"), ("plan", "blocked")):
+        ok, reason = check_transition(b, phase, status)
+        assert not ok and "abandonnée" in reason, (phase, status, reason)
+
+
+def _t_aborted_refusal() -> None:
+    ab = _fx(aborted={"at": "T", "reason": None})
+    assert aborted_refusal(ab, "validate") is None
+    for cmd in ("transition", "close", "next-slice", "check-cascade", "activate", "abort"):
+        assert "abandonnée" in (aborted_refusal(ab, cmd) or ""), cmd
+    assert aborted_refusal(_fx(), "transition") is None
+    assert aborted_refusal(_fx(aborted=None), "close") is None
+
+
+def _t_validate_aborted() -> None:
+    for bad in ("x", {}):
+        errors, warnings = validate(_fx({"think": "done"}, aborted=bad))
+        assert not errors and any("aborted" in w for w in warnings), (bad, errors, warnings)
+    errors, warnings = validate(_fx({"think": "done"}, aborted={"at": "T", "reason": None}))
+    assert not errors and not any("aborted" in w for w in warnings)
+
+
 _CORE_TESTS = (
     _t_source_consistency, _t_unknown_phase_status, _t_verdict_status_coherence,
     _t_plan_requires_think, _t_build_refused_without_approval,
@@ -2034,10 +2153,12 @@ _CORE_TESTS = (
     _t_set_slices_replace_replan, _t_set_slices_replace_build_done, _t_set_slices_replace_invalidates_cascade,
     _t_replan_invalidates_cascade, _t_first_plan_no_invalidation_event,
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
-    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
+    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_abort_stale,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
-    _t_guard_of, _t_validate_guard,
+    _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
+    _t_abort_refused_twice, _t_transition_refused_after_abort, _t_aborted_refusal,
+    _t_validate_aborted,
 )
 
 
@@ -2550,6 +2671,44 @@ def _t_active_reader_after_close() -> None:
         assert load_active_battle(r.root) is None
 
 
+def _t_abort_cli() -> None:
+    with _Repo() as r:
+        r.init("b1")
+        r.init("b2")
+        pointer = r.root / ".legion" / "active-battle"
+        r.ok("activate", "b1")
+        n = len(r.calls)
+        res = r.ok("abort", "--battle", "b2", "--reason", "autre")
+        assert pointer.read_text(encoding="utf-8") == "b1" and "pointer_cleared" not in res
+        assert len(r.calls) == n + 1
+        n = len(r.calls)
+        res = r.ok("abort", "--reason", "piste morte")
+        assert r.load("b1")["aborted"]["reason"] == "piste morte" and res["pointer_cleared"]
+        assert pointer.read_text(encoding="utf-8") == "" and len(r.calls) == n + 1
+        assert "abandonnée" in r.refused("abort", "--battle", "b1")
+        r.init("b3")
+        r.ok("close")
+        assert "close" in r.refused("abort", "--battle", "b3")
+
+
+def _t_commands_refused_after_abort_cli() -> None:
+    with _Repo() as r:
+        r.init()
+        r.ok("abort")
+        before = r.path().read_bytes()
+        n = len(r.calls)
+        cmds = (("transition", "think", "done"), ("approve-plan",), ("set-guard", "--allow", "a"),
+                ("set-meta", "--title", "x"), ("set-slices", "s1"), ("slice", "s1", "done"),
+                ("invalidate",), ("close",), ("next-slice",), ("check-cascade",),
+                ("abort",))
+        for argv in cmds:
+            assert "abandonnée" in r.refused(*argv, "--battle", "b1"), argv
+        assert "abandonnée" in r.refused("activate", "b1")
+        assert r.path().read_bytes() == before and len(r.calls) == n
+        code, res = r.run("validate", "--battle", "b1")
+        assert code == 0 and res["ok"], res
+
+
 _INTEGRATION_TESTS = (
     _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_atomic_and_corrupt,
     _t_fleet_sync_called, _t_phases_cs, _t_cli_exit_codes, _t_import_no_side_effect,
@@ -2557,7 +2716,8 @@ _INTEGRATION_TESTS = (
     _t_bump_build_failure_keeps_fails, _t_invalidate_cli, _t_slices_cli,
     _t_check_cascade_cli, _t_set_slices_replace_cli, _t_replan_invalidates_cli,
     _t_set_slices_replace_empty_cli, _t_active_battle_id, _t_load_active_battle,
-    _t_active_reader_after_close, _t_set_guard_repair,
+    _t_active_reader_after_close, _t_set_guard_repair, _t_abort_cli,
+    _t_commands_refused_after_abort_cli,
 )
 
 

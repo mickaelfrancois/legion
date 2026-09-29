@@ -21,7 +21,7 @@ public sealed class FleetEntry
     public Phase Phase { get; set; }            // current phase
     public PhaseStatus Status { get; set; }     // status of the current phase
     // SnakeCaseLower naming maps this to the wire key battle_status (doc §2).
-    public BattleStatus BattleStatus { get; set; } // global: active | blocked | closed
+    public BattleStatus BattleStatus { get; set; } // global: active | blocked | closed | aborted
     public string? PrUrl { get; set; }
     public long? TokensTotal { get; set; }      // tokens_total = input + output; absent if nothing yet
     public TokenUsage? Tokens { get; set; }     // breakdown (cache tracked separately)
