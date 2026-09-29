@@ -422,7 +422,10 @@ gate ran.
      a. Incrémenter `run.autocorrect.per_gate[<phase-key>]` et `run.autocorrect.total`.
         La clé est la **clé de phase** (`lint` / `review` / `test` / `security` — même
         mapping gate → phase que ci-dessus), **jamais** le nom de gate (`reviewer`,
-        `test-engineer`) : `scripts/eval.py` et l'UI lisent `per_gate.<phase>`.
+        `test-engineer`) : `scripts/eval.py` lit `per_gate.<phase>`.
+        Un `build_ok: false` survenu **pendant la correction d'une gate** compte sous la
+        clé de cette gate (c'est la même tentative). Un `build_ok: false` **hors de toute
+        gate** (premier build d'une slice, §D) compte sous la clé `build`.
      b. Vérifier les bornes **avant** de relancer :
         - Si `run.autocorrect.per_gate[<phase-key>] >= 2` → **escalade** (cas 2 : plafond
           par gate atteint, 2 tentatives maximum).
