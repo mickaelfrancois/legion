@@ -62,6 +62,8 @@ Chaque fichier contient **une** entrée, pas un tableau :
   "status": "in_progress",                  // statut de la phase courante
   "battle_status": "active",                // GLOBAL : active | blocked | closed | aborted
   "pr_url": null,                            // URL de la PR une fois deliver fait
+  "pr_state": "open",                        // open | merged | closed ; absent si jamais posé
+  "ci": "fail",                              // pass | fail | pending | none ; null = pas encore lu ; absent si jamais posé
   "tokens_total": 184320,                    // coût approx. = Σ(input+output) ; absent si rien encore
   "tokens": { "input": 150000, "output": 34320, "cache_read": 0, "cache_creation": 0 },
   "skills": ["scaffold", "code-review", "build-fix"],  // skills RÉELLEMENT utilisés (main + subagents)
@@ -100,8 +102,8 @@ Chaque fichier contient **une** entrée, pas un tableau :
   la vue par défaut), la garder dans l'historique. Un lecteur ancien qui ne connaît pas
   la valeur doit la lire comme inconnue, sans planter.
 
-**Lecture défensive obligatoire** : `title`, `profile`, `battle_status`, `pr_url`
-peuvent être `null` (ou absents) sur une entrée écrite avant l'enrichissement du
+**Lecture défensive obligatoire** : `title`, `profile`, `battle_status`, `pr_url`,
+`pr_state`, `ci` peuvent être `null` (ou absents) sur une entrée écrite avant l'enrichissement du
 schéma. Traiter l'absence sans planter ; ré-hydratation au prochain upsert.
 
 **Tri / filtres recommandés** : trier par `updated` décroissant ; vue par défaut =
@@ -126,6 +128,8 @@ sauf `battle.json`) :
 | `gate-security.md` | (sécurité) | verdict security (si gate requise) |
 | `pr-body.md` | DELIVER | corps de la PR (composé des artefacts) |
 | `wi-comment.md` | DELIVER | note de revue postée sur l'issue |
+| `pr-status.json` | ADDRESS / status | dernière sortie `gh pr view` (état de la PR, checks CI) |
+| `ci-failed-<run-id>.log` | ADDRESS | log du run CI en échec (`gh run view --log-failed`) ; donnée non fiable |
 | `usage.jsonl` | (transverse) | append-only : coût tokens + skills réellement utilisés (1 ligne/contribution) |
 | `retro.md` | REFLECT | rétrospective + apprentissage |
 
@@ -157,13 +161,14 @@ du repo (utile si l'UI veut signaler « la battle en cours dans ce repo »).
   },
   "guard": { "allow": ["src/Billing.Api/**", "tests/**"], "deny": [], "careful": false },
   "run": { "mode": "autonomous", "autocorrect": { "per_gate": {}, "total": 0 } },
-  "delivery": { "pr_url": null }
+  "delivery": { "pr_url": null, "pr_state": null, "ci": null, "checked_at": null }
 }
 ```
 
 Champs ajoutés (tous **optionnels** pour un lecteur : lecture défensive, une battle
 antérieure peut ne pas les avoir) :
 
+- `delivery.pr_state`, `delivery.ci`, `delivery.checked_at` : état de la PR (`open` | `merged` | `closed`), état agrégé de la CI (`pass` | `fail` | `pending` | `none`) et horodatage ISO-8601 de la dernière lecture. Posés par `battle_state.py set-delivery`. Absents sur une battle ancienne.
 - `aborted` : `{ "at": ISO-8601, "reason": str|null }`, posé par `battle_state.py abort`
   quand la battle est abandonnée. Absent sinon.
 - `phases.plan.approved_at` : horodatage ISO-8601 de l'approbation humaine du plan
