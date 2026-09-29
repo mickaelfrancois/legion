@@ -797,6 +797,8 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
 - Persist `battle.json` / `spec.md` / PR artifacts yourself; each gate writes **only
   its own** `gate-*.md` / `plan.md` / `pr-feedback.md` (guard-confined) and returns
   verdict + path — nothing else.
-- Stop on `revise`/`reject` — the pipeline does not advance.
+- Never **advance** on `revise`/`reject`. `reject` → immediate escalation. `revise` →
+  in `autonomous` mode, the bounded auto-correction loop (§E, budgets §F); in `step`
+  mode, hand back.
 - Delegate concrete .NET reasoning to `dotnet-claude-kit` skills; do not duplicate
   them here.
