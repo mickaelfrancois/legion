@@ -456,18 +456,26 @@ A gate now writes its own artifact, so a returned verdict no longer **proves** t
 artifact exists. A verdict counts **only if its artifact was written this pass**.
 Wrap every gate invocation with this check — it is deterministic (metadata only, you
 never read the artifact's content, which would refill the context the confinement
-spares):
+spares). It runs through `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" …` (fall
+back to `python3`); the script prints one JSON object on stdout and works the same on
+Windows, Linux, WSL and macOS:
 
 1. **Before** invoking, resolve the expected artifact path
    `.legion/battles/<id>/<artifact>` (architect → `plan.md`, lint → `gate-lint.md`,
    reviewer → `gate-review.md`, test-engineer → `gate-test.md`, security →
    `gate-security.md`, pr-triage → `pr-feedback.md`) and, **if it already exists** (a
    re-loop round),
-   capture its current modified-time (`(Get-Item <path>).LastWriteTimeUtc`).
+   capture its current modified-time with
+   `artifact_check.py snapshot <expected>` → `{exists, mtime_ns, size}`. Keep `mtime_ns`
+   only if `exists` is true; otherwise pass no `--since` in step 3.
 2. The gate returns `VERDICT … ARTIFACT: <path>`.
-3. **After** the return, verify **all four** — metadata only, no content read:
+3. **After** the return, run
+   `artifact_check.py verify <expected> [--since <mtime_ns>] --returned <ARTIFACT: path>`.
+   It checks **all four** points below — metadata only, no content read — and answers
+   `{ok, checks:{exists, non_empty, canonical, fresh}, reason}` (exit `0` if `ok`, exit
+   `2` if not). **Always pass `--returned`**, or the `canonical` check is skipped.
    - the file at the expected path **exists**;
-   - it is **non-empty** — `(Get-Item <path>).Length > 0`. A gate can return a verdict
+   - it is **non-empty** (`size > 0`). A gate can return a verdict
      yet leave a **0-byte** artifact (the `Write` never landed, or wrote nothing); such
      an empty file still **exists**, so the existence check alone would wave it through.
      (RETEX: an empty `gate-review.md` would have passed the literal check.) The
@@ -479,7 +487,7 @@ spares):
    - it was **written this pass** — it either did not exist before, or its
      modified-time is now **strictly newer** than the value captured in step 1 (so a
      stale artifact from a previous round is never mistaken for a fresh one).
-4. **On any failure** → do **not** record the verdict and do **not** advance.
+4. **On any failure** (`ok:false` or exit `2`) → do **not** record the verdict and do **not** advance.
    Re-invoke the gate **once** with an explicit reminder ("write your artifact to
    `<exact path>` first, then return your verdict"). If it still fails → run
    `transition <phase-key> blocked` (no verdict), surface it to the user, and stop. **Never advance the pipeline

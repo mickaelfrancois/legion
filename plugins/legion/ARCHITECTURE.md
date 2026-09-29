@@ -364,6 +364,8 @@ plugins/legion/
 ├── scripts/
 │   ├── plugin_retex.py          # journal central RETEX outillage (append/list/resolve, --self-test)
 │   ├── base_freshness.py        # filet base-freshness §G.0.a (verdict déterministe, --self-test)
+│   ├── artifact_check.py        # delivery check d'artefact de gate §E (snapshot/verify métadonnées-seules, --self-test)
+│   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
@@ -375,9 +377,11 @@ plugins/legion/
 > La couche tickets/PR passe par le CLI **`gh`** appelé directement depuis `battle.md`
 > (auth & JSON gérés par `gh`, zéro script réseau). Le dossier `scripts/` ne contient
 > que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness,
-> dédup des opportunités hors-scope, éval des gates), chacun couvert par `--self-test` ; aucun n'appelle
-> le réseau (la couche `gh` — dont la création des issues d'opportunité — reste dans les
-> command-files).
+> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates), chacun couvert par
+> `--self-test` ; aucun n'appelle le réseau (la couche `gh` — dont la création des issues
+> d'opportunité — reste dans les command-files). **Exception « lanceur local »** :
+> `legatus.py` lance un process (`dotnet run`, détaché) et ouvre un navigateur ; il ne
+> touche qu'un socket loopback (sonde du port 5021) et n'envoie rien vers l'extérieur.
 
 ---
 
