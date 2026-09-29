@@ -178,7 +178,7 @@ antérieure peut ne pas les avoir) :
 - `run.invalidations` : `[{at, reason, phases}]`, trace des invalidations ayant changé au
   moins une phase (`reason` : `polish`, `rebase`, `address:<n>`, `autocorrect:<phase>`,
   `replan`, `manual`). Une phase invalidée peut donc repasser de `done` à `pending` : ne pas
-  supposer un statut monotone.
+  supposer un statut monotone (un re-plan fait aussi repasser une gate `in_progress` à `pending`).
 
 Ce fichier est écrit **uniquement** par `scripts/battle_state.py` (transitions vérifiées,
 écriture atomique) ; l'UI le lit, ne l'écrit jamais.

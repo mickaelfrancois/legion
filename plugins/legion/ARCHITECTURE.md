@@ -525,7 +525,9 @@ présentes (`lint`, `review`, `test`, `security`) qui sont `done` ou `blocked` :
 si au moins une phase a changé. Après le BUILD correctif, l'orchestrateur relance **toute
 la cascade requise depuis `lint`**. La sous-commande `invalidate [--reason R]` applique la
 même règle hors boucle (raisons : `rebase`, `address:<n>`, `polish`, `manual`). Un nouveau
-passage `transition plan in_progress` (re-plan) invalide aussi la cascade (raison `replan`) ;
+passage `transition plan in_progress` (re-plan) invalide aussi la cascade (raison `replan`), y compris une gate `in_progress`
+(les autres raisons ne touchent que `done`/`blocked`) ; tant que le plan n'est pas ré-approuvé,
+toute transition de cascade (`in_progress`/`done`) est refusée, comme `build`.
 `set-slices --replace` le fait en défense, sans second événement si elle est déjà `pending`.
 `transition … pending` reste refusé.
 
