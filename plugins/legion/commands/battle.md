@@ -206,7 +206,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    | `feature` (default) | `architect`, `lint`, `reviewer`, `test-engineer` | a normal feature |
    | `hotfix` | `lint`, `reviewer`, `test-engineer` | a small, well-understood fix (no `architect`) |
    | `security` | `architect`, `lint`, `reviewer`, `test-engineer`, `security` | a change on auth, secrets or dependencies |
-   | `spike` | `architect` | exploration: plan only, the PR is a draft |
+   | `spike` | `architect` | exploration: no gate after the plan, BUILD still required; the PR is a draft |
 
    Pick the profile from the user's request, or by this rule of thumb: a small local
    fix is a `hotfix`, a change on auth, secrets or dependencies is `security`, an
@@ -813,9 +813,10 @@ les re-builds internes du builder.
 
 ## §G — deliver (branch, commit, push, PR) — final step
 
-Precondition: every required review/test/security gate `done`. Enter the phase with
-`battle_state.py transition deliver in_progress` — the script checks that every
-required gate is `done` and **refuses** otherwise (exit `2`: relay the `reason`, do not
+Precondition: `build` `done` (whatever the profile, `spike` included: without a BUILD
+there is nothing to commit) and every required review/test/security gate `done`. Enter
+the phase with `battle_state.py transition deliver in_progress` — the script checks
+`build` and every required gate and **refuses** otherwise (exit `2`: relay the `reason`, do not
 push). This step **writes and pushes**. En mode `autonomous` (chemin heureux), la PR est composée, poussée et
 ouverte **sans OK bloquant** — l'humain relit le code sur GitHub. Les filets §G.0
 (ci-dessous) sont la **dernière barrière** : chacun, s'il se déclenche, **escalade**

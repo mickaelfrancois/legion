@@ -47,7 +47,7 @@ Cœur pur :
   `derive_required_phases(battle)` ;
 - `cascade_missing(battle) -> [{phase, status}]` (#88) : phases requises non `done`, dans l'ordre
   de `required_gates` (phase absente : statut `absente`) ; `deliver` et `address done` l'exigent
-  vide (sortie `check-cascade`) ;
+  vide (sortie `check-cascade`) ; `deliver` exige en plus `build` done, quel que soit le profil (#114) ;
 - `build` (`in_progress`, `done` et `blocked`) exige un plan `done`/`accept*` approuvé (#86) ;
   la cascade (`in_progress`/`done`) exige aussi ce plan approuvé, ou la voie legacy (GH#97) ;
 - état par slice (GH#70), champ racine optionnel `slices: [{id, status, warnings?, files?}]`
@@ -358,6 +358,8 @@ def check_transition(battle: dict, phase: str, status: str, verdict: str | None 
         if not _plan_approved(battle):
             return False, "plan non approuvé (approve-plan requis avant la cascade)"
     elif phase == "deliver":
+        if _status(battle, "build") != "done":  # #114 : rien à livrer sans BUILD (spike inclus)
+            return False, f"deliver exige build done (statut : {_status(battle, 'build')})"
         missing = cascade_missing(battle)
         if missing:
             return False, f"deliver exige la phase {missing[0]['phase']} done (statut : {missing[0]['status']})"
@@ -1593,7 +1595,7 @@ def _t_cascade_requires_build_done() -> None:
 
 
 def _t_deliver_requires_required_gates() -> None:
-    done = {"plan": ("done", "accept"), "lint": ("done", "accept"),
+    done = {"plan": ("done", "accept"), "build": "done", "lint": ("done", "accept"),
             "review": ("done", "accept"), "test": "pending"}
     b = _fx(done)
     assert "test" in _refused(b, "deliver", "in_progress")
@@ -1605,8 +1607,13 @@ def _t_deliver_requires_required_gates() -> None:
     b["phases"]["security"] = {"status": "done", "verdict": "accept"}
     assert check_transition(b, "deliver", "in_progress")[0]
     # pr-triage exclu meme s'il est declare
-    b = _fx({"plan": ("done", "accept")}, required_gates=["architect", "pr-triage"])
+    b = _fx({"plan": ("done", "accept"), "build": "done"}, required_gates=["architect", "pr-triage"])
     assert check_transition(b, "deliver", "done")[0]
+    # #114 : profil spike (architect seul) — deliver exige build done.
+    b = _fx({"plan": ("done", "accept")}, required_gates=["architect"])
+    assert "build" in _refused(b, "deliver", "in_progress")
+    b["phases"]["build"] = {"status": "done"}
+    assert check_transition(b, "deliver", "in_progress")[0]
 
 
 def _t_address_requires_pr_url() -> None:
