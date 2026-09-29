@@ -154,7 +154,7 @@ Gates are optional per battle **profile** (`feature` / `hotfix` / `security` /
 | `feature` (default) | `architect`, `lint`, `reviewer`, `test-engineer` | a normal feature |
 | `hotfix` | `lint`, `reviewer`, `test-engineer` | a small, well-understood fix: no `architect`, a short `plan.md` written by the orchestrator, human approval kept |
 | `security` | `architect`, `lint`, `reviewer`, `test-engineer`, `security` | a change on auth, secrets or dependencies |
-| `spike` | `architect` | exploration: plan only, the PR opens as a draft and uses `Refs #<n>` |
+| `spike` | `architect` | exploration: architect is the only gate, the exploratory BUILD still runs before DELIVER; the PR opens as a draft and uses `Refs #<n>` |
 
 Rule of thumb: small local fix → `hotfix`; auth, secrets or dependencies → `security`;
 exploration that will not ship → `spike`; otherwise `feature`. Whatever the profile,
