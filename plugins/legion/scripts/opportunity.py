@@ -39,6 +39,7 @@ import hashlib
 import json
 import re
 import sys
+from pathlib import Path
 
 _REQUIRED = ("title", "zone", "observation")
 
@@ -231,7 +232,7 @@ def main() -> int:
         return _self_test()
     if not args:
         print("usage: opportunity.py dedup [--file F] | render --file F "
-              "[--battle B] [--origin-issue N] | --self-test", file=sys.stderr)
+              "[--battle B] [--origin-issue N] [--out F] | --self-test", file=sys.stderr)
         return 1
 
     def opt(name: str) -> str | None:
@@ -259,10 +260,16 @@ def main() -> int:
             print(f"lecture du candidat impossible: {exc}", file=sys.stderr)
             return 2
         try:
-            print(render(cand, opt("--battle"), opt("--origin-issue")))
+            body = render(cand, opt("--battle"), opt("--origin-issue"))
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+        out = opt("--out")
+        if out:
+            # --out: write the body directly (no shell redirection needed by the caller).
+            Path(out).write_text(body + "\n", encoding="utf-8")
+        else:
+            print(body)
         return 0
 
     print(f"commande inconnue: {cmd}", file=sys.stderr)
@@ -351,6 +358,20 @@ def _self_test() -> int:
     assert "/legion:recon" in body and "/legion:battle start" in body
     assert cand["observation"] in body
     assert _markers_in(body) == {fp}                   # boucle render->parse coherente
+
+    # --- render --out : ecrit le corps sans redirection shell ---
+    import tempfile
+    with tempfile.TemporaryDirectory() as _d:
+        _cand, _out = Path(_d) / "cand.json", Path(_d) / "opp.md"
+        _cand.write_text(json.dumps(cand), encoding="utf-8")
+        _argv = sys.argv
+        try:
+            sys.argv = ["opportunity.py", "render", "--file", str(_cand),
+                        "--battle", "2026-07-02-GH-42", "--origin-issue", "42", "--out", str(_out)]
+            assert main() == 0
+        finally:
+            sys.argv = _argv
+        assert _out.read_text(encoding="utf-8").strip() == body.strip()
 
     # --- render : candidat incomplet => ValueError (jamais de corps sans fp) ---
     try:

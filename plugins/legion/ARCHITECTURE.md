@@ -306,10 +306,13 @@ plugins/legion/
 ├── ARCHITECTURE.md              # ce document
 ├── README.md                    # guide d'utilisation
 ├── docs/ui-integration.md       # contrat de données figé (pour une UI read-only)
+├── docs/gate-write-confinement.md # pourquoi une gate écrit son seul artefact (invariant §4)
 ├── commands/
 │   ├── battle.md                # orchestrateur : start|build|review|test|deliver|address|resume|status
 │   ├── retro.md                 # REFLECT
 │   ├── fleet.md                 # vue multi-repo
+│   ├── issues.md                # pré-THINK : liste les issues ouvertes du repo
+│   ├── legatus.md               # lance l'UI web Legatus (http://localhost:5021)
 │   ├── freeze.md / guard.md / careful.md
 ├── agents/
 │   ├── architect.md             # gate PLAN
@@ -328,14 +331,17 @@ plugins/legion/
 ├── scripts/
 │   ├── plugin_retex.py          # journal central RETEX outillage (append/list/resolve, --self-test)
 │   ├── base_freshness.py        # filet base-freshness §G.0.a (verdict déterministe, --self-test)
-│   └── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
-└── skills/battle-workflow/SKILL.md   # la doctrine opérationnelle (résumé de ce doc)
+│   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
+│   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
+└── skills/
+    ├── battle-workflow/SKILL.md # la doctrine opérationnelle (résumé de ce doc)
+    └── recon/SKILL.md           # pré-THINK : cadrage d'une issue floue (section « Cadrage »)
 ```
 
 > La couche tickets/PR passe par le CLI **`gh`** appelé directement depuis `battle.md`
 > (auth & JSON gérés par `gh`, zéro script réseau). Le dossier `scripts/` ne contient
 > que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness,
-> dédup des opportunités hors-scope), chacun couvert par `--self-test` ; aucun n'appelle
+> dédup des opportunités hors-scope, éval des gates), chacun couvert par `--self-test` ; aucun n'appelle
 > le réseau (la couche `gh` — dont la création des issues d'opportunité — reste dans les
 > command-files).
 
