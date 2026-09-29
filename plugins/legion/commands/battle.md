@@ -18,8 +18,8 @@ session's context.
 > through the deterministic script, called as
 > `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" <sub> …` (fall back to
 > `python3`, same interpreter as the other script calls). Subcommands: `init`,
-> `transition`, `approve-plan`, `bump-autocorrect`, `invalidate`, `set-delivery`, `set-guard`,
-> `set-meta`, `activate`, `close`, `validate`. The script prints one JSON object on
+> `transition`, `approve-plan`, `set-slices`, `slice`, `next-slice`, `bump-autocorrect`,
+> `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`, `validate`. The script prints one JSON object on
 > stdout; **read it**. Exit code `2` means **refused** (or invalid usage): relay the
 > `reason` to the user and **do not advance**. The script enforces the phase
 > preconditions and the auto-correction budgets; you no longer re-check them by hand.
@@ -290,7 +290,10 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      **Sur OK** : d'abord enregistrer l'approbation avec
      `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" approve-plan` (elle pose
      `phases.plan.approved_at` ; sans elle, `transition build in_progress` sera refusé
-     en §D). Puis enchaîner directement vers §D (BUILD) dans la même session, en
+     en §D). Ensuite, déclarer les slices avec
+     `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-slices <id>…` : les ids
+     sont ceux des lignes `[slice-N]` de `plan.md`, dans l'ordre. Un plan sans ligne
+     `[slice-…]` : pas d'appel, le BUILD reste agrégé (une seule unité). Puis enchaîner directement vers §D (BUILD) dans la même session, en
      annonçant l'enchaînement — ne plus rendre la main. En mode `--step`, rendre la
      main après l'OK (comportement pas-à-pas, cf. §B).
 
@@ -310,7 +313,9 @@ guard hooks track the resumed battle; a refusal means the battle does not exist)
 then check the state with `… battle_state.py validate` (relay any error or warning).
 Read `.legion/battles/<battle-id>/battle.json`. Summarize phase
 statuses and the last verdict. Announce the next pending phase and what it needs.
-Do not re-run completed phases unless asked.
+Do not re-run completed phases unless asked. If `build` is `in_progress` or `blocked`,
+run `… battle_state.py next-slice`: it names the slice to resume from (read-only, JSON
+`{slice, slices_done, slices_total}`). Never replay slices already `done`.
 
 **Lire et respecter `run.mode`.** Le mode persisté dans `battle.json.run.mode`
 détermine le comportement de la session reprise :
@@ -354,7 +359,15 @@ that the human approved the plan (`approve-plan`, §A.1 step 6). On a refusal, r
 `reason` and point to PLAN (or, for a missing approval, to §B).
 
 Resolve the target from the argument: a specific `slice-N`, or `all` (every
-slice listed in `plan.md`, in order). Default to the first not-yet-built slice.
+slice listed in `plan.md`, in order). Default to the slice returned by
+`python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" next-slice` (first slice not `done`;
+`slice: null` when all are done or none were declared — aggregated build).
+
+**Per-slice state.** When the battle declares slices (`set-slices`, §A.1 step 6), record
+each slice: `… battle_state.py slice <id> in_progress` **before** coding or delegating,
+then `… slice <id> done|blocked --warnings N --files <paths…>` from the result
+`{ slice_id, build_ok, warnings, files_touched }` (`done` if `build_ok`, else `blocked`).
+Only the orchestrator writes this state; the builder never touches `battle.json`.
 
 **Mark the phase in progress first.** Before coding or delegating, run
 `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition build in_progress`
@@ -369,7 +382,8 @@ same conventions as the `builder` agent: load `dotnet-claude-kit:clean-architect
 `dotnet build` from the current directory (or `dotnet build <stack.build_target>`
 when `battle.json.stack.build_target` is set — repo without a `.sln`); **note the
 warning count** from the build summary. For `all`, build **each slice in order**,
-collecting a `{ slice_id, build_ok, warnings }` per slice. Write `build-report.md`.
+collecting a `{ slice_id, build_ok, warnings }` per slice and recording it with `slice …`
+as above. Write `build-report.md`: one file, one `## <slice-id>` section appended per slice.
 
 **Mode — `--auto`.** Delegate to the `builder` agent via the `Agent` tool
 (`subagent_type: builder`). Pass a self-contained prompt: battle dir, `plan.md`
@@ -377,17 +391,28 @@ path, `slice_id`, the `guard.allow` globs from `battle.json`, and — when set �
 `stack.build_target` (the explicit build target for a repo without a `.sln`). For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep
 dependent slices sequential. Collect each
-`{ slice_id, build_ok, warnings, files_touched }`.
+`{ slice_id, build_ok, warnings, files_touched }`. Before delegating, call
+`slice <id> in_progress`; on the builder's return, call
+`slice <id> done|blocked --warnings N --files …` with that result. A red build of a slice
+→ `slice <id> blocked`, then `transition build blocked`. The builder appends its own
+`## <slice_id>` section to the shared `build-report.md`.
 
 After build (either mode), **classify the result and record it immediately** with
 `transition` — for `all`, only after **every targeted slice** has a result:
-- **any `build_ok == false`** → `transition build blocked`; relay the
+- **any `build_ok == false`** → `slice <id> blocked` (if slices are declared — on a
+  slice's own build only; a corrective BUILD from §E (d) makes no `slice …` call), then
+  `transition build blocked`; relay the
   residual errors. En mode `autonomous`, entrer dans la boucle d'auto-correction
   (§E — boucle de `revise`), en commençant par
   `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" bump-autocorrect build --fails '<json array of the residual errors>'`
-  (`continue` ⇒ relancer le build ; `escalate` ⇒ escalade, cf. §E) ; en mode `step`,
+  (`continue` ⇒ relancer le build : `transition build in_progress`, puis
+  `slice <id> in_progress` ; `escalate` ⇒ escalade, cf. §E) ; en mode `step`,
   stop. Do not advance until resolved.
-- **all `build_ok` (with or without warnings)** → `transition build done`.
+- **all `build_ok` (with or without warnings)** → `transition build done` **only when
+  every declared slice is `done`** (the script refuses otherwise and cites the remaining
+  ids). With `build slice-N` while other slices are still `pending`, leave `build`
+  `in_progress` and announce the next slice (`next-slice`): in `autonomous` mode chain
+  straight into it, in `step` mode hand back.
   Warnings are **non-blocking remarks**: log them (in `build-report.md` and in the
   relay to the user), then **auto-advance straight into §E** (the gate cascade)
   without waiting for a separate command — exactly as for a clean build. Announce
@@ -523,7 +548,12 @@ though the gate ran.
           et le rejouer ; ne pas avancer.
      d. Passer au builder le **chemin de l'artefact** `gate-*.md` (lire depuis le
         disque, ne pas injecter le contenu dans ce contexte) et relancer BUILD pour
-        cette slice. Le `continue` de `bump-autocorrect` a **déjà invalidé** la cascade
+        cette slice. Ce BUILD correctif n'appelle **jamais** `slice …` : les slices restent
+        `done` (l'invalidation de la cascade ne « dé-construit » pas une slice). S'il
+        échoue, enregistrer seulement `transition build blocked` (et
+        `bump-autocorrect <phase-key> --build-failure`) ; les slices restent `done`. Les
+        verdicts de cascade portent `covers` (ids des slices `done`), écrit par le script.
+        Le `continue` de `bump-autocorrect` a **déjà invalidé** la cascade
         (`lint`/`review`/`test`/`security` présentes et `done`/`blocked` → `pending`,
         `verdict` remis à `null`, `fails` conservés) : le code corrigé n'est plus couvert
         par aucun verdict. Après le BUILD correctif, **relancer toute la cascade requise
