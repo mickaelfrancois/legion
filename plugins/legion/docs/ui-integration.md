@@ -165,7 +165,7 @@ antérieure peut ne pas les avoir) :
 - `phases.<phase>.fails` : FAILs ciblés du dernier passage (`{target, dimension}`) ;
   présent sur `plan` et sur les phases de cascade (`lint`, `review`, `test`, `security`).
 - `slices` (racine) : `[{id, status, warnings?, files?}]`, posé par `battle_state.py
-  set-slices` et tenu par `battle_state.py slice`. Absent ou vide : BUILD agrégé. Le statut
+  set-slices` et tenu par `battle_state.py slice`. Absent ou vide : BUILD agrégé. Une slice peut disparaître sur `set-slices --replace` pendant un re-plan ; les ids conservés gardent leur statut. Le statut
   d'une slice n'est pas monotone (une slice `done` peut être relancée en `in_progress`).
 - `phases.<phase>.covers` : ids des slices `done` couvertes par le verdict d'une phase de
   cascade ; suit `verdict` (`null` quand le verdict est remis à `null`).

@@ -219,10 +219,15 @@ lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
-`set-slices`, `slice`, `next-slice`, `bump-autocorrect`, `invalidate`, `set-delivery`,
+`set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`, `invalidate`, `set-delivery`,
 `set-guard`, `set-meta`, `activate`, `close`, `validate`). `build done` exige que toutes les
-slices déclarées (`set-slices`) soient `done`. Le script vérifie chaque transition de phase (ex. `build` refusé tant que le
-plan n'est pas `accept*` **et** approuvé : `phases.plan.approved_at`), écrit de façon
+slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
+pendant un re-plan ouvert (`approved_at` à `null`) ou tant que `build` est `pending`
+(déclarer les slices **avant** `approve-plan`) ; si `build` était `done` et qu'une slice
+résultante ne l'est pas, `build` passe à `blocked` et la cascade est invalidée (raison `replan`). `check-cascade` (lecture seule) dit si les
+phases requises sont `done` avant un push ADDRESS ; `address done` porte la même
+précondition. Le script vérifie chaque transition de phase (ex. `build` — y compris `blocked` — refusé
+tant que le plan n'est pas `accept*` **et** approuvé : `phases.plan.approved_at`), écrit de façon
 atomique (temp + `os.replace`) et resynchronise le shard fleet. Il porte aussi la **source
 unique** des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
 dérivent `guard.py`, `fleet_sync.py` et `eval.py`. Les command-files l'appellent ; ils
@@ -432,7 +437,7 @@ Découpage acteur/orchestrateur, fidèle à l'invariant « gate à écriture con
   Il ne code pas, ne poste rien, ne résout rien.
 - **Orchestrateur (`/battle address`)** : route chaque fil (un commit par fil ;
   `code-logic`/`test` : `invalidate` puis cascade complète depuis `lint` ; `code-trivial` : `lint` seul), **confirme** les effets sortants,
-  pousse, puis **répond + résout** chaque fil via `gh api graphql`, et persiste
+  lance `check-cascade` (exit `2` : pas de push), pousse, puis **répond + résout** chaque fil via `gh api graphql`, et persiste
   `phases.address`.
 
 GitHub n'expose l'état résolu des fils que par **GraphQL** (`reviewThreads.isResolved`)

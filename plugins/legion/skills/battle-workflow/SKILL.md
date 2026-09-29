@@ -172,7 +172,7 @@ fetches the unresolved review threads (`gh api graphql` — the REST API does no
 expose `isResolved`), hands them to the read-only `pr-triage` gate (classifies each
 thread → `target` builder/architect/none, `kind`, `requires_regate` + drafts a FR
 reply), then the orchestrator applies the fixes (one commit per thread; `code-logic`/`test`
-invalidate the gates and re-run the cascade from `lint`; `code-trivial` re-runs `lint` only), pushes, and **replies + resolves** each
+invalidate the gates and re-run the cascade from `lint`; `code-trivial` re-runs `lint` only), runs `check-cascade` before pushing, pushes, and **replies + resolves** each
 thread — verifying the resolution actually stuck server-side before persisting.
 Repeatable: one **round** per comment wave (`phases.address.round`). Artifact:
 `pr-feedback.md`. GitHub has no `fixed`/`wontFix` distinction — both resolve the
@@ -203,9 +203,10 @@ gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
 
 `battle.json` schema (**no need to open `ARCHITECTURE.md` at run time**). It is written
 **only by `scripts/battle_state.py`** (subcommands `init`, `transition`, `approve-plan`,
-`set-slices`, `slice`, `next-slice`, `bump-autocorrect`, `invalidate`, `set-delivery`,
+`set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`, `invalidate`, `set-delivery`,
 `set-guard`, `set-meta`, `activate`, `close`, `validate`), which checks every phase transition, writes atomically and resyncs the fleet
-shard — never edit it by hand. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
+shard — never edit it by hand. On a re-plan, `set-slices --replace` swaps the slice list
+(before `approve-plan`); `check-cascade` (read-only) gates the ADDRESS push. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
 single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
 
 ```jsonc
