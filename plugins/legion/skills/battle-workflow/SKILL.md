@@ -141,7 +141,19 @@ never invokes another agent; the builder never invokes a gate.
 | REFLECT | `/retro` | `retro.md` | Claude memory · `plugin-retex.jsonl` · GitHub issues (`opportunity.py`) |
 
 Gates are optional per battle **profile** (`feature` / `hotfix` / `security` /
-`spike`); `battle.json.required_gates` declares which ones block.
+`spike`); `battle.json.required_gates` declares which ones block. The table lives in
+`battle_state.py` (`PROFILES`), which derives `required_gates` at `init`.
+
+| Profile | `required_gates` | Use for |
+|---|---|---|
+| `feature` (default) | `architect`, `lint`, `reviewer`, `test-engineer` | a normal feature |
+| `hotfix` | `lint`, `reviewer`, `test-engineer` | a small, well-understood fix: no `architect`, a short `plan.md` written by the orchestrator, human approval kept |
+| `security` | `architect`, `lint`, `reviewer`, `test-engineer`, `security` | a change on auth, secrets or dependencies |
+| `spike` | `architect` | exploration: plan only, the PR opens as a draft and uses `Refs #<n>` |
+
+Rule of thumb: small local fix → `hotfix`; auth, secrets or dependencies → `security`;
+exploration that will not ship → `spike`; otherwise `feature`. Whatever the profile,
+`slice … done --files` adds `security` by itself when a file looks sensitive.
 
 ## DELIVER
 
@@ -265,7 +277,10 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
     // uniquement quand au moins une phase a changé : [{ "at": ISO, "reason": "polish|rebase|address:<n>|autocorrect:<phase>|replan|manual", "phases": ["lint","review"] }].
     // Une phase invalidée repasse `pending`, `verdict` null, `fails` conservés, et porte `phases.<p>.invalidated_at`.
     // Une seule entrée `polish` est permise par battle.
-    "invalidations": []
+    "invalidations": [],
+    // (optionnel, écrit par `slice … done --files`) { "at": ISO, "files": [chemins sensibles] } :
+    // `security` a été ajoutée à `required_gates` automatiquement. Absent sinon.
+    "security_auto": null
   },
   "delivery": { "pr_url": null }
   // aborted (optionnel) — { "at": ISO, "reason": str|null }, posé par `abort` ; toute commande sauf `validate` est alors refusée

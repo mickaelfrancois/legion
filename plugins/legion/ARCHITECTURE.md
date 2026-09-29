@@ -234,7 +234,9 @@ atomique (temp + `os.replace`) et resynchronise le shard fleet. `abort [--reason
 battle comme abandonnée (`aborted = {at, reason}`) : refusé si la battle est close ou déjà
 abandonnée ; ensuite seul `validate` passe et le pointeur `active-battle` est vidé si
 elle était active. Il porte aussi la **source
-unique** des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
+unique** des profils (`PROFILES`, dont `init` dérive `required_gates`) et de
+l'heuristique qui ajoute `security` à `required_gates` sur slice sensible
+(`security_hits`, `mark_security_auto`), ainsi que des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
 dérivent `guard.py`, `fleet_sync.py` et `eval.py`. Les command-files l'appellent ; ils
 n'éditent plus `battle.json` à la main.
 

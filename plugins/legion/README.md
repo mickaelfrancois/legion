@@ -179,8 +179,10 @@ bascule en intake inline en te prévenant.
 
 **Je dois suivre toutes les étapes ?**
 Non. Le *profil* de la battle (`feature` par défaut) décide quelles gates sont
-obligatoires. Un `hotfix` peut sauter l'architecture ; une battle `security` force
-la gate sécurité.
+obligatoires (`start <issue> --profile <p>`). Un `hotfix` n'a pas d'`architect` mais
+garde un plan court et l'approbation humaine. Le profil `security` ajoute la gate
+sécurité, et elle est ajoutée d'office dès qu'une slice touche un fichier sensible.
+Un `spike` ne garde que l'`architect` et ouvre une PR brouillon.
 
 **Où est l'état d'une battle ?**
 Dans `.legion/battles/<id>/` à la racine du repo. Lisible, **git-ignoré** (la trace

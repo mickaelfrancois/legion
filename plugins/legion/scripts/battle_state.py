@@ -14,6 +14,7 @@ Source unique des listes de phases / gates / artefacts (importée par `fleet_syn
 - `PHASES`, `GATES`, `GATE_PHASE`, `GATE_ARTIFACT`, `PRODUCER_ARTIFACT` ;
 - `VERDICT_PHASES`, `CASCADE_PHASES`, `AUTOCORRECT_KEYS` ;
 - `STATUSES`, `VERDICTS`, `ACCEPT_VERDICTS`, `DEFAULT_REQUIRED_GATES` ;
+- `PROFILES`, `DEFAULT_PROFILE` (gates requises par profil ; `init` en dérive `required_gates`) ;
 - `CAP_PER_PHASE`, `CAP_TOTAL` ;
 - `SUBCOMMANDS` (sous-commandes du CLI, dans l'ordre du parser ; la doctrine est testée contre elle).
 
@@ -50,6 +51,9 @@ Cœur pur :
   conservés gardent leur entrée, `detail.removed` liste les retirés, `build done` repasse à
   `blocked` si une slice du résultat n'est pas `done` ; `replace=True` sans id (GH#93) vide la
   liste = retour au BUILD agrégé, mêmes conditions),
+  `security_hits(files) -> list[str]` (fichiers sensibles, sans doublon, ordre reçu) et
+  `mark_security_auto(battle, files, now_iso) -> (battle, hits_added)` (copie ; ajoute `security`
+  en fin de `required_gates` + `run.security_auto`, idempotent),
   `update_slice(battle, slice_id, status, warnings=None, files=None) -> (ok, reason, battle)`
   (`build` doit être `in_progress`), `next_slice(battle) -> {id, status} | None` (première
   slice non `done`). `build done` exige toutes les slices `done` ; un verdict de gate de cascade
@@ -85,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fnmatch
 import json
 import os
 import re
@@ -126,6 +131,33 @@ STATUSES: tuple[str, ...] = ("pending", "in_progress", "done", "blocked")
 ACCEPT_VERDICTS: tuple[str, ...] = ("accept", "accept_with_opportunity")
 VERDICTS: tuple[str, ...] = ACCEPT_VERDICTS + ("revise", "reject")
 DEFAULT_REQUIRED_GATES: tuple[str, ...] = ("architect", "lint", "reviewer", "test-engineer")
+DEFAULT_PROFILE = "feature"
+PROFILES: dict[str, tuple[str, ...]] = {
+    "feature": DEFAULT_REQUIRED_GATES,
+    "hotfix": ("lint", "reviewer", "test-engineer"),
+    "security": ("architect", "lint", "reviewer", "test-engineer", "security"),
+    "spike": ("architect",),
+}
+
+SECURITY_DEP_NAMES: frozenset[str] = frozenset({
+    "directory.packages.props", "packages.lock.json", "package.json", "package-lock.json",
+    "pyproject.toml", "go.mod", "cargo.toml",
+    "yarn.lock", "pnpm-lock.yaml", "go.sum", "cargo.lock", "poetry.lock", "uv.lock",
+    "pipfile", "pipfile.lock", "nuget.config",
+    "program.cs", "startup.cs",
+})
+SECURITY_NAME_GLOBS: tuple[str, ...] = (
+    "*.csproj", "requirements*.txt", "appsettings*.json", "*.env", ".env*",
+)
+SECURITY_EXTENSIONS: tuple[str, ...] = (".pem", ".key", ".pfx", ".p12")
+SECURITY_WORDS: frozenset[str] = frozenset({
+    "auth", "authn", "authz", "authentication", "authorization", "authorize", "oauth",
+    "token", "tokens",
+})
+SECURITY_SUBSTRINGS: tuple[str, ...] = (
+    "secret", "credential", "password", "passwd", "endpoint", "controller",
+)
+_WORD_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 CAP_PER_PHASE = 2
 CAP_TOTAL = 6
@@ -470,6 +502,54 @@ def update_slice(battle: dict, slice_id: str, status: str, warnings=None,
     return False, f"slice inconnue : {slice_id!r}", battle
 
 
+def _security_words(segment: str) -> list[str]:
+    return [w.lower() for w in _WORD_SPLIT.split(segment) if w]
+
+
+def _is_sensitive(path: str) -> bool:
+    segments = [seg for seg in path.replace("\\", "/").removeprefix("./").split("/") if seg]
+    if not segments:
+        return False
+    name = segments[-1].lower()
+    if name in SECURITY_DEP_NAMES or name.endswith(SECURITY_EXTENSIONS):
+        return True
+    if any(fnmatch.fnmatchcase(name, g) for g in SECURITY_NAME_GLOBS):
+        return True
+    for seg in segments:
+        if SECURITY_WORDS.intersection(_security_words(seg)):
+            return True
+        low = seg.lower()
+        if any(sub in low for sub in SECURITY_SUBSTRINGS):
+            return True
+    return False
+
+
+def security_hits(files) -> list[str]:
+    """Fichiers sensibles parmi `files` (dépendances, config, clés, auth, jeton, secrets,
+    endpoints), sans doublon, dans l'ordre reçu. Pur ; ignore ce qui n'est pas une chaîne."""
+    hits: list[str] = []
+    for f in files or []:
+        if isinstance(f, str) and f not in hits and _is_sensitive(f):
+            hits.append(f)
+    return hits
+
+
+def mark_security_auto(battle: dict, files, now_iso: str) -> tuple[dict, list[str]]:
+    """Ajoute `security` en fin de `required_gates` si `files` contient un fichier sensible et
+    que la gate n'y est pas déjà ; trace `run.security_auto = {at, files}`. Pur (copie).
+    Idempotent : gate déjà présente ou aucun fichier sensible => (battle, [])."""
+    hits = security_hits(files)
+    gates = _required_gates(battle)
+    if not hits or "security" in gates:
+        return battle, []
+    out = copy.deepcopy(battle)
+    out["required_gates"] = gates + ["security"]
+    if not isinstance(out.get("run"), dict):
+        out["run"] = {}
+    out["run"]["security_auto"] = {"at": now_iso, "files": hits}
+    return out, hits
+
+
 def next_slice(battle: dict) -> dict | None:
     """Première slice non `done`, dans l'ordre déclaré, sous la forme {id, status} ; `None` si
     toutes sont `done` ou si aucune n'est déclarée. Pur."""
@@ -663,6 +743,10 @@ def validate(battle) -> tuple[list[str], list[str]]:
     if not battle.get("id"):
         warnings.append("champ id absent")
     phases = battle.get("phases")
+    if "profile" in battle:
+        prof = battle["profile"]
+        if not isinstance(prof, str) or prof not in PROFILES:
+            warnings.append(f"profil inconnu : {prof!r} (attendu : {', '.join(PROFILES)})")
     if not isinstance(phases, dict):
         return ["phases absent ou invalide"], warnings
     for name, entry in phases.items():
@@ -969,6 +1053,11 @@ def _build_parser() -> argparse.ArgumentParser:
     return _build_parser_parts()[0]
 
 
+def _check_profile(profile) -> None:
+    if profile not in PROFILES:
+        raise _Refuse(f"profil inconnu : {profile!r} (attendu : {', '.join(PROFILES)})")
+
+
 def _new_battle(root: Path, args) -> dict:
     phases = {"think": {"status": "in_progress"}}
     for name in PHASES[1:]:
@@ -977,7 +1066,7 @@ def _new_battle(root: Path, args) -> dict:
     return {
         "id": args.id, "repo": root.name, "ticket": args.ticket, "title": args.title,
         "profile": args.profile,
-        "required_gates": list(args.required_gates or DEFAULT_REQUIRED_GATES),
+        "required_gates": list(args.required_gates or PROFILES[args.profile]),
         "phases": phases,
         "guard": {"allow": [], "deny": [], "careful": False},
         "stack": {"kind": None, "build_target": None, "test_target": None},
@@ -1038,8 +1127,15 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
         if not ok:
             raise _Refuse(reason)
         entry = next(s for s in out["slices"] if s.get("id") == args.id)
-        return out, {"slice": copy.deepcopy(entry), "slices_done": len(_done_ids(out)),
-                     "slices_total": len(_slices(out))}
+        detail = {"slice": copy.deepcopy(entry), "slices_done": len(_done_ids(out)),
+                  "slices_total": len(_slices(out))}
+        if args.status == "done" and args.files:
+            out, added = mark_security_auto(out, args.files, _now_iso())
+            if added:
+                detail["security_auto"] = copy.deepcopy(out["run"]["security_auto"])
+                detail["_warnings"] = [
+                    f"security ajoutée à required_gates (fichiers sensibles : {', '.join(added)})"]
+        return out, detail
     out = copy.deepcopy(battle)
     if cmd == "set-delivery":
         out.setdefault("delivery", {})["pr_url"] = args.pr_url
@@ -1063,6 +1159,8 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
         return out, detail
     if cmd == "set-meta":
         touched = []
+        if args.profile is not None:
+            _check_profile(args.profile)
         for key in ("title", "profile"):
             if getattr(args, key) is not None:
                 out[key] = getattr(args, key)
@@ -1109,6 +1207,7 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None) -> tuple[int, dict
         root = Path(getattr(args, "repo", None) or Path.cwd())
         explicit = getattr(args, "battle", None)
         result: dict = {"ok": True}
+        mutation_warnings: list[str] = []
 
         if args.cmd == "init":
             bdir = _battle_dir(root, args.id)
@@ -1117,10 +1216,12 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None) -> tuple[int, dict
             unknown = [g for g in (args.required_gates or []) if g not in GATES]
             if unknown:
                 raise _Refuse(f"gate(s) inconnue(s) : {', '.join(unknown)}")
+            _check_profile(args.profile)
             bdir.mkdir(parents=True, exist_ok=True)
             _save(bdir, _new_battle(root, args))
             _write_pointer(root, args.id)
-            result.update(battle=args.id)
+            init_gates = _load(bdir)["required_gates"]
+            result.update(battle=args.id, profile=args.profile, required_gates=init_gates)
         elif args.cmd == "activate":
             bdir = _battle_dir(root, args.id)
             refusal = aborted_refusal(_load(bdir), "activate")
@@ -1155,12 +1256,13 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None) -> tuple[int, dict
                 return 0, {"ok": True, "battle": bid, "required": derive_required_phases(battle)}
             new, extra = _mutation(args, battle)
             _save(bdir, new)
+            mutation_warnings = extra.pop("_warnings", [])
             result.update(battle=bid, **extra)
             if args.cmd in ("close", "abort") and _read_pointer(root) == bid:
                 _write_pointer(root, "")
                 result["pointer_cleared"] = True
 
-        result["warnings"] = _sync_fleet(bdir, root, upsert, fleet_dir)
+        result["warnings"] = mutation_warnings + _sync_fleet(bdir, root, upsert, fleet_dir)
         return 0, result
     except _Refuse as exc:
         return 2, {"ok": False, "reason": exc.reason, **exc.extra}
@@ -1210,6 +1312,10 @@ def _t_source_consistency() -> None:
         idx = [PHASES.index(p) for p in sub]
         assert idx == sorted(idx), sub
     assert set(DEFAULT_REQUIRED_GATES) <= set(GATES)
+    assert set(PROFILES) == {"feature", "hotfix", "security", "spike"}
+    assert all(g in GATES for gates in PROFILES.values() for g in gates)
+    assert PROFILES["feature"] == DEFAULT_REQUIRED_GATES and DEFAULT_PROFILE in PROFILES
+    assert "security" in PROFILES["security"] and "architect" not in PROFILES["hotfix"]
     assert len(set(PHASES)) == len(PHASES) and PHASES[0] == "think" and PHASES[-1] == "reflect"
 
 
@@ -1949,6 +2055,22 @@ def _t_doc_subcommands() -> None:
         assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
 
 
+def _t_doc_profiles() -> None:
+    root = Path(__file__).resolve().parents[1]
+    docs = [root / "commands/battle.md", root / "skills/battle-workflow/SKILL.md"]
+    if not all(d.is_file() for d in docs):
+        print("SKIP: _t_doc_profiles (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    for d in docs:
+        text = d.read_text(encoding="utf-8")
+        for prof, gates in PROFILES.items():
+            rows = [ln for ln in text.splitlines() if ln.lstrip().startswith(f"| `{prof}`")]
+            assert rows, f"profil {prof} absent de la table de {d.name}"
+            cited = set(re.findall(r"`([a-z][a-z-]*)`", rows[0].split("|")[2]))
+            assert cited == set(gates), (d.name, prof, sorted(cited ^ set(gates)))
+
+
 def _t_doc_abort_stale() -> None:
     root = Path(__file__).resolve().parents[1]
     battle_md, fleet_md = root / "commands/battle.md", root / "commands/fleet.md"
@@ -2153,7 +2275,7 @@ _CORE_TESTS = (
     _t_set_slices_replace_replan, _t_set_slices_replace_build_done, _t_set_slices_replace_invalidates_cascade,
     _t_replan_invalidates_cascade, _t_first_plan_no_invalidation_event,
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
-    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_abort_stale,
+    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_profiles, _t_doc_abort_stale,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
@@ -2244,10 +2366,10 @@ def _t_set_meta() -> None:
     with _Repo() as r:
         r.init()
         before = r.load()
-        r.ok("set-meta", "--title", "Nouveau", "--profile", "bugfix", "--required-gates",
+        r.ok("set-meta", "--title", "Nouveau", "--profile", "hotfix", "--required-gates",
              "architect", "lint", "--stack-kind", ".net", "--build-target", "src/a.csproj")
         b = r.load()
-        assert b["title"] == "Nouveau" and b["profile"] == "bugfix"
+        assert b["title"] == "Nouveau" and b["profile"] == "hotfix"
         assert b["required_gates"] == ["architect", "lint"]
         assert b["stack"] == {"kind": ".net", "build_target": "src/a.csproj", "test_target": None}
         assert b["phases"] == before["phases"] and b["guard"] == before["guard"]
@@ -2255,6 +2377,7 @@ def _t_set_meta() -> None:
         assert r.load()["stack"]["build_target"] is None
         r.refused("set-meta", "--required-gates", "reviewr")
         r.refused("set-meta")
+        assert "bugfix" in r.refused("set-meta", "--profile", "bugfix")
 
 
 def _t_activate_close() -> None:
@@ -2345,7 +2468,7 @@ def _t_cli_exit_codes() -> None:
         repo = Path(td) / "repo"
         repo.mkdir()
         g = ["--repo", str(repo)]
-        code, res = _cli(td, *g, "init", "b1", "--ticket", "GH#1", "--title", "T", "--profile", "f")
+        code, res = _cli(td, *g, "init", "b1", "--ticket", "GH#1", "--title", "T", "--profile", "feature")
         assert code == 0 and res["ok"] is True
         code, res = _cli(td, *g, "transition", "plan", "in_progress")   # think pas done
         assert code == 2 and res["ok"] is False and "think" in res["reason"]
@@ -2394,7 +2517,7 @@ def _t_cli_exit_codes() -> None:
 def _t_id_whitelist() -> None:
     with _Repo() as r:
         for bad in ("D:x", "a/b", "a\\b", "..", ".", "-x", "a b", "a_b", "é", "x:y"):
-            reason = r.refused("init", bad, "--ticket", "T", "--title", "T", "--profile", "f")
+            reason = r.refused("init", bad, "--ticket", "T", "--title", "T", "--profile", "feature")
             assert "invalide" in reason, (bad, reason)
         r.init("2026-09-29-GH-69")
         # lien symbolique sortant de .legion/battles/
@@ -2404,7 +2527,7 @@ def _t_id_whitelist() -> None:
             (r.root / ".legion" / "battles" / "lnk").symlink_to(outside, target_is_directory=True)
         except (OSError, NotImplementedError):
             return
-        reason = r.refused("init", "lnk", "--ticket", "T", "--title", "T", "--profile", "f")
+        reason = r.refused("init", "lnk", "--ticket", "T", "--title", "T", "--profile", "feature")
         assert "hors de" in reason and not list(outside.iterdir())
 
 
@@ -2709,7 +2832,192 @@ def _t_commands_refused_after_abort_cli() -> None:
         assert code == 0 and res["ok"], res
 
 
+def _t_init_profiles() -> None:
+    with _Repo() as r:
+        res = r.ok("init", "h1", "--ticket", "GH#1", "--title", "T", "--profile", "hotfix")
+        assert res["profile"] == "hotfix" and res["required_gates"] == ["lint", "reviewer", "test-engineer"]
+        assert r.load("h1")["required_gates"] == ["lint", "reviewer", "test-engineer"]
+        for prof in ("security", "spike"):
+            res = r.ok("init", prof, "--ticket", "GH#1", "--title", "T", "--profile", prof)
+            assert res["required_gates"] == list(PROFILES[prof])
+            b = r.load(prof)
+            assert b["required_gates"] == list(PROFILES[prof]) and "security" not in b["phases"]
+        res = r.init("f1")
+        assert res["required_gates"] == list(DEFAULT_REQUIRED_GATES)
+        assert r.load("f1")["run"]["mode"] == "autonomous"
+        r.ok("init", "h2", "--ticket", "GH#1", "--title", "T", "--profile", "hotfix",
+             "--required-gates", "architect")
+        assert r.load("h2")["required_gates"] == ["architect"]
+        ptr = (r.root / ".legion" / "active-battle").read_text(encoding="utf-8")
+        reason = r.refused("init", "bad", "--ticket", "GH#1", "--title", "T", "--profile", "bugfix")
+        assert all(p in reason for p in PROFILES) and "bugfix" in reason
+        assert not (r.root / ".legion" / "battles" / "bad").exists()
+        assert (r.root / ".legion" / "active-battle").read_text(encoding="utf-8") == ptr
+        assert "invalide" in r.refused("init", "a/b", "--ticket", "T", "--title", "T",
+                                       "--profile", "bugfix")
+
+
+def _t_set_meta_profile() -> None:
+    with _Repo() as r:
+        r.init()
+        before = r.load()["required_gates"]
+        r.ok("set-meta", "--profile", "hotfix")
+        b = r.load()
+        assert b["profile"] == "hotfix" and b["required_gates"] == before
+        raw = r.path().read_bytes()
+        assert "bugfix" in r.refused("set-meta", "--profile", "bugfix")
+        assert r.path().read_bytes() == raw
+        # battle legacy au profil inconnu : les autres champs restent modifiables
+        b["profile"] = "bugfix"
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        r.ok("set-meta", "--title", "Autre")
+        assert r.load()["profile"] == "bugfix"
+
+
+def _t_validate_profile() -> None:
+    with _Repo() as r:
+        r.init()
+        b = r.load()
+        b["profile"] = "bugfix"
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        code, res = r.run("validate")
+        assert code == 0 and res["errors"] == [] and any("bugfix" in w for w in res["warnings"]), res
+    b = {"id": "x", "phases": {"think": {"status": "pending"}}}
+    errors, warnings = validate(b)
+    assert errors == [] and not any("profil" in w for w in warnings)
+    b["profile"] = 3
+    assert any("profil" in w for w in validate(b)[1])
+
+
+def _t_hotfix_e2e() -> None:
+    with _Repo() as r:
+        r.ok("init", "hf", "--ticket", "GH#1", "--title", "T", "--profile", "hotfix")
+        r.ok("transition", "think", "done")
+        r.ok("transition", "plan", "in_progress")
+        r.ok("transition", "plan", "done", "--verdict", "accept")
+        r.ok("set-slices", "--replace", "slice-1")
+        assert "plan" in r.refused("transition", "build", "in_progress")   # pas encore approuvé
+        r.ok("approve-plan")
+        r.ok("transition", "build", "in_progress")
+        r.ok("slice", "slice-1", "in_progress")
+        r.ok("slice", "slice-1", "done", "--files", "src/fix.py")
+        r.ok("transition", "build", "done")
+        r.refused("transition", "deliver", "in_progress")
+        for ph in ("lint", "review"):
+            r.ok("transition", ph, "in_progress")
+            r.ok("transition", ph, "done", "--verdict", "accept")
+        r.refused("transition", "deliver", "in_progress")   # test pas done
+        r.ok("transition", "test", "in_progress")
+        r.ok("transition", "test", "done", "--verdict", "accept")
+        r.ok("check-cascade")
+        r.ok("transition", "deliver", "in_progress")
+        r.ok("transition", "deliver", "done")
+
+
+_SEC_POS = (
+    "src/Auth/Login.cs", "Api/AuthController.cs", "OAuthOptions.cs", "JwtTokenService.cs",
+    "a/b/App.csproj", "appsettings.Development.json", ".env.local", "prod.env",
+    "requirements-dev.txt", "config/ClientSecrets.json", "UsersEndpoints.cs", "certs/api.pfx",
+    "web\\Program.cs", "./src/UserAuthService.cs", "yarn.lock", "nuget.config", "k/id.PEM",
+    "Directory.Packages.props", "db/passwd.txt",
+)
+_SEC_NEG = (
+    "Authors.cs", "docs/author-guide.md", "Tokenizer.py", "src/Billing/Invoice.cs", "README.md",
+    "plugins/legion/agents/security.md",
+)
+
+
+def _t_security_hits() -> None:
+    for f in _SEC_POS:
+        assert security_hits([f]) == [f], f
+    for f in _SEC_NEG:
+        assert security_hits([f]) == [], f
+    # faux négatifs connus et acceptés
+    for f in ("src/login.py", "Dockerfile", ".github/workflows/ci.yml", "JwtHelper.cs"):
+        assert security_hits([f]) == [], f
+    assert security_hits(["a.py", "Auth/x.cs", "Auth/x.cs", "b.env", None, 3]) == ["Auth/x.cs", "b.env"]
+    assert security_hits(None) == [] and security_hits([]) == []
+    # mark_security_auto : legacy sans required_gates, idempotence, copie
+    legacy = {"id": "x"}
+    out, added = mark_security_auto(legacy, ["src/Auth/L.cs"], "T")
+    assert out["required_gates"] == list(DEFAULT_REQUIRED_GATES) + ["security"] and added
+    assert out["run"]["security_auto"] == {"at": "T", "files": ["src/Auth/L.cs"]}
+    assert "required_gates" not in legacy and "run" not in legacy
+    out2, added2 = mark_security_auto(out, ["b.env"], "T2")
+    assert out2 is out and added2 == [] and out["run"]["security_auto"]["at"] == "T"
+    same, none = mark_security_auto(legacy, ["README.md"], "T")
+    assert same is legacy and none == []
+
+
+def _t_security_auto_slice() -> None:
+    def prep(r, bid="b1", *extra):
+        r.init(bid, *extra)
+        r.ok("transition", "think", "done")
+        r.ok("transition", "plan", "in_progress")
+        r.ok("transition", "plan", "done", "--verdict", "accept")
+        r.ok("set-slices", "--replace", "s1", "s2")
+        r.ok("approve-plan")
+        r.ok("transition", "build", "in_progress")
+
+    with _Repo() as r:
+        prep(r)
+        res = r.ok("slice", "s1", "done", "--files", "src/util.py")   # neutre
+        assert "security_auto" not in res and res["warnings"] == []
+        b = r.load()
+        assert "security" not in b["required_gates"] and "security_auto" not in b["run"]
+        r.ok("slice", "s2", "blocked", "--files", "src/Auth/X.cs")   # blocked : rien
+        r.ok("slice", "s2", "in_progress", "--files", "src/Auth/X.cs")
+        r.ok("slice", "s2", "done")   # --files absent
+        r.ok("slice", "s2", "done", "--files")   # --files vide
+        assert "security" not in r.load()["required_gates"]
+        res = r.ok("slice", "s2", "done", "--files", "src/Auth/Login.cs", "src/a.py")
+        b = r.load()
+        assert b["required_gates"] == list(DEFAULT_REQUIRED_GATES) + ["security"]
+        assert b["run"]["security_auto"]["files"] == ["src/Auth/Login.cs"]
+        assert res["security_auto"] == b["run"]["security_auto"]
+        assert len(res["warnings"]) == 1 and "src/Auth/Login.cs" in res["warnings"][0]
+        assert "security" not in b["phases"]
+        at = b["run"]["security_auto"]["at"]
+        res = r.ok("slice", "s1", "done", "--files", "x.env")   # idempotent
+        assert res["warnings"] == [] and "security_auto" not in res
+        b = r.load()
+        assert b["run"]["security_auto"]["at"] == at and b["required_gates"].count("security") == 1
+        # DELIVER bloqué tant que security n'est pas done
+        r.ok("transition", "build", "done")
+        for ph in ("lint", "review", "test"):
+            r.ok("transition", ph, "in_progress")
+            r.ok("transition", ph, "done", "--verdict", "accept")
+        code, res = r.run("check-cascade")
+        assert code == 2 and "security (absente)" in res["reason"], res
+        assert "security" in r.refused("transition", "deliver", "in_progress")
+        r.ok("transition", "security", "in_progress")
+        r.ok("transition", "security", "done", "--verdict", "accept")
+        r.ok("check-cascade")
+        r.ok("transition", "deliver", "in_progress")
+    with _Repo() as r:   # profil security : déjà présente, aucune trace
+        prep(r, "b1", "--required-gates", "architect", "security")
+        res = r.ok("slice", "s1", "done", "--files", "src/Auth/Login.cs")
+        assert res["warnings"] == [] and "security_auto" not in r.load()["run"]
+    with _Repo() as r:   # legacy sans required_gates
+        prep(r)
+        b = r.load()
+        del b["required_gates"]
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        r.ok("slice", "s1", "done", "--files", "Program.cs")
+        assert r.load()["required_gates"] == list(DEFAULT_REQUIRED_GATES) + ["security"]
+    with _Repo() as r:   # synchro fleet en échec : les deux avis sont conservés
+        prep(r)
+        def boom(*a):
+            raise RuntimeError("kaboom")
+        code, res = run_command(["--repo", str(r.root), "slice", "s1", "done", "--files",
+                                 "src/Auth/Login.cs"], boom, r.fleet)
+        assert code == 0 and len(res["warnings"]) == 2, res
+        assert "security ajoutée" in res["warnings"][0] and "kaboom" in res["warnings"][1]
+
+
 _INTEGRATION_TESTS = (
+    _t_security_hits, _t_security_auto_slice,
+    _t_init_profiles, _t_set_meta_profile, _t_validate_profile, _t_hotfix_e2e,
     _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_atomic_and_corrupt,
     _t_fleet_sync_called, _t_phases_cs, _t_cli_exit_codes, _t_import_no_side_effect,
     _t_id_whitelist, _t_atomic_keeps_mode, _t_fleet_sync_explicit_path,
