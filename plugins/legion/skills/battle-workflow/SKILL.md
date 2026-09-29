@@ -206,7 +206,7 @@ gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`, `invalidate`, `set-delivery`,
 `set-guard`, `set-meta`, `activate`, `close`, `validate`), which checks every phase transition, writes atomically and resyncs the fleet
 shard — never edit it by hand. On a re-plan, `set-slices --replace` swaps the slice list
-(before `approve-plan`); `check-cascade` (read-only) gates the ADDRESS push. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
+(before `approve-plan`; with no id it empties it — aggregated BUILD); `check-cascade` (read-only) gates the ADDRESS push. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
 single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
 
 ```jsonc
@@ -226,6 +226,7 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
     // (refusé si le plan n'est pas `accept*`). Un nouveau passage `plan in_progress` le remet
     // à null : `build in_progress` est refusé tant que le plan n'est pas (ré)approuvé
     // (battle legacy sans la clé : chemin de compatibilité, cf. battle.md §B).
+    // Ce nouveau passage invalide aussi la cascade déjà rendue (raison `replan`, un seul événement).
     // plan.fails — sur `revise`, l'orchestrateur relaie les FAILs verbatim et le script les persiste
     // (ciblés fichier:ligne + dimension) ET snapshote spec.md → `spec.plan-baseline.md`
     // dans le dossier de la battle. Les deux forment le contexte de reprise du re-run
@@ -261,7 +262,7 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
       "total": 0                        // compteur global de tentatives (plafond : 6 au global, maximum ferme)
     },
     // (optionnel, écrit par `invalidate` / `bump-autocorrect` continue) trace des invalidations de cascade,
-    // uniquement quand au moins une phase a changé : [{ "at": ISO, "reason": "polish|rebase|address:<n>|autocorrect:<phase>|manual", "phases": ["lint","review"] }].
+    // uniquement quand au moins une phase a changé : [{ "at": ISO, "reason": "polish|rebase|address:<n>|autocorrect:<phase>|replan|manual", "phases": ["lint","review"] }].
     // Une phase invalidée repasse `pending`, `verdict` null, `fails` conservés, et porte `phases.<p>.invalidated_at`.
     // Une seule entrée `polish` est permise par battle.
     "invalidations": []
