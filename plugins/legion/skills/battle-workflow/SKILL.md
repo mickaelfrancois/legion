@@ -22,9 +22,9 @@ the operational summary loaded at run time.
 ## The pipeline
 
 ```
-THINK  → PLAN     → BUILD    → LINT  → REVIEW  → TEST     → DELIVER → (ADDRESS) → REFLECT
-start    architect  builder    lint    reviewer  test-eng   deliver   pr-triage    retro
-         (gate)     (producer) (gate)  (gate)    (gate)     (PR)      (gate)
+THINK  → PLAN     → BUILD    → LINT  → REVIEW  → TEST     → (SECURITY) → DELIVER → (ADDRESS) → REFLECT
+start    architect  builder    lint    reviewer  test-eng   security     deliver   pr-triage    retro
+         (gate)     (producer) (gate)  (gate)    (gate)     (gate)       (PR)      (gate)
 ```
 
 > **LINT** (formatage .NET, `dotnet format --verify-no-changes`, verify-only) est la
@@ -221,6 +221,7 @@ run time**):
     "lint":    { "status": "pending" },     // .NET-only — self-retires (neutral accept) on non-.NET
     "review":  { "status": "pending" },
     "test":    { "status": "pending" },
+    // "security": { "status": "pending" } — present only when the security gate runs (security profile or sensitive slice)
     "deliver": { "status": "pending" },
     "reflect": { "status": "pending" }
     // "address" is NOT in the default set — `/battle address` adds it on demand

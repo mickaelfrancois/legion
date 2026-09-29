@@ -162,18 +162,21 @@ phase (verdicts, artefacts), l'UI lit `phases` ici. La source de vérité est to
 
 ## 4. Phases et verdicts
 
-Pipeline : `THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → REFLECT`.
+Pipeline : `THINK → PLAN → BUILD → LINT → REVIEW → TEST → [SECURITY] → DELIVER → [ADDRESS] → REFLECT`.
 
 - **Clés de phase** (dans `phases` et le champ `phase` de l'index) : `think`,
-  `plan`, `build`, `lint`, `review`, `test`, `deliver`, `reflect`. La clé `lint`
-  est .NET-only (gate de formatage) ; sur une stack non-.NET elle reste `pending`
-  ou `done` (retrait neutre) — lecture défensive habituelle.
+  `plan`, `build`, `lint`, `review`, `test`, `security`, `deliver`, `address`,
+  `reflect`. La clé `lint` est .NET-only (gate de formatage) ; sur une stack non-.NET
+  elle reste `pending` ou `done` (retrait neutre). `security` (gate requise seulement
+  en profil `security` ou sur slice sensible) et `address` (post-deliver, répétable)
+  sont **optionnelles** : absentes de `phases` quand elles n'ont pas tourné — lecture
+  défensive habituelle.
 - **Statut de phase** : `pending` | `in_progress` | `done` | `blocked`.
 - **Verdict de gate** (champ `verdict` des phases tenues par une gate :
   plan/review/test/sécurité) : `accept` | `accept_with_opportunity` | `revise` |
   `reject`. Un `revise`/`reject` ⇒ phase `blocked` ⇒ battle `blocked`.
 
-Affichage suggéré : une frise des 8 phases avec leur statut ; badge « bloqué » +
+Affichage suggéré : une frise des phases avec leur statut ; badge « bloqué » +
 extrait du verdict (lu dans le `gate-*.md`) quand `battle_status == "blocked"`.
 
 ---

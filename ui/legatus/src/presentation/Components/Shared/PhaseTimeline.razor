@@ -1,4 +1,4 @@
-@* Compact 7-phase frieze inferred from the index entry alone (current phase + its
+@* Compact pipeline frieze inferred from the index entry alone (current phase + its
    status). Phases before the current one are shown done, the current one in its real
    status color, later ones pending. The authoritative per-phase detail lives in
    battle.json and is rendered on the battle detail page (step 4). *@
@@ -22,6 +22,11 @@
     {
         if (phase == Current)
             return (StatusVisuals.ColorOf(Status), StatusVisuals.Label(Status));
+
+        // SECURITY is optional (only when the gate is required): the index entry alone
+        // cannot tell whether it ran, so never infer it as done from a later phase.
+        if (phase == Phase.Security)
+            return (Color.Default, StatusVisuals.Label(PhaseStatus.Pending));
 
         // Compare on pipeline position, not enum value, to stay correct if the enum is reordered.
         var here = Phases.IndexOf(phase);

@@ -36,7 +36,8 @@ WRITE_TOOLS = ("Edit", "Write", "MultiEdit")
 # `address` is optional + repeatable (post-deliver PR review loop); when never run
 # its phase entry is simply absent, which _current_phase treats transparently.
 # `lint` (.NET formatting gate) heads the review cascade, right after `build`.
-PHASE_ORDER = ["think", "plan", "build", "lint", "review", "test", "deliver", "address", "reflect"]
+# `security` closes the cascade; optional (only when required), absent otherwise.
+PHASE_ORDER = ["think", "plan", "build", "lint", "review", "test", "security", "deliver", "address", "reflect"]
 
 
 def _state_base() -> Path:
@@ -254,6 +255,8 @@ def _self_test() -> int:
     # lint (tete de cascade) : un blocage lint est la phase courante, pas « build done »
     assert _current_phase({"build": {"status": "done"}, "lint": {"status": "blocked"}}) == ("lint", "blocked")
     assert _current_phase({"build": {"status": "done"}, "lint": {"status": "done"}}) == ("lint", "done")
+    # security (optionnelle, fin de cascade) : un blocage securite est visible
+    assert _current_phase({"test": {"status": "done"}, "security": {"status": "blocked"}}) == ("security", "blocked")
     assert _battle_status({"reflect": {"status": "done"}}) == "closed"
     assert _battle_status({"review": {"status": "blocked"}}) == "blocked"
     assert _battle_status({"build": {"status": "in_progress"}}) == "active"
