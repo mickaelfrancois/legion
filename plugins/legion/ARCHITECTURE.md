@@ -223,8 +223,10 @@ lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 `set-guard`, `set-meta`, `activate`, `close`, `validate`). `build done` exige que toutes les
 slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
 pendant un re-plan ouvert (`approved_at` à `null`) ou tant que `build` est `pending`
-(déclarer les slices **avant** `approve-plan`) ; si `build` était `done` et qu'une slice
-résultante ne l'est pas, `build` passe à `blocked` et la cascade est invalidée (raison `replan`). `check-cascade` (lecture seule) dit si les
+(déclarer les slices **avant** `approve-plan`) ; sans id, elle vide la liste (BUILD agrégé,
+plan sans ligne `[slice-…]`). Un re-plan (`transition plan in_progress`) invalide la
+cascade déjà rendue (raison `replan`, un seul événement) ; si `build` était `done` et
+qu'une slice résultante ne l'est pas, `build` passe à `blocked`. `check-cascade` (lecture seule) dit si les
 phases requises sont `done` avant un push ADDRESS ; `address done` porte la même
 précondition. Le script vérifie chaque transition de phase (ex. `build` — y compris `blocked` — refusé
 tant que le plan n'est pas `accept*` **et** approuvé : `phases.plan.approved_at`), écrit de façon
@@ -522,8 +524,10 @@ présentes (`lint`, `review`, `test`, `security`) qui sont `done` ou `blocked` :
 `invalidated_at` posé, et une entrée `{at, reason, phases}` ajoutée à `run.invalidations`
 si au moins une phase a changé. Après le BUILD correctif, l'orchestrateur relance **toute
 la cascade requise depuis `lint`**. La sous-commande `invalidate [--reason R]` applique la
-même règle hors boucle (raisons : `rebase`, `address:<n>`, `polish`, `manual`). `transition
-… pending` reste refusé.
+même règle hors boucle (raisons : `rebase`, `address:<n>`, `polish`, `manual`). Un nouveau
+passage `transition plan in_progress` (re-plan) invalide aussi la cascade (raison `replan`) ;
+`set-slices --replace` le fait en défense, sans second événement si elle est déjà `pending`.
+`transition … pending` reste refusé.
 
 **Ronde de polissage.** Une seule fois par battle, quand toutes les gates sont `accept*` et
 avant DELIVER : `invalidate --reason polish`, BUILD correctif, cascade depuis `lint`. Elle

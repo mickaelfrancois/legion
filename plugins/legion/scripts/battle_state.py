@@ -14,11 +14,14 @@ Source unique des listes de phases / gates / artefacts (importée par `fleet_syn
 - `PHASES`, `GATES`, `GATE_PHASE`, `GATE_ARTIFACT`, `PRODUCER_ARTIFACT` ;
 - `VERDICT_PHASES`, `CASCADE_PHASES`, `AUTOCORRECT_KEYS` ;
 - `STATUSES`, `VERDICTS`, `ACCEPT_VERDICTS`, `DEFAULT_REQUIRED_GATES` ;
-- `CAP_PER_PHASE`, `CAP_TOTAL`.
+- `CAP_PER_PHASE`, `CAP_TOTAL` ;
+- `SUBCOMMANDS` (sous-commandes du CLI, dans l'ordre du parser ; la doctrine est testée contre elle).
 
 Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
-- `apply_transition(...) -> battle` (copie ; lève `ValueError` si la transition est refusée) ;
+- `apply_transition(..., now_iso=None) -> battle` (copie ; lève `ValueError` si la transition est refusée) ;
+  `plan in_progress` (re-plan, GH#93) invalide d'office la cascade `done`/`blocked` (raison `replan`,
+  un seul événement dans `run.invalidations` ; rien si la cascade est déjà `pending`) ;
 - `approve_plan(battle, now_iso) -> (ok, reason, battle)` ;
 - `bump_autocorrect(battle, phase, fails, keep_fails=False, now_iso=None) -> (decision, reason, battle, detail)`,
   decision ∈ `continue | escalate | refuse` ; sur `continue`, invalide d'office la cascade
@@ -38,7 +41,8 @@ Cœur pur :
   `build` est `pending` ; ajout seul en `in_progress`/`blocked` ; refus en `done` ; `replace=True`
   (#90) : remplacement aussi pendant un re-plan ouvert, `plan.approved_at` à `null`, les ids
   conservés gardent leur entrée, `detail.removed` liste les retirés, `build done` repasse à
-  `blocked` si une slice du résultat n'est pas `done`),
+  `blocked` si une slice du résultat n'est pas `done` ; `replace=True` sans id (GH#93) vide la
+  liste = retour au BUILD agrégé, mêmes conditions),
   `update_slice(battle, slice_id, status, warnings=None, files=None) -> (ok, reason, battle)`
   (`build` doit être `in_progress`), `next_slice(battle) -> {id, status} | None` (première
   slice non `done`). `build done` exige toutes les slices `done` ; un verdict de gate de cascade
@@ -56,7 +60,7 @@ Usage (options globales `--battle <id>` défaut : pointeur `.legion/active-battl
     python battle_state.py set-guard [--allow [g…]] [--deny [g…]] [--careful on|off]
     python battle_state.py set-meta [--title] [--profile] [--required-gates …] [--stack-kind]
                                     [--build-target] [--test-target]
-    python battle_state.py set-slices [--replace] <id> [<id>…]
+    python battle_state.py set-slices <id> [<id>…] | set-slices --replace [<id>…]
     python battle_state.py slice <id> <in_progress|done|blocked> [--warnings N] [--files [f…]]
     python battle_state.py next-slice                  # lecture seule (ni écriture ni synchro)
     python battle_state.py check-cascade               # lecture seule ; exit 2 = cascade incomplète
@@ -118,6 +122,13 @@ DEFAULT_REQUIRED_GATES: tuple[str, ...] = ("architect", "lint", "reviewer", "tes
 
 CAP_PER_PHASE = 2
 CAP_TOTAL = 6
+
+# Sous-commandes du CLI, dans l'ordre du parser (`_build_parser_parts`) ; `_t_subcommands_constant`
+# verrouille l'égalité et `_t_doc_subcommands` compare la doctrine à cette constante.
+SUBCOMMANDS: tuple[str, ...] = ("init", "transition", "approve-plan", "bump-autocorrect",
+                                "invalidate", "set-delivery", "set-guard", "set-meta",
+                                "set-slices", "slice", "next-slice", "check-cascade",
+                                "activate", "close", "validate")
 
 # Motif des identifiants (battle et slice) : liste blanche, aucun séparateur de chemin.
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
@@ -271,8 +282,11 @@ def check_transition(battle: dict, phase: str, status: str, verdict: str | None 
 
 
 def apply_transition(battle: dict, phase: str, status: str, verdict: str | None = None,
-                     fails=None, round_=None, threads=None) -> dict:
-    """Applique la transition sur une copie. Lève ValueError si `check_transition` refuse."""
+                     fails=None, round_=None, threads=None, now_iso=None) -> dict:
+    """Applique la transition sur une copie. Lève ValueError si `check_transition` refuse.
+
+    `plan in_progress` (re-plan, GH#93) invalide la cascade `done`/`blocked` (raison `replan`,
+    `now_iso` horodate l'événement) ; sans cascade rendue, rien n'est écrit."""
     ok, reason = check_transition(battle, phase, status, verdict, fails, round_, threads)
     if not ok:
         raise ValueError(reason)
@@ -293,6 +307,7 @@ def apply_transition(battle: dict, phase: str, status: str, verdict: str | None 
         entry["covers"] = _done_ids(battle)
     if phase == "plan" and status == "in_progress":
         entry["approved_at"] = None  # clé présente à null : nouvelle approbation requise, pas de legacy
+        _invalidate_cascade(out, "replan", now_iso)  # les verdicts rendus sur l'ancien plan sont caducs
     if _is_accept(verdict) and ("fails" in entry or phase == "plan"):
         entry["fails"] = []
     if fails is not None:
@@ -330,8 +345,11 @@ def set_slices(battle: dict, ids, replace: bool = False,
     l'ordre de `ids` ; un id conservé garde son entrée entière, un nouvel id arrive en
     `pending`, un id absent est retiré (`detail["removed"]`). Si `build` est `done` et qu'une
     slice du résultat n'est pas `done`, `build` repasse à `blocked` (l'invariant tient) et la cascade est
-    invalidée (raison `replan`, `detail["invalidated"]`) : elle doit être rejouée."""
-    if not isinstance(ids, (list, tuple)) or not ids:
+    invalidée (raison `replan`, `detail["invalidated"]`) : elle doit être rejouée.
+
+    `replace=True` sans id (GH#93) vide la liste (retour au BUILD agrégé), sous les mêmes
+    conditions ; sans `replace`, une liste vide reste refusée."""
+    if not isinstance(ids, (list, tuple)) or (not ids and not replace):
         return False, "set-slices exige au moins un id de slice", battle, {}
     for sid in ids:
         if not isinstance(sid, str) or not _ID_RE.fullmatch(sid):
@@ -748,7 +766,9 @@ def _json_arg(raw: str, what: str):
         raise _Refuse(f"{what} : JSON invalide ({exc})")
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser_parts():
+    """Construit le parser ; retourne (parser, action des sous-parsers). `action.choices` (API
+    publique d'argparse) donne les sous-commandes dans l'ordre de déclaration."""
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--battle", default=argparse.SUPPRESS, help="id (défaut : pointeur active-battle)")
     common.add_argument("--repo", default=argparse.SUPPRESS, help="racine du dépôt (défaut : cwd)")
@@ -796,7 +816,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--build-target")
     s.add_argument("--test-target")
     s = add("set-slices")
-    s.add_argument("ids", nargs="+")
+    s.add_argument("ids", nargs="*")  # le refus « au moins un id » vit dans le cœur (--replace : vide permis)
     s.add_argument("--replace", action="store_true",
                    help="re-découpage : remplace la liste (build pending ou re-plan ouvert)")
     s = add("slice")
@@ -810,7 +830,11 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     add("close")
     add("validate")
-    return p
+    return p, sub
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    return _build_parser_parts()[0]
 
 
 def _new_battle(root: Path, args) -> dict:
@@ -842,8 +866,14 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
         if not ok:
             raise _Refuse(reason)
         out = apply_transition(battle, args.phase, args.status, args.verdict, fails,
-                               args.round_, threads)
-        return out, {"phase": args.phase, "status": args.status}
+                               args.round_, threads, now_iso=_now_iso())
+        extra = {"phase": args.phase, "status": args.status}
+        if args.phase == "plan" and args.status == "in_progress":
+            before = (battle.get("run") or {}).get("invalidations") or []
+            after = (out.get("run") or {}).get("invalidations") or []
+            if len(after) > len(before):
+                extra["invalidated"] = list(after[-1].get("phases", []))
+        return out, extra
     if cmd == "approve-plan":
         now = _now_iso()
         ok, reason, out = approve_plan(battle, now)
@@ -1672,6 +1702,87 @@ def _t_set_slices_replace_build_done() -> None:
     assert ok and out2["phases"]["build"]["status"] == "done" and det2["removed"] == ["s2"]
 
 
+def _t_replan_invalidates_cascade() -> None:
+    b = _fx({"think": "done", "plan": ("done", "accept"), "build": "done",
+             "lint": ("done", "accept"), "review": "blocked"})
+    b["phases"]["plan"]["approved_at"] = "T0"
+    b["phases"]["review"].update(verdict="revise", fails=["a|X"])
+    snap = copy.deepcopy(b)
+    out = apply_transition(b, "plan", "in_progress", now_iso="T")
+    assert b == snap   # entrée non mutée
+    for p in ("lint", "review"):
+        e = out["phases"][p]
+        assert e["status"] == "pending" and e["verdict"] is None and e["invalidated_at"] == "T", (p, e)
+    assert out["phases"]["review"]["fails"] == ["a|X"]
+    assert out["run"]["invalidations"] == [{"at": "T", "reason": "replan", "phases": ["lint", "review"]}]
+    assert out["phases"]["plan"]["approved_at"] is None
+    assert cascade_missing(out)
+
+
+def _t_first_plan_no_invalidation_event() -> None:
+    b = _fx({"think": "done", "plan": "pending"})
+    out = apply_transition(b, "plan", "in_progress", now_iso="T")
+    assert "run" not in out
+    # boucle revise du plan : cascade déjà pending, aucun événement
+    r = _fx({"think": "done", "plan": ("blocked", "revise"), "build": "pending",
+             "lint": "pending", "review": "pending"})
+    assert "run" not in apply_transition(r, "plan", "in_progress", now_iso="T")
+
+
+def _t_replan_then_replace_single_event() -> None:
+    b = _sl(("s1", "done"), build="done")
+    b["phases"]["plan"]["approved_at"] = "T0"
+    for p in ("lint", "review"):
+        b["phases"][p] = {"status": "done", "verdict": "accept"}
+    b = apply_transition(b, "plan", "in_progress", now_iso="T1")
+    b = apply_transition(b, "plan", "done", "accept", now_iso="T2")
+    assert b["phases"]["plan"]["approved_at"] is None
+    ok, reason, out, det = set_slices(b, ["s1", "s2"], replace=True, now_iso="T3")
+    assert ok, reason
+    assert out["phases"]["build"]["status"] == "blocked"
+    assert det["invalidated"] == [] and len(out["run"]["invalidations"]) == 1
+
+
+def _t_set_slices_replace_empty() -> None:
+    for st in ("in_progress", "blocked"):
+        b = _sl(("s1", "done"), ("s2", "pending"), build=st)
+        b["phases"]["plan"]["approved_at"] = None   # re-plan ouvert
+        snap = copy.deepcopy(b)
+        ok, reason, out, det = set_slices(b, [], replace=True)
+        assert ok, (st, reason)
+        assert out["slices"] == [] and det == {"slices": [], "removed": ["s1", "s2"]}
+        assert out["phases"]["build"]["status"] == st and b == snap
+        assert next_slice(out) is None
+        ok, reason, appr = approve_plan(out, "T")
+        assert ok, reason
+        assert check_transition(appr, "build", "done")[0]   # plus aucune slice à finir
+    p = _sl(("s1", "pending"), build="pending")   # premier passage
+    ok, _, out, det = set_slices(p, [], replace=True)
+    assert ok and out["slices"] == [] and det["removed"] == ["s1"]
+    d = _sl(("s1", "done"), build="done")
+    d["phases"]["plan"]["approved_at"] = None
+    ok, _, out, det = set_slices(d, [], replace=True)
+    assert ok and out["slices"] == [] and out["phases"]["build"]["status"] == "done"
+    assert "invalidated" not in det
+
+
+def _t_set_slices_replace_empty_refused() -> None:
+    b = _appr(_sl(("s1", "pending"), build="in_progress"))
+    snap = copy.deepcopy(b)
+    ok, reason, same, _ = set_slices(b, [], replace=True)
+    assert not ok and "re-plan" in reason and same is b and b == snap
+    legacy = _sl(("s1", "done"), build="in_progress")   # clé approved_at absente
+    ok, reason, same, _ = set_slices(legacy, [], replace=True)
+    assert not ok and "re-plan" in reason and same is legacy
+    ok, reason, same, _ = set_slices(b, [])
+    assert not ok and "au moins un id" in reason and same is b
+
+
+def _t_subcommands_constant() -> None:
+    assert tuple(_build_parser_parts()[1].choices) == SUBCOMMANDS
+    assert len(set(SUBCOMMANDS)) == len(SUBCOMMANDS)
+
+
 def _t_doc_subcommands() -> None:
     root = Path(__file__).resolve().parents[1]
     docs = [root / "commands/battle.md", root / "skills/battle-workflow/SKILL.md",
@@ -1680,16 +1791,14 @@ def _t_doc_subcommands() -> None:
         print("SKIP: _t_doc_subcommands (fichiers de doctrine absents, cache de plugin ?)",
               file=sys.stderr)
         return
-    sub = next(a for a in _build_parser()._subparsers._group_actions)
-    known = set(sub.choices)
+    known = set(SUBCOMMANDS)
     for d in docs:
         text = d.read_text(encoding="utf-8")
         m = re.search(r"(?:[Ss]ubcommands|sous-commandes)[:\s]*`init`.*?`validate`", text, re.S)
         assert m, f"liste de sous-commandes introuvable dans {d.name}"
         cited = set(re.findall(r"`([a-z][a-z-]*)`", m.group(0)))
-        assert cited <= known, (d.name, sorted(cited - known))
-        assert "check-cascade" in cited, f"check-cascade non cité dans {d.name}"
-        assert "--replace" in text, f"--replace non cité dans {d.name}"
+        assert cited == known, (d.name, sorted(cited ^ known))
+        assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
 
 
 _CORE_TESTS = (
@@ -1711,7 +1820,9 @@ _CORE_TESTS = (
     _t_validate_slices, _t_build_blocked_requires_approval, _t_legacy_build_blocked_advances,
     _t_cascade_missing, _t_address_done_requires_cascade, _t_set_slices_replace_refused,
     _t_set_slices_replace_replan, _t_set_slices_replace_build_done, _t_set_slices_replace_invalidates_cascade,
-    _t_doc_subcommands,
+    _t_replan_invalidates_cascade, _t_first_plan_no_invalidation_event,
+    _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
+    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
 )
 
 
@@ -2114,12 +2225,54 @@ def _t_set_slices_replace_cli() -> None:
         assert "re-plan" in r.refused("set-slices", "--replace", "a", "b")   # fenêtre refermée
 
 
+def _t_replan_invalidates_cli() -> None:
+    with _Repo() as r:
+        r.init()
+        b = r.load()
+        b["phases"]["think"]["status"] = "done"
+        b["phases"]["plan"] = {"status": "done", "verdict": "accept", "approved_at": "T0"}
+        b["phases"]["build"]["status"] = "done"
+        for p in ("lint", "review", "test"):
+            b["phases"][p] = {"status": "done", "verdict": "accept"}
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        res = r.ok("transition", "plan", "in_progress")
+        assert res["invalidated"] == ["lint", "review", "test"], res
+        code, res = r.run("check-cascade")
+        assert code == 2 and res["ok"] is False
+        r.ok("transition", "plan", "done", "--verdict", "accept")
+        r.ok("set-slices", "--replace", "s1", "s2")
+        b = r.load()
+        assert b["phases"]["build"]["status"] == "blocked"
+        assert len(b["run"]["invalidations"]) == 1
+        assert "invalidated" not in r.ok("transition", "plan", "in_progress")   # rien à invalider
+
+
+def _t_set_slices_replace_empty_cli() -> None:
+    with _Repo() as r:
+        r.init()
+        r.ok("transition", "think", "done")
+        r.ok("transition", "plan", "in_progress")
+        r.ok("transition", "plan", "done", "--verdict", "accept")
+        r.ok("set-slices", "s1", "s2")
+        r.ok("approve-plan")
+        r.ok("transition", "build", "in_progress")
+        r.ok("transition", "plan", "in_progress")   # re-plan ouvert
+        r.ok("transition", "plan", "done", "--verdict", "accept")
+        res = r.ok("set-slices", "--replace")
+        assert res["slices"] == [] and res["removed"] == ["s1", "s2"], res
+        assert r.load()["slices"] == []
+        r.refused("set-slices")   # ni ids ni --replace
+        r.ok("approve-plan")
+        assert "re-plan" in r.refused("set-slices", "--replace")   # fenêtre refermée
+
+
 _INTEGRATION_TESTS = (
     _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_atomic_and_corrupt,
     _t_fleet_sync_called, _t_phases_cs, _t_cli_exit_codes, _t_import_no_side_effect,
     _t_id_whitelist, _t_atomic_keeps_mode, _t_fleet_sync_explicit_path,
     _t_bump_build_failure_keeps_fails, _t_invalidate_cli, _t_slices_cli,
-    _t_check_cascade_cli, _t_set_slices_replace_cli,
+    _t_check_cascade_cli, _t_set_slices_replace_cli, _t_replan_invalidates_cli,
+    _t_set_slices_replace_empty_cli,
 )
 
 

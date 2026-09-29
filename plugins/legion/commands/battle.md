@@ -290,7 +290,8 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      **Sur OK** : d'abord déclarer les slices avec
      `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-slices --replace <id>…` :
      les ids sont ceux des lignes `[slice-N]` de `plan.md`, dans l'ordre. Un plan sans
-     ligne `[slice-…]` : pas d'appel, le BUILD reste agrégé (une seule unité). Ensuite
+     ligne `[slice-…]` : `set-slices --replace` **sans id** (vide la liste, le BUILD reste
+     agrégé — une seule unité), au premier passage comme au re-plan. Ensuite
      seulement, enregistrer l'approbation avec
      `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" approve-plan` (elle pose
      `phases.plan.approved_at` ; sans elle, `transition build in_progress` sera refusé
@@ -298,9 +299,12 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      `pending` ou qu'un re-plan est ouvert (`approved_at` à `null`), et `approve-plan`
      referme cette fenêtre. Le même ordre sert au premier passage (où `--replace`
      équivaut à une déclaration simple) et à un re-plan (les slices d'id conservé gardent
-     leur statut, les nouvelles sont `pending`, les retirées disparaissent). Si `build`
+     leur statut, les nouvelles sont `pending`, les retirées disparaissent). Un re-plan
+     (`transition plan in_progress`) invalide déjà la cascade rendue (raison `replan`,
+     un seul événement) : `check-cascade` reste rouge jusqu'au rejeu. Si `build`
      était déjà `done` et qu'une slice du résultat n'est pas `done`, `build` passe à
-     `blocked` et la cascade est invalidée (raison `replan`) : enchaîner `approve-plan`,
+     `blocked` (`set-slices --replace` n'écrit alors pas de nouvel événement, la cascade
+     étant déjà `pending`) : enchaîner `approve-plan`,
      puis `transition build in_progress`, et rejouer la cascade après le BUILD. Un refus du
      script est relayé à l'humain, sans contournement. Puis enchaîner directement vers §D (BUILD) dans la même session, en
      annonçant l'enchaînement — ne plus rendre la main. En mode `--step`, rendre la

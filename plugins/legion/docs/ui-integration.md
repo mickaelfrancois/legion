@@ -165,7 +165,7 @@ antérieure peut ne pas les avoir) :
 - `phases.<phase>.fails` : FAILs ciblés du dernier passage (`{target, dimension}`) ;
   présent sur `plan` et sur les phases de cascade (`lint`, `review`, `test`, `security`).
 - `slices` (racine) : `[{id, status, warnings?, files?}]`, posé par `battle_state.py
-  set-slices` et tenu par `battle_state.py slice`. Absent ou vide : BUILD agrégé. Une slice peut disparaître sur `set-slices --replace` pendant un re-plan ; les ids conservés gardent leur statut. Le statut
+  set-slices` et tenu par `battle_state.py slice`. Absent ou vide : BUILD agrégé. Une slice peut disparaître sur `set-slices --replace` pendant un re-plan ; les ids conservés gardent leur statut. `set-slices --replace` sans id vide la liste (BUILD agrégé). Le statut
   d'une slice n'est pas monotone (une slice `done` peut être relancée en `in_progress`).
 - `phases.<phase>.covers` : ids des slices `done` couvertes par le verdict d'une phase de
   cascade ; suit `verdict` (`null` quand le verdict est remis à `null`).
@@ -173,10 +173,11 @@ antérieure peut ne pas les avoir) :
   `total`) — compteurs de la boucle d'auto-correction.
 - `phases.<phase>.invalidated_at` : horodatage ISO-8601 de la dernière invalidation de la
   phase (cascade repassée à `pending` après une correction). Posé par
-  `battle_state.py invalidate` et par `bump-autocorrect` sur `continue`.
+  `battle_state.py invalidate`, par `bump-autocorrect` sur `continue`, par
+  `transition plan in_progress` (re-plan) et par `set-slices --replace`.
 - `run.invalidations` : `[{at, reason, phases}]`, trace des invalidations ayant changé au
   moins une phase (`reason` : `polish`, `rebase`, `address:<n>`, `autocorrect:<phase>`,
-  `manual`). Une phase invalidée peut donc repasser de `done` à `pending` : ne pas
+  `replan`, `manual`). Une phase invalidée peut donc repasser de `done` à `pending` : ne pas
   supposer un statut monotone.
 
 Ce fichier est écrit **uniquement** par `scripts/battle_state.py` (transitions vérifiées,
