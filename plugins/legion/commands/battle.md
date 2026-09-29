@@ -1,6 +1,6 @@
 ---
 description: Orchestrate a legion battle (start | build | review | test | deliver | address | resume | status | abort). Creates per-repo battle state, runs the gate pipeline, persists artifacts.
-argument-hint: start <issue|slug> | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status | abort [<battle-id>] [--reason <text>]
+argument-hint: start <issue|slug> [--profile <p>] [--step] | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status | abort [<battle-id>] [--reason <text>]
 ---
 
 You are the **battle orchestrator** of `legion`. Load the `battle-workflow` skill
@@ -37,7 +37,7 @@ Arguments: `$ARGUMENTS`
 
 ## Dispatch
 
-- `start <issue|slug>` → §A
+- `start <issue|slug> [--profile <p>] [--step]` → §A. **Validate the options before any shell call.** The accepted options are a closed list: `--profile` with one of `feature`, `hotfix`, `security`, `spike` (default `feature`), and `--step`. Anything else: refuse and relay the list to the user. Never substitute `$ARGUMENTS` raw into a shell command: parse it, check each value against the list, and pass only the validated values.
 - `build [slice|all] [--auto]` → §D
 - `review` / `test` → §E (review gate, then test gate, then security if required)
 - `deliver` → §G (branch, commit, push, PR linked to the issue)
@@ -119,7 +119,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 2. **Create the battle** with `init` (never `cd`; relative to the working directory):
 
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" init <id> --ticket <ticket> --title <title> --profile feature [--step] [--required-gates <g> …]
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" init <id> --ticket <ticket> --title <title> --profile <p> [--step] [--required-gates <g> …]
    ```
 
    `init` creates `.legion/battles/<id>/` in the current repo, writes a minimal
@@ -128,7 +128,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    `<ticket>` is `GH#<n>` for a numeric intake, else the slug token. The title is
    refined at step 3 (`set-meta --title`), so a provisional one (the id) is fine.
    `--step` sets `run.mode = "step"`, otherwise `"autonomous"` (see step 4).
-   `--required-gates` is optional (default gate set otherwise).
+   `--profile` is the validated profile (default `feature`). `--required-gates` is optional: without it, the gates come from the profile table (step 4); an explicit value wins.
 
    **THINK is marked in progress first** (same discipline as BUILD, §D): `init` seeds
    the phases with `phases.think.status = "in_progress"` and the default
@@ -189,10 +189,23 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 
 4. **Complete `battle.json`** (the minimal one from step 2) through
    `battle_state.py`; the schema is **inlined in the `battle-workflow` doctrine**
-   (State layout) — already in context. `init` already defaulted `profile` to
-   `feature` and `required_gates` to `["architect","lint","reviewer","test-engineer"]`;
-   change them only if the user states a different profile, with
-   `set-meta --profile <p> --required-gates <g> …`. (`lint` is **.NET-only** — on a **non-.NET** stack it
+   (State layout) — already in context. `init` already set `profile` to
+   the one given on `start` (default `feature`) and `required_gates` to that profile's
+   gates:
+
+   | Profile | `required_gates` | Use for |
+   |---|---|---|
+   | `feature` (default) | `architect`, `lint`, `reviewer`, `test-engineer` | a normal feature |
+   | `hotfix` | `lint`, `reviewer`, `test-engineer` | a small, well-understood fix (no `architect`) |
+   | `security` | `architect`, `lint`, `reviewer`, `test-engineer`, `security` | a change on auth, secrets or dependencies |
+   | `spike` | `architect` | exploration: plan only, the PR is a draft |
+
+   Pick the profile from the user's request, or by this rule of thumb: a small local
+   fix is a `hotfix`, a change on auth, secrets or dependencies is `security`, an
+   exploration that will not ship is a `spike`, everything else is a `feature`. To
+   change the profile later, run
+   `set-meta --profile <p> --required-gates <the gates of the table row>`
+   (`--profile` alone never touches `required_gates`). (`lint` is **.NET-only** — on a **non-.NET** stack it
    self-retires at run time with a withdrawal banner and a neutral `accept`, so
    keeping it in the default set is safe; see §E.) Then record the stack detected in
    §A.preflight with `set-meta --stack-kind <kind> [--build-target <path>]
@@ -231,7 +244,17 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    (`--deny` is optional). (RETEX: the generic default mismatched a root-projects
    repo on two consecutive battles — the builder would have been blocked without it.)
 
-5. **Invoke the `architect` gate** with the `Agent` tool
+5. **Plan without `architect`.** If `architect` is **not** in `required_gates` (for example
+   the `hotfix` profile), do not launch `Agent`. Write a short `plan.md` yourself: an « En bref »,
+   one `[slice-1]` line and a test matrix. In place of the gate artifact delivery check,
+   verify that `plan.md` is not empty. Then run
+   `transition plan done --verdict accept` and continue at step 6 unchanged
+   (`set-slices --replace`, human OK, `approve-plan`). Escape hatch: if the fix turns out
+   to span more than one slice, switch back with
+   `set-meta --profile feature --required-gates architect lint reviewer test-engineer`
+   and run the `architect` as below.
+
+   Otherwise, **invoke the `architect` gate** with the `Agent` tool
    (`subagent_type: architect`). Pass a self-contained prompt: the absolute path
    of `spec.md`, the battle directory, and the repo root. The agent **writes**
    `plan.md` itself (the guard confines it to that single file) and **returns** a
@@ -390,6 +413,10 @@ each slice: `… battle_state.py slice <id> in_progress` **before** coding or de
 then `… slice <id> done|blocked --warnings N --files <paths…>` from the result
 `{ slice_id, build_ok, warnings, files_touched }` (`done` if `build_ok`, else `blocked`).
 Only the orchestrator writes this state; the builder never touches `battle.json`.
+When the `--files` of a `slice … done` match a sensitive path (auth, secrets, dependencies,
+endpoints), the script adds `security` to `required_gates` by itself and traces it in
+`run.security_auto`; it says so in its `warnings`. **Relay that warning to the user**
+(« security ajoutée automatiquement : <files> ») — the gate then runs in §E.
 
 **Mark the phase in progress first.** Before coding or delegating, run
 `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition build in_progress`
@@ -454,7 +481,8 @@ Precondition: `phases.build.status == "done"`. Each gate is a subagent that is
 `guard.py` hook confines it to that one file): it **returns** only a verdict + the
 artifact path, not the content. Apply this shared loop for each gate, in order
 `lint → reviewer → test-engineer → security`, skipping any gate not in
-`battle.json.required_gates`.
+`battle.json.required_gates`. `security` runs when it is in `required_gates`, whether the
+profile put it there or the script added it after a sensitive slice.
 
 ### Gate artifact delivery check (shared — every gate, incl. `architect` and `pr-triage`)
 
@@ -822,7 +850,8 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    (`battle-workflow` § « Charte de style des documents ») — simple, precise language;
    **keep it synthetic, with no separate « En bref »** (the body is short by design),
    and reread it against the charter before pushing. For a numeric issue, **end the body with `Closes #<n>`** so
-   merging the PR auto-closes the issue. This is the payoff of the artifact
+   merging the PR auto-closes the issue. **Exception, profile `spike`:** end with
+   `Refs #<n>` instead, so merging never closes the issue. This is the payoff of the artifact
    pipeline — the PR documents itself.
 
 4. **CONFIRM (mode `step` uniquement)** — En mode `step`, avant de pousser, afficher
@@ -842,6 +871,7 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    git push -u origin <me>/<token>
    gh pr create --title "<summary>" --body-file ".legion/battles/<id>/pr-body.md" --fill-first --base <default-branch>
    ```
+   For the `spike` profile, add `--draft`: the PR opens as a draft.
    Use the repo's default branch as `--base` (read it once, e.g.
    `gh repo view --json defaultBranchRef`). Record the printed PR URL with
    `battle_state.py set-delivery --pr-url <url>` (writes `delivery.pr_url`). If `gh` is unavailable → give the user the
@@ -856,12 +886,13 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    ```bash
    gh issue comment <n> --body-file ".legion/battles/<id>/wi-comment.md"
    ```
-   The issue itself closes on merge via `Closes #<n>` — do not close it here. On
+   The issue itself closes on merge via `Closes #<n>` — do not close it here (a `spike`
+   PR carries `Refs #<n>` instead: the issue stays open). On
    failure → **warn and continue**: the PR is already created. A constrained/headless
    session may also **refuse** this comment (an auto-mode classifier blocks an outward
    write under the user's identity that the run's authorization did not explicitly
    cover). That refusal is **acceptable, not an error**: the comment is best-effort and
-   `Closes #<n>` already links the PR to the issue. Note it and move on. (RETEX: the
+   `Closes #<n>` (or `Refs #<n>` for a `spike`) already links the PR to the issue. Note it and move on. (RETEX: the
    comment was refused in an autonomous session; the PR was already created and linked.)
 
 7. **Close the phase** — `battle_state.py transition deliver done` (`delivery.pr_url`

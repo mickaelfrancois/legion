@@ -177,6 +177,9 @@ antérieure peut ne pas les avoir) :
   cascade ; suit `verdict` (`null` quand le verdict est remis à `null`).
 - `run` : `mode` (`autonomous` | `step`) et `autocorrect` (`per_gate` par clé de phase,
   `total`) — compteurs de la boucle d'auto-correction.
+- `run.security_auto` : `{ "at": ISO-8601, "files": [chemins] }`, posé par
+  `battle_state.py slice … done --files` quand la gate `security` a été ajoutée
+  automatiquement à `required_gates`. Absent sinon.
 - `phases.<phase>.invalidated_at` : horodatage ISO-8601 de la dernière invalidation de la
   phase (cascade repassée à `pending` après une correction). Posé par
   `battle_state.py invalidate`, par `bump-autocorrect` sur `continue`, par
@@ -203,7 +206,7 @@ Pipeline : `THINK → PLAN → BUILD → LINT → REVIEW → TEST → [SECURITY]
   `plan`, `build`, `lint`, `review`, `test`, `security`, `deliver`, `address`,
   `reflect`. La clé `lint` est .NET-only (gate de formatage) ; sur une stack non-.NET
   elle reste `pending` ou `done` (retrait neutre). `security` (gate requise seulement
-  en profil `security` ou sur slice sensible) et `address` (post-deliver, répétable)
+  en profil `security`, ou ajoutée automatiquement sur slice sensible) et `address` (post-deliver, répétable)
   sont **optionnelles** : absentes de `phases` quand elles n'ont pas tourné — lecture
   défensive habituelle.
 - **Statut de phase** : `pending` | `in_progress` | `done` | `blocked`.
