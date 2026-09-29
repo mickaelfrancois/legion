@@ -27,7 +27,7 @@ _IMPORT_ERROR: str | None = None
 try:
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))
-    from battle_state import load_active_battle
+    from battle_state import guard_of, load_active_battle
 except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
@@ -51,8 +51,8 @@ def _careful_active(repo_root: Path) -> bool:
     active = load_active_battle(repo_root)
     if active is None:
         return False
-    guard = active[1].get("guard")
-    return bool(guard.get("careful")) if isinstance(guard, dict) else False
+    guard, valid = guard_of(active[1])  # GH#104 : bloc invalide -> careful inactif
+    return valid and bool(guard.get("careful"))
 
 
 def _command_text(data: dict) -> str:
@@ -132,6 +132,15 @@ def _t_careful_nominal() -> None:
         assert _handle(rm, root) == (0, "")
 
 
+def _t_careful_invalid_guard() -> None:
+    rm = {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}}
+    for raw in ('["x"]', '"x"', '{"allow":"s","careful":true}'):
+        with tempfile.TemporaryDirectory() as d:
+            root = _make_repo(d, "b1", '{"guard":' + raw + '}')
+            assert _careful_active(root) is False, raw
+            assert _handle(rm, root) == (0, ""), raw
+
+
 def _t_careful_import_fallback() -> None:
     global _IMPORT_ERROR
     saved, _IMPORT_ERROR = _IMPORT_ERROR, "ImportError: simule"
@@ -151,6 +160,7 @@ def _self_test() -> int:
     _t_careful_pointer_blank()
     _t_careful_invalid_id()
     _t_careful_nominal()
+    _t_careful_invalid_guard()
     _t_careful_import_fallback()
     print("OK: careful self-test passed", file=sys.stderr)
     return 0

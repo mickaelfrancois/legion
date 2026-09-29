@@ -286,6 +286,13 @@ PreToolUse(Edit|Write|MultiEdit) :
   2. Le file_path visé est-il dans `allow` et hors `deny` ?
      - oui  → exit 0 (autorisé)
      - non  → exit 2 + message : "hors périmètre de la battle <id>. /freeze actif."
+  2b. Bloc `guard` invalide (non-dict, `allow`/`deny` non-listes ou contenant un
+     non-`str`, règle unique `battle_state.guard_of`) → périmètre inconnu, fail-closed :
+     exit 2 hors `.legion/**`, `.gitignore` et mémoire Claude, quel que soit l'appelant
+     (évalué après 0 et 0b). Réparer via `battle_state.py set-guard`. `guard: null` = bloc
+     absent (non armé). Même branche si le pointeur désigne une battle dont `battle.json`
+     existe mais est illisible (JSON invalide ou trop imbriqué, racine non-dict) : réparer
+     ou `close` la battle. Toute exception imprévue de la décision → exit 2 (jamais exit 1).
   3. `.legion/**` toujours autorisé (sauf builder, cf. 0b). Bypass délibéré : env var LEGION_GUARD_OFF=1.
 ```
 

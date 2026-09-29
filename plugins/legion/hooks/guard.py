@@ -26,6 +26,11 @@ Regles :
   (battle active). Sinon `.legion/**` (toujours autorise) lui permettrait de
   reecrire `battle.json` -- donc d'elargir son propre `guard.allow`. Hors `.legion/`,
   regles de perimetre standard. S'applique meme guard non arme.
+- **Bloc `guard` invalide** (GH#104 : non-dict, `allow`/`deny` non-listes ou contenant un
+  non-`str`, cf. `battle_state.guard_of`) -> perimetre inconnu -> **fail-closed** : toute
+  ecriture hors toujours-autorises (`.legion/**`, `.gitignore`, memoire Claude) est bloquee
+  (exit 2), quel que soit l'appelant. Evalue APRES le confinement des gates et le blocage du
+  builder sous `.legion/` (inchanges). Reparation : `battle_state.py set-guard`.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -71,7 +76,8 @@ try:
     from battle_state import GATE_ARTIFACT as _GATE_ARTIFACT_SRC
     from battle_state import PRODUCER_ARTIFACT as _PRODUCER_ARTIFACT_SRC
     # Lecteurs partages de la battle active (GH#85) : le hook ne lit plus le pointeur lui-meme.
-    from battle_state import active_battle_id, load_active_battle
+    # `guard_of` : forme valide du bloc `guard` (GH#104), source unique partagee avec `validate`.
+    from battle_state import active_battle_id, battles_dir, guard_of, load_active_battle
     GATE_ARTIFACT = {PLUGIN_PREFIX + g: a for g, a in _GATE_ARTIFACT_SRC.items()}
     # Producteur : hors `.legion/`, regles de perimetre standard ; SOUS `.legion/`, seul
     # son rapport est autorise (jamais `battle.json` -> pas d'auto-elargissement du guard).
@@ -113,15 +119,27 @@ def _matches(rel_path: str, patterns) -> bool:
 
 
 def _load_active_guard(repo_root: Path):
-    """Retourne (battle_id, allow, deny) de la battle active, ou None."""
+    """Retourne (battle_id, allow, deny, valid) de la battle active, ou None.
+
+    `valid` faux (bloc `guard` mal forme, GH#104) : `allow`/`deny` valent `[]` et ne
+    doivent pas etre interpretes -- l'appelant ferme (fail-closed).
+    """
     active = load_active_battle(repo_root)
     if active is None:
+        # Pointeur valide mais `battle.json` present et illisible (JSON invalide, racine
+        # non-dict, trop imbrique...) : perimetre inconnu -> fail-closed. Pointeur absent,
+        # vide ou battle disparue : pas de battle active.
+        battle_id = active_battle_id(repo_root)
+        if battle_id is not None and (battles_dir(repo_root) / battle_id / "battle.json").exists():
+            return battle_id, [], [], False
         return None
     battle_id, data = active
-    guard = data.get("guard") or {}
+    guard, valid = guard_of(data)
+    if not valid:
+        return battle_id, [], [], False
     allow = guard.get("allow") or []
     deny = guard.get("deny") or []
-    return battle_id, allow, deny
+    return battle_id, allow, deny, True
 
 
 def _relative(repo_root: Path, file_path: str) -> str | None:
@@ -243,6 +261,25 @@ def _is_blank_content(content) -> bool:
     return content is None or not str(content).strip()
 
 
+def _invalid_guard_decision(data: dict, repo_root: Path, battle_id: str, file_path: str) -> tuple[int, str]:
+    """Etat de guard invalide ou illisible : perimetre inconnu -> ferme hors toujours-autorises (GH#104)."""
+    if not file_path or _is_claude_memory(file_path):
+        return 0, ""
+    rel = _relative(repo_root, file_path)
+    if rel is not None and _matches(rel, ALWAYS_ALLOW):
+        return 0, ""  # `.legion/**` + `.gitignore` : la reparation reste possible
+    target = f"`{rel}`" if rel is not None else "un chemin hors du repo"
+    return 2, (
+        f"BLOQUE par le guard de la battle {battle_id} : le bloc `guard` de `battle.json` "
+        f"est invalide ou `battle.json` est illisible, le perimetre d'ecriture est inconnu.\n"
+        f"Ecriture refusee : {target}.\n"
+        f"Repare-le : `python3 {_SCRIPTS_DIR / 'battle_state.py'} set-guard --allow <glob...>` "
+        f"(`--allow` sans glob pour desarmer), ou ferme la battle "
+        f"(`python3 {_SCRIPTS_DIR / 'battle_state.py'} close`).\n"
+        f"Bypass delibere : LEGION_GUARD_OFF=1"
+    )
+
+
 def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     """Retourne (exit_code, message). exit 2 = blocage."""
     if data.get("tool_name") not in WRITE_TOOLS:
@@ -308,7 +345,9 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     active = _load_active_guard(repo_root)
     if active is None:
         return 0, ""
-    battle_id, allow, deny = active
+    battle_id, allow, deny, valid = active
+    if not valid:
+        return _invalid_guard_decision(data, repo_root, battle_id, file_path)
     if not allow:
         return 0, ""  # guard non arme
 
@@ -345,6 +384,20 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     )
 
 
+def _safe_decide(data, repo_root: Path) -> tuple[int, str]:
+    """`_decide` avec filet final : toute exception imprevue -> exit 2 (jamais exit 1, non bloquant)."""
+    try:
+        return _decide(data, repo_root)
+    except BaseException as exc:  # noqa: BLE001 - fail-closed, y compris RecursionError
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        return 2, (
+            f"BLOQUE par le guard : erreur interne ({type(exc).__name__}: {exc}). "
+            f"Ecriture refusee par prudence (fail-closed).\n"
+            f"Bypass delibere : LEGION_GUARD_OFF=1"
+        )
+
+
 def main() -> int:
     if "--self-test" in sys.argv:
         return _self_test()
@@ -353,8 +406,11 @@ def main() -> int:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
         return 0
+    except RecursionError:  # entree trop imbriquee : illisible -> ferme (jamais exit 1)
+        print("BLOQUE par le guard : entree du hook illisible (JSON trop imbrique).", file=sys.stderr)
+        return 2
 
-    code, message = _decide(data, Path.cwd())
+    code, message = _safe_decide(data, Path.cwd())
 
     if code == 2 and os.environ.get("LEGION_GUARD_OFF") == "1":
         print(f"[guard bypass] {message}", file=sys.stderr)
@@ -414,6 +470,114 @@ def _t_guard_freeze_nominal(bs) -> None:
         assert _decide(_ev("Edit", "claude", "src/x.cs"), root)[0] == 0
         assert _decide(_ev("Edit", "claude", "docs/x.md"), root)[0] == 2
         assert _decide(_ev("Edit", "claude", ".legion/battles/B/battle.json"), root)[0] == 0
+
+
+def _guard_repo(root: Path, guard_json: str) -> None:
+    (root / ".legion" / "battles" / "B").mkdir(parents=True)
+    (root / ".legion" / "battles" / "B" / "battle.json").write_text(
+        '{"guard":' + guard_json + '}', encoding="utf-8")
+
+
+def _t_guard_invalid_block(bs) -> None:
+    """Bloc `guard` non-dict : fail-closed hors toujours-autorises, reparation possible."""
+    for raw in ('["x"]', '"x"'):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            bs._write_pointer(root, "B")
+            _guard_repo(root, raw)
+            code, msg = _decide(_ev("Edit", "claude", "src/x.cs"), root)
+            assert code == 2 and "set-guard" in msg, (code, msg)
+            for ok in (".legion/battles/B/battle.json", ".gitignore"):
+                assert _decide(_ev("Edit", "claude", ok), root)[0] == 0, ok
+            assert _decide(_ev("Edit", "claude", str(Path.home() / ".claude/projects/p/memory/x.md")), root)[0] == 0
+            assert _decide({"tool_name": "Bash", "agent_type": "claude"}, root)[0] == 0
+            assert _decide(_ev("Edit", "legion:builder", "src/x.cs"), root)[0] == 2
+            assert _decide(_ev("Edit", "legion:builder", ".legion/battles/B/battle.json"), root)[0] == 2
+            assert _decide(_ev("Edit", "claude", "../outside.txt"), root)[0] == 2
+
+
+def _t_guard_invalid_fields(bs) -> None:
+    for raw in ('{"allow":"src/**"}', '{"allow":["src/**"],"deny":"x"}', '{"allow":["a",1]}'):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            bs._write_pointer(root, "B")
+            _guard_repo(root, raw)
+            assert _decide(_ev("Edit", "claude", "src/x.cs"), root)[0] == 2, raw
+
+
+def _t_guard_valid_unarmed(bs) -> None:
+    for raw in ("{}", '{"allow":[]}', '{"allow":null}', "null"):   # `guard: null` = non arme
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            bs._write_pointer(root, "B")
+            _guard_repo(root, raw)
+            assert _decide(_ev("Edit", "claude", "src/x.cs"), root)[0] == 0, raw
+    with tempfile.TemporaryDirectory() as d:  # guard absent
+        root = Path(d)
+        bs._write_pointer(root, "B")
+        (root / ".legion" / "battles" / "B").mkdir(parents=True)
+        (root / ".legion" / "battles" / "B" / "battle.json").write_text("{}", encoding="utf-8")
+        assert _decide(_ev("Edit", "claude", "src/x.cs"), root)[0] == 0
+
+
+def _t_guard_invalid_confinement(bs) -> None:
+    """Le confinement des gates reste prioritaire sur la branche fail-closed."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        bs._write_pointer(root, "B")
+        _guard_repo(root, '["x"]')
+        art = ".legion/battles/B/gate-review.md"
+        assert _decide(_ev("Write", "legion:reviewer", art, content="# R"), root)[0] == 0
+        assert _decide(_ev("Write", "legion:reviewer", "src/x.cs", content="x"), root)[0] == 2
+        assert _decide(_ev("Write", "legion:reviewer", art, content=""), root)[0] == 2
+
+
+def _t_guard_unreadable_active(bs) -> None:
+    """Pointeur valide + `battle.json` illisible : fail-closed ; pointeur vide/battle absente : libre."""
+    for raw in ("{oops", "", "[]", "[" * 200000):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".legion" / "battles" / "B").mkdir(parents=True)
+            bs._write_pointer(root, "B")
+            (root / ".legion" / "battles" / "B" / "battle.json").write_text(raw, encoding="utf-8")
+            code, msg = _decide(_ev("Edit", "claude", "src/x.cs"), root)
+            assert code == 2 and "set-guard" in msg and "close" in msg, (raw[:8], code, msg)
+            assert _decide(_ev("Edit", "claude", ".legion/battles/B/battle.json"), root)[0] == 0
+            assert _decide(_ev("Edit", "legion:builder", "src/x.cs"), root)[0] == 2
+            art = ".legion/battles/B/gate-review.md"   # confinement des gates inchange
+            assert _decide(_ev("Write", "legion:reviewer", art, content="# R"), root)[0] == 0
+            assert _decide(_ev("Write", "legion:reviewer", "src/x.cs", content="x"), root)[0] == 2
+    with tempfile.TemporaryDirectory() as d:  # pointeur valide, battle.json absent : inchange
+        root = Path(d)
+        bs._write_pointer(root, "B")
+        assert _decide(_ev("Edit", "claude", "src/x.cs"), root)[0] == 0
+
+
+def _t_guard_safety_net() -> None:
+    """Exception imprevue dans la decision -> exit 2 avec message, jamais exit 1."""
+    global _decide
+    import io
+    real, real_stdin, real_stderr, real_argv = _decide, sys.stdin, sys.stderr, sys.argv
+    sys.argv = [real_argv[0]]   # main() ne doit pas relancer --self-test
+
+    def boom(data, root):
+        raise RuntimeError("injecte")
+
+    def deep(data, root):
+        raise RecursionError("injecte")
+
+    try:
+        for fn in (boom, deep):
+            _decide = fn
+            assert _safe_decide({"tool_name": "Edit"}, Path("."))[0] == 2
+            sys.stdin, sys.stderr = io.StringIO('{"tool_name":"Edit"}'), io.StringIO()
+            code = main()
+            err = sys.stderr.getvalue()
+            assert code == 2 and "erreur interne" in err and "injecte" in err, (code, err)
+        sys.stdin, sys.stderr = io.StringIO("[" * 200000), io.StringIO()
+        assert main() == 2
+    finally:
+        _decide, sys.stdin, sys.stderr, sys.argv = real, real_stdin, real_stderr, real_argv
 
 
 def _self_test() -> int:
@@ -538,6 +702,12 @@ def _self_test() -> int:
     _t_guard_invalid_id(battle_state)
     _t_guard_unreadable_battle_json(battle_state)
     _t_guard_freeze_nominal(battle_state)
+    _t_guard_invalid_block(battle_state)
+    _t_guard_invalid_fields(battle_state)
+    _t_guard_valid_unarmed(battle_state)
+    _t_guard_invalid_confinement(battle_state)
+    _t_guard_unreadable_active(battle_state)
+    _t_guard_safety_net()
 
     print("OK: guard self-test passed", file=sys.stderr)
     return 0
