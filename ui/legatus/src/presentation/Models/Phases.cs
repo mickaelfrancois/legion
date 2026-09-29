@@ -4,7 +4,8 @@ namespace IA.Legatus.Models;
 // THINK → PLAN → BUILD → LINT → REVIEW → TEST → SECURITY → DELIVER → ADDRESS → REFLECT.
 // LINT is the first review-cascade gate (.NET formatting check, before REVIEW).
 // SECURITY closes the cascade; it only runs when required (security profile or a
-// sensitive slice), so it stays pending — like ADDRESS — on most battles.
+// sensitive slice), so it is often absent from battle.json; the compact frieze never
+// infers it as done (PhaseTimeline), the detail page reads its real status.
 // ADDRESS is optional + repeatable (post-deliver PR-review loop); it stays in the
 // frieze as a slot that is simply pending when a battle never draws review comments.
 public static class Phases

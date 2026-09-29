@@ -23,6 +23,11 @@
         if (phase == Current)
             return (StatusVisuals.ColorOf(Status), StatusVisuals.Label(Status));
 
+        // SECURITY is optional (only when the gate is required): the index entry alone
+        // cannot tell whether it ran, so never infer it as done from a later phase.
+        if (phase == Phase.Security)
+            return (Color.Default, StatusVisuals.Label(PhaseStatus.Pending));
+
         // Compare on pipeline position, not enum value, to stay correct if the enum is reordered.
         var here = Phases.IndexOf(phase);
         var current = Phases.IndexOf(Current);
