@@ -24,9 +24,26 @@ directement sur le filesystem. N'écrit **jamais** dans `.legion/` ni dans `flee
 
 ## Lancer
 
-Depuis la racine de `ui/legatus` :
+Lancement recommandé, depuis n'importe quel repo (Linux, WSL2, macOS, Windows) :
 
-```powershell
+```text
+/legion:legatus
+```
+
+En direct, avec le lanceur multi-OS (`python` sous Windows) :
+
+```bash
+python3 plugins/legion/scripts/legatus.py [--dry-run] [--port N]
+```
+
+Le lanceur démarre Legatus **détaché** (il survit à la session), journalise dans
+`~/.claude/legion/legatus.log`, ouvre le navigateur et affiche un objet JSON (`state`, `url`,
+`command`, ...). `--port N` fait écouter Legatus sur N ; `--dry-run` montre la commande
+(`command`) sans rien lancer.
+
+Sans le lanceur, depuis la racine de `ui/legatus` (tous OS) :
+
+```bash
 dotnet run --project src/presentation
 ```
 
@@ -35,15 +52,17 @@ Elle n'écoute que sur la boucle locale.
 
 Pour forcer HTTPS (port 7177) :
 
-```powershell
+```bash
 dotnet run --project src/presentation --launch-profile https
 ```
 
 > Sans variable `LEGION_FLEET`, l'app lit l'index réel sous
-> `%USERPROFILE%\.claude\legion`. Pour une démo sans données réelles, génère d'abord
+> `~/.claude/legion` (`%USERPROFILE%\.claude\legion` sous Windows). Pour une démo sans données réelles, génère d'abord
 > un index de test (section suivante).
 
 ## Données de test (seed)
+
+> `tools/Seed-Fleet.ps1` est un outil **Windows / PowerShell**.
 
 `tools/Seed-Fleet.ps1` projette des battles dans un index `fleet.d/` **isolé**
 (jamais le vrai index). Il peut générer des battles synthétiques variées (actives / bloquées /
@@ -85,4 +104,4 @@ chemins en argument (racine de repo ou dossier `.legion`) :
 ## Configuration
 | Variable | Rôle | Défaut |
 |---|---|---|
-| `LEGION_FLEET` | dossier de base dont on dérive `…/fleet.d/` | `%USERPROFILE%\.claude\legion` |
+| `LEGION_FLEET` | dossier de base dont on dérive `…/fleet.d/` | `~/.claude/legion` (`%USERPROFILE%\.claude\legion` sous Windows) |
