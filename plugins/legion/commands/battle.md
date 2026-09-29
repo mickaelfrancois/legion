@@ -897,8 +897,10 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
      the current commit, taken **before** any checkout:
      - `git rev-parse <b>` **equals** `git rev-parse HEAD` → the branch holds no commit of its
        own (created, nothing committed yet): resume with `git checkout <me>/<token>`;
-     - `git rev-parse <b>^` **equals** `git rev-parse HEAD` (exactly one commit on top of the
-       base) **and** every path of `git diff-tree --no-commit-id --name-only -r <b>` is on the
+     - `git rev-list --parents -n1 <b>` prints **exactly two** fields (the commit and a single
+       parent) and the second one **equals** `git rev-parse HEAD` (exactly one non-merge commit
+       on top of the base; a merge commit is refused, since `git diff-tree` lists none of its
+       paths and the whitelist would pass empty) **and** every path of `git diff-tree --no-commit-id --name-only -r <b>` is on the
        commit whitelist of step 2 **and** `git diff --quiet <b> -- <those paths>` exits 0 (the
        committed content is byte-identical to the working tree the gates judged): the commit
        step already ran, resume with `git checkout <me>/<token>` and skip to step 3 (push);
