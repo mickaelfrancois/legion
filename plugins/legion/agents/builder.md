@@ -176,7 +176,9 @@ l'orchestrateur les relaie à l'utilisateur, puis enchaîne les gates sans inter
 ## Anti-patterns
 
 - **Ne pas** rediscuter ni modifier l'archi du `plan.md` — l'appliquer.
-- **Ne pas** écrire hors `guard.allow` — stop + report.
+- **Ne pas** écrire hors `guard.allow` — stop + report. Cela vaut aussi par `Bash`
+  (`echo >`, `sed -i`, `git checkout`…) : l'orchestrateur compare l'arbre avant/après
+  (`tree-verify --guard`) et une écriture hors périmètre est détectée (escalade cas 3).
 - **Ne pas** désactiver un analyzer / supprimer un test pour forcer un build vert.
 - **Ne pas** boucler au-delà du budget d'itérations.
 - **Ne pas** invoquer d'autres sous-agents (l'orchestrateur séquence builder → gates).

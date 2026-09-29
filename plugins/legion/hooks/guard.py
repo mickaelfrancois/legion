@@ -38,6 +38,15 @@ Regles :
 - **Entree stdin** (GH#106) : vide ou blanche -> exit 0 ; non vide et illisible (JSON invalide,
   entier geant, non decodable, trop imbrique) ou non-objet -> exit 2 (fail-closed, sans bypass
   `LEGION_GUARD_OFF`). Aucun chemin ne sort en exit 1, hors `--self-test`.
+- **Bash / PowerShell des gates** (GH#66, couche 2) : le hook est aussi branche sur
+  `Bash|PowerShell`. Un appel shell d'une gate (`agent_type` dans `GATE_ARTIFACT`) est analyse
+  (`_shell_decision`, best-effort : redirections, `tee`, `rm`/`cp`/`mv`..., `sed -i`, `git`
+  d'ecriture, `dotnet format` sans `--verify-no-changes`...) et bloque (exit 2) s'il ecrit hors
+  `/dev/null`, du dossier temporaire ou de `.legion/battles/<active>/*.log`. Route AVANT
+  `_load_active_guard` : la session principale et le builder ne sont jamais filtres (leur shell
+  n'est pas bloque par un bloc `guard` invalide). Repli d'import : gate et builder fermes (exit 2),
+  session principale silencieuse. Commande non analysable (quote non fermee) -> exit 2. Ne voit ni
+  `python -c`, ni `bash -c`, ni `eval` : la garantie est portee par `artifact_check.py tree-verify`.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -60,6 +69,7 @@ import tempfile
 from pathlib import Path
 
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit")
+SHELL_TOOLS = ("Bash", "PowerShell")
 ALWAYS_ALLOW = (".legion/**", ".gitignore")  # etat de la battle + .gitignore (setup orchestrateur)
 
 # Confinement des gates. `agent_type` (payload PreToolUse) vaut le nom NAMESPACE du
@@ -85,6 +95,8 @@ try:
     # Lecteurs partages de la battle active (GH#85) : le hook ne lit plus le pointeur lui-meme.
     # `guard_of` : forme valide du bloc `guard` (GH#104), source unique partagee avec `validate`.
     from battle_state import active_battle_id, battles_dir, guard_of, load_active_battle
+    # Matcher de globs partage avec `artifact_check.py tree-verify --guard` (GH#66, C6).
+    from battle_state import glob_match as _glob_match
     GATE_ARTIFACT = {PLUGIN_PREFIX + g: a for g, a in _GATE_ARTIFACT_SRC.items()}
     # Producteur : hors `.legion/`, regles de perimetre standard ; SOUS `.legion/`, seul
     # son rapport est autorise (jamais `battle.json` -> pas d'auto-elargissement du guard).
@@ -94,35 +106,13 @@ except Exception as _exc:  # ImportError, SyntaxError du module... jamais plante
     GATE_ARTIFACT = {}
     PRODUCER_ARTIFACT = {}
 
-
-def _glob_to_regex(pattern: str) -> re.Pattern[str]:
-    """Traduit un glob (`**`, `*`, `?`) en regex ancree, en chemins posix."""
-    pattern = pattern.replace("\\", "/")
-    out: list[str] = []
-    i, n = 0, len(pattern)
-    while i < n:
-        c = pattern[i]
-        if c == "*":
-            if pattern[i : i + 2] == "**":
-                out.append(".*")
-                i += 2
-                if i < n and pattern[i] == "/":
-                    i += 1  # le .* couvre deja le slash
-            else:
-                out.append("[^/]*")
-                i += 1
-        elif c == "?":
-            out.append("[^/]")
-            i += 1
-        else:
-            out.append(re.escape(c))
-            i += 1
-    return re.compile("^" + "".join(out) + "$")
+    def _glob_match(rel_path, patterns):  # jamais appele hors repli ; ferme si c'etait le cas
+        raise RuntimeError("battle_state.glob_match indisponible")
 
 
 def _matches(rel_path: str, patterns) -> bool:
-    rel_path = rel_path.replace("\\", "/")
-    return any(_glob_to_regex(p).search(rel_path) for p in patterns)
+    """Matcher de globs : delegue a la source unique `battle_state.glob_match` (GH#66, C6)."""
+    return _glob_match(rel_path, patterns)
 
 
 def _load_active_guard(repo_root: Path):
@@ -302,9 +292,723 @@ def _invalid_guard_decision(
     )
 
 
+# --- Filtre Bash/PowerShell des gates (GH#66, couche 2) -------------------------------
+#
+# Best-effort : une gate ne doit pas ecrire par shell. Le filtre ne regarde que les
+# commandes EN TETE (jamais une sous-chaine) ; il ne voit ni `python -c "open(...)"`, ni
+# `bash -c "..."`, ni `eval`. La garantie est portee par `artifact_check.py tree-verify`.
+
+_FILE_CMDS = frozenset({"rm", "mv", "cp", "touch", "mkdir", "chmod", "truncate", "ln"})
+_GIT_BLOCKED = frozenset({
+    "add", "commit", "checkout", "switch", "reset", "restore", "am", "merge", "rebase",
+    "cherry-pick", "clean", "push", "rm", "mv", "update-index", "pull", "revert",
+    "update-ref", "replace", "filter-branch", "gc", "prune",
+    "commit-tree", "mktree", "notes", "maintenance",   # briques d'ecriture d'etat
+})
+# `git config` : seules les formes de lecture passent (une gate ne pose pas core.fsmonitor & co).
+# `--show-origin` / `--show-scope` / `--name-only` sont de simples modificateurs : git 2.53 ecrit
+# avec `--show-scope <cle> <valeur>`. Ils ne rendent donc pas une commande « lecture » a eux seuls.
+_GIT_CONFIG_READ = ("--get", "--list", "-l")
+_GIT_CONFIG_SUBCMD_WRITE = frozenset({"set", "unset", "edit", "rename-section", "remove-section"})
+_GIT_CONFIG_WRITE = ("--unset", "--add", "--replace-all", "--edit", "-e", "--rename-section",
+                     "--remove-section", "--set")
+_GIT_BRANCH_WRITE = frozenset({"-f", "--force", "-d", "-D", "--delete", "-m", "-M", "--move",
+                               "-c", "-C", "--copy", "-u", "--set-upstream-to",
+                               "--unset-upstream", "--edit-description"})
+_GIT_TAG_WRITE = frozenset({"-f", "--force", "-d", "--delete", "-a", "-s", "-u", "-m", "-F"})
+_GIT_OPT_ARG = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--super-prefix", "--config-env",
+})
+_GIT_WORKTREE_BLOCKED = frozenset({"add", "remove", "move", "prune", "repair"})
+_GIT_APPLY_READONLY = frozenset({"--check", "--stat", "--numstat", "--summary"})
+_DOTNET_BLOCKED = frozenset({"new", "add", "remove"})
+_PKG_MANAGERS = frozenset({"npm", "pnpm", "yarn"})
+_PKG_BLOCKED = frozenset({"install", "i", "add", "ci"})
+_PS_CMDLETS = frozenset(c.casefold() for c in (
+    "Set-Content", "Add-Content", "Out-File", "New-Item", "Remove-Item", "Move-Item",
+    "Copy-Item", "Rename-Item", "Clear-Content", "Tee-Object", "Export-Csv", "Export-Clixml",
+    "Set-Item", "Set-ItemProperty", "New-ItemProperty", "Remove-ItemProperty",
+    "sc", "ac", "ni", "ri", "del", "erase", "rd", "mi", "move", "cpi", "copy", "ren",
+))
+_PS_IO_FILE = re.compile(
+    r"\[(?:System\.)?IO\.File\]::(?:Write|Append|Create|Delete|Move|Copy|Replace)", re.IGNORECASE
+)
+# Prefixes de commande : le nom reel de la commande suit. Valeur = options qui prennent un argument.
+_PREFIXES = {
+    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T", "-U", "-D"}),
+    "doas": frozenset({"-u"}),
+    "env": frozenset({"-u", "-C", "-S"}),
+    "nice": frozenset({"-n"}),
+    "timeout": frozenset({"-s", "-k"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "xargs": frozenset({"-I", "-n", "-P", "-d", "-L", "-s", "-a", "-E", "-l"}),
+    "command": frozenset(), "exec": frozenset(), "nohup": frozenset(),
+    "time": frozenset(), "builtin": frozenset(),
+    # mots-cles de shell : la commande suit
+    "{": frozenset(), "}": frozenset(), "!": frozenset(), "if": frozenset(),
+    "then": frozenset(), "else": frozenset(), "elif": frozenset(), "do": frozenset(),
+    "while": frozenset(), "until": frozenset(),
+}
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")
+_REDIR_OUT = frozenset({">", ">>", ">|", "&>", "&>>", ">&"})
+_REDIR_IN = frozenset({"<", "<<", "<<<", "<&"})
+_HEREDOC_OP = re.compile(
+    r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|(\\)?([A-Za-z_][A-Za-z0-9_]*))"
+)
+_MAX_SUBST_DEPTH = 6
+
+
+def _skip_arith(line: str, i: int) -> int:
+    """`i` sur `$((` ou `((` : index apres la `))` fermante de la ligne (fin de ligne si non fermee).
+    Un `<<` y est un decalage arithmetique, pas un heredoc."""
+    depth, j, n = 0, i, len(line)
+    while j < n:
+        if line[j] == "(":
+            depth += 1
+        elif line[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return n
+
+
+def _find_heredocs(line: str) -> list[tuple[str, bool, bool]]:
+    """Operateurs `<<[-]WORD` d'une ligne, hors quotes et hors `$((...))` :
+    liste de (delimiteur, retire_tabs, quote). `quote` : delimiteur quote (`'EOF'`, `"EOF"`,
+    `\\EOF`) -> corps litteral ; sinon `$(...)` et backticks s'y executent."""
+    found: list[tuple[str, bool, bool]] = []
+    quote = None
+    i, n = 0, len(line)
+    while i < n:
+        c = line[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+        elif c == "\\":
+            i += 2
+        elif c in "'\"":
+            quote = c
+            i += 1
+        elif c == "#" and (i == 0 or line[i - 1] in " \t;|&("):
+            break
+        elif line.startswith("$((", i) or (
+            line.startswith("((", i) and (i == 0 or line[i - 1] in " \t;|&")
+        ):
+            i = _skip_arith(line, i + 1 if line.startswith("$((", i) else i)
+        elif line.startswith("<<<", i):
+            i += 3
+        elif line.startswith("<<", i):
+            m = _HEREDOC_OP.match(line, i)
+            if m:
+                delim = m.group(2) or m.group(3) or m.group(5)
+                found.append((delim, m.group(1) == "-", bool(m.group(2) or m.group(3) or m.group(4))))
+                i = m.end()
+            else:
+                i += 2
+        else:
+            i += 1
+    return found
+
+
+def _body_substitutions(body: str) -> list[str]:
+    """Contenus des `$(...)` / backticks d'un corps de heredoc NON quote (bash les execute).
+    `\\$` et `\\`` sont litteraux. Leve ValueError si une substitution n'est pas fermee."""
+    subs: list[str] = []
+    i, n = 0, len(body)
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            i += 2
+        elif c == "$" and body.startswith("$(", i):
+            inner, i = _match_paren(body, i + 2)
+            subs.append(inner)
+        elif c == "`":
+            inner, i = _match_backtick(body, i + 1)
+            subs.append(inner)
+        else:
+            i += 1
+    return subs
+
+
+def _strip_heredocs(command: str) -> str:
+    """Retire les corps de heredoc (`<<[-]'WORD'` ... `WORD`) : pour un delimiteur quote ce n'est
+    pas du shell. Pour un delimiteur NON quote, les `$(...)` / backticks du corps s'executent :
+    ils sont reinjectes comme lignes `$(...)` a analyser.
+
+    Le contenu d'un `python - <<'EOF' ... a > b ... EOF` ne doit pas faire lire un `>` comme
+    une redirection. Heredoc non termine : le reste de la commande est le corps (comme bash).
+    """
+    out: list[str] = []
+    pending: list[tuple[str, bool, bool]] = []
+    body: list[str] = []
+    for line in command.split("\n"):
+        if pending:
+            delim, tabs, quoted = pending[0]
+            if (line.lstrip("\t") if tabs else line).rstrip("\r") == delim:
+                pending.pop(0)
+                if not quoted:
+                    out.extend("$(" + sub + ")" for sub in _body_substitutions("\n".join(body)))
+                body = []
+            else:
+                body.append(line)
+            continue
+        out.append(line)
+        pending.extend(_find_heredocs(line))
+    if pending and not pending[0][2]:  # heredoc non quote non termine : corps jusqu'a la fin
+        out.extend("$(" + sub + ")" for sub in _body_substitutions("\n".join(body)))
+    return "\n".join(out)
+
+
+def _match_paren(cmd: str, i: int) -> tuple[str, int]:
+    """`i` = index apres `$(` : retourne (contenu, index apres la `)` fermante)."""
+    depth, j, n = 1, i, len(cmd)
+    while j < n:
+        c = cmd[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c in "'\"":
+            k = cmd.find(c, j + 1)
+            if k < 0:
+                raise ValueError("quote non fermee dans une substitution")
+            j = k + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return cmd[i:j], j + 1
+        j += 1
+    raise ValueError("substitution `$(` non fermee")
+
+
+def _match_backtick(cmd: str, i: int) -> tuple[str, int]:
+    """`i` = index apres la backtick ouvrante : retourne (contenu, index apres la fermante)."""
+    j, n = i, len(cmd)
+    while j < n:
+        if cmd[j] == "\\":
+            j += 2
+        elif cmd[j] == "`":
+            return cmd[i:j], j + 1
+        else:
+            j += 1
+    raise ValueError("substitution backtick non fermee")
+
+
+def _tokenize(cmd: str, ps: bool, subs: list[str]) -> list[tuple[str, str]]:
+    """Jetons ("w", mot) / ("op", operateur), quotes respectees. Leve ValueError si non analysable.
+
+    Un operateur quote (`grep ">" f`) reste un MOT. Les substitutions `$(...)` / backticks
+    sont extraites dans `subs` (analysees a part) et remplacees par `$SUB` dans le mot.
+    Les sauts de ligne hors quotes valent `;`. Les commentaires (`#` en debut de mot) sont ignores.
+    """
+    toks: list[tuple[str, str]] = []
+    buf: list[str] = []
+    has = quoted = False
+    i, n = 0, len(cmd)
+
+    def flush() -> None:
+        nonlocal has, quoted
+        if has:
+            toks.append(("w", "".join(buf)))
+        buf.clear()
+        has = quoted = False
+
+    while i < n:
+        c = cmd[i]
+        if c in " \t\r":
+            flush()
+            i += 1
+        elif c == "\n":
+            flush()
+            toks.append(("op", ";"))
+            i += 1
+        elif c == "#" and not has:
+            j = cmd.find("\n", i)
+            i = n if j < 0 else j
+        elif c == "\\" and not ps:
+            buf.append(cmd[i + 1] if i + 1 < n else "\\")
+            has = quoted = True
+            i += 2
+        elif c == "`" and ps:  # echappement PowerShell : ``Set-Con`tent`` == Set-Content
+            if i + 1 < n and cmd[i + 1] == "\n":
+                i += 2  # continuation de ligne
+            else:
+                buf.append(cmd[i + 1] if i + 1 < n else "`")
+                has = quoted = True
+                i += 2
+        elif c == "'":
+            j = cmd.find("'", i + 1)
+            if j < 0:
+                raise ValueError("quote simple non fermee")
+            buf.append(cmd[i + 1 : j])
+            has = quoted = True
+            i = j + 1
+        elif c == '"':
+            has = quoted = True
+            i += 1
+            while True:
+                if i >= n:
+                    raise ValueError("guillemet non ferme")
+                ch = cmd[i]
+                if ch == '"':
+                    i += 1
+                    break
+                if ch == "\\" and not ps:
+                    if i + 1 < n and cmd[i + 1] in '"\\$`\n':
+                        buf.append(cmd[i + 1])
+                        i += 2
+                    else:
+                        buf.append("\\")
+                        i += 1
+                elif ch == "`" and ps:
+                    if i + 1 >= n:
+                        raise ValueError("guillemet non ferme")
+                    buf.append(cmd[i + 1])
+                    i += 2
+                elif ch == "$" and cmd.startswith("$(", i):
+                    inner, i = _match_paren(cmd, i + 2)
+                    subs.append(inner)
+                    buf.append("$SUB")
+                elif ch == "`":
+                    inner, i = _match_backtick(cmd, i + 1)
+                    subs.append(inner)
+                    buf.append("$SUB")
+                else:
+                    buf.append(ch)
+                    i += 1
+        elif c == "$" and cmd.startswith("$(", i):
+            inner, i = _match_paren(cmd, i + 2)
+            subs.append(inner)
+            buf.append("$SUB")
+            has = True
+        elif c == "`" and not ps:
+            inner, i = _match_backtick(cmd, i + 1)
+            subs.append(inner)
+            buf.append("$SUB")
+            has = True
+        elif c in ";|&()<>":
+            if c in "<>" and has and not quoted and "".join(buf).isdigit():
+                buf.clear()  # descripteur de fichier devant la redirection (`2>`)
+                has = quoted = False
+            else:
+                flush()
+            if c == ">":
+                op = next((o for o in (">>", ">|", ">&") if cmd.startswith(o, i)), ">")
+            elif c == "<":
+                op = next((o for o in ("<<<", "<<", "<&") if cmd.startswith(o, i)), "<")
+            elif c == "&":
+                op = next((o for o in ("&&", "&>>", "&>") if cmd.startswith(o, i)), "&")
+            elif c == "|":
+                op = next((o for o in ("||", "|&") if cmd.startswith(o, i)), "|")
+            else:
+                op = c
+            toks.append(("op", op))
+            i += len(op)
+        else:
+            buf.append(c)
+            has = True
+            i += 1
+    flush()
+    return toks
+
+
+def _split_simple_commands(command: str, ps: bool = False):
+    """Decoupe une commande en commandes simples. Retourne (commandes, substitutions).
+
+    Chaque commande = (mots, redirections) ; une redirection = (operateur, cible). Les
+    duplications de fd (`2>&1`, `>&2`) et les redirections d'entree sont ignorees ;
+    `>(...)` (substitution de processus) n'est pas une cible fichier.
+    """
+    if not ps:
+        command = _strip_heredocs(command)
+        command = command.replace("\\\r\n", "").replace("\\\n", "")
+    subs: list[str] = []
+    toks = _tokenize(command, ps, subs)
+    commands: list[tuple[list[str], list[tuple[str, str]]]] = []
+    words: list[str] = []
+    redirs: list[tuple[str, str]] = []
+
+    def push() -> None:
+        nonlocal words, redirs
+        if words or redirs:
+            commands.append((words, redirs))
+        words, redirs = [], []
+
+    i = 0
+    while i < len(toks):
+        kind, text = toks[i]
+        if kind == "w" and text in ("{", "}"):
+            push()  # accolade de groupe / de scriptblock (`ForEach-Object { rm $_ }`)
+        elif kind == "w":
+            words.append(text)
+        elif text in _REDIR_OUT or text in _REDIR_IN:
+            if i + 1 < len(toks) and toks[i + 1][0] == "w":
+                target = toks[i + 1][1]
+                i += 1
+                if text in _REDIR_OUT and not (
+                    text == ">&" and (target == "-" or target.isdigit())
+                ):
+                    redirs.append((text, target))
+        else:
+            push()
+        i += 1
+    push()
+    return commands, subs
+
+
+def _tmp_roots() -> list[Path]:
+    roots: list[Path] = []
+    for raw in (tempfile.gettempdir(), os.environ.get("TMPDIR"), "/tmp"):
+        if raw:
+            try:
+                r = Path(raw).resolve()
+            except (OSError, ValueError):
+                continue
+            if r not in roots and len(r.parts) > 1:
+                roots.append(r)
+    return roots
+
+
+def _allowed_target(target: str, root: Path, battle_id: str | None, ps: bool = False) -> bool:
+    """True si une gate peut ecrire ici (C2-B) : `/dev/null` (`$null` en PowerShell), un
+    `*.log` directement dans `.legion/battles/<active>/` (hors `ci-failed-*`), ou un chemin
+    absolu sous le dossier temporaire du systeme, hors du depot. Cible non resolue
+    (`$`, backtick, glob, `~`) -> False."""
+    if target == "/dev/null" or (ps and target.casefold() == "$null"):
+        return True
+    if not target or any(ch in target for ch in "$`*?{") or target.startswith("~"):
+        return False
+    try:
+        raw = Path(target)
+        resolved = (raw if raw.is_absolute() else root / raw).resolve()
+        root_res = root.resolve()
+    except (OSError, ValueError):
+        return False
+    if battle_id:
+        battle_dir = root_res / ".legion" / "battles" / battle_id
+        name = resolved.name.casefold()
+        if (
+            resolved.parent == battle_dir
+            and name.endswith(".log")
+            and not name.startswith("ci-failed-")
+        ):
+            return True
+    if Path(target).is_absolute():
+        try:
+            resolved.relative_to(root_res)
+            return False  # sous le depot
+        except ValueError:
+            pass
+        for tmp in _tmp_roots():
+            try:
+                rel = resolved.relative_to(tmp)
+            except ValueError:
+                continue
+            if rel.parts:  # pas le dossier temporaire lui-meme
+                return True
+    return False
+
+
+def _non_options(args: list[str]) -> list[str]:
+    out: list[str] = []
+    rest = False
+    for a in args:
+        if rest:
+            out.append(a)
+        elif a == "--":
+            rest = True
+        elif not (a.startswith("-") and len(a) > 1):
+            out.append(a)
+    return out
+
+
+def _flag_block_has(arg: str, flag: str, stops: str) -> bool:
+    """True si `arg` est un bloc de flags courts (`-pi`, `-Ei`, `-i.bak`) contenant `flag`,
+    avant une option qui prend le reste du jeton comme argument (`stops`)."""
+    if not arg.startswith("-") or arg.startswith("--"):
+        return False
+    for ch in arg[1:]:
+        if ch == flag:
+            return True
+        if ch in stops or not (ch.isalnum()):
+            return False
+    return False
+
+
+def _git_config_writes(rest: list[str]) -> bool:
+    """True si `git config ...` ecrit (config locale : fsmonitor, hooksPath, excludesFile...).
+    Formes de lecture : `--get*`, `--list`/`-l`, une seule cle (`--show-*` ne suffit pas)."""
+    if rest and rest[0] in _GIT_CONFIG_SUBCMD_WRITE:
+        return True
+    if any(a.startswith(_GIT_CONFIG_WRITE) for a in rest):
+        return True
+    if any(a.startswith(_GIT_CONFIG_READ) for a in rest):
+        return False
+    return len(_non_options(rest)) >= 2  # `git config <cle> <valeur>`
+
+
+def _git_subcommand(args: list[str]) -> tuple[str | None, list[str]]:
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _GIT_OPT_ARG:
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            return a, args[i + 1 :]
+    return None, []
+
+
+def _command_name(word: str, ps: bool) -> str:
+    """Nom de commande : basename, sans `.exe` ; en PowerShell, insensible a la casse."""
+    name = os.path.basename(word.replace("\\", "/"))
+    if name.casefold().endswith(".exe"):
+        name = name[:-4]
+    return name.casefold() if ps else name
+
+
+def _tar_extracts(args: list[str]) -> bool:
+    for k, a in enumerate(args):
+        if a in ("--extract", "--get") or a.startswith("--to-command"):
+            return True
+        if a.startswith("--"):
+            continue
+        if a.startswith("-") and "x" in a[1:].split("=")[0] and len(a) > 1:
+            return True
+        if k == 0 and not a.startswith("-") and a.isalpha() and "x" in a:
+            return True  # forme ancienne : `tar xzf a.tgz`
+    return False
+
+
+_SED_WRITE = re.compile(r"(?:/[gpIiMmeE0-9]*w[ \t]*\S)|(?:(?:^|[;{}\n])[ \t]*(?:\d+|\$|/[^/\n]*/)?[ \t]*w[ \t]+\S)")
+
+
+def _argv_hits(words: list[str], ps: bool, root: Path, battle_id: str | None) -> list[str]:
+    """Motifs d'ecriture d'une commande simple (mots deja decoupes)."""
+    hits: list[str] = []
+    i, via_xargs = 0, False
+    while i < len(words):
+        w = words[i]
+        if _ASSIGN.match(w):
+            i += 1
+            continue
+        key = _command_name(w, ps)   # basename : `/usr/bin/env rm x` == `env rm x`
+        if key not in _PREFIXES:
+            break
+        via_xargs = via_xargs or key == "xargs"
+        takes = _PREFIXES[key]
+        i += 1
+        while i < len(words) and words[i].startswith("-") and len(words[i]) > 1:
+            i += 2 if words[i] in takes else 1
+        if key == "timeout" and i < len(words):
+            i += 1  # duree
+    if i >= len(words):
+        return hits
+    name = _command_name(words[i], ps)
+    args = words[i + 1 :]
+
+    def all_allowed(items: list[str]) -> bool:
+        return all(_allowed_target(a, root, battle_id, ps) for a in items)
+
+    if name in _FILE_CMDS:
+        nonopt = _non_options(args)
+        if via_xargs or (nonopt and not all_allowed(nonopt)):
+            hits.append(name)
+    elif name == "tee":
+        nonopt = _non_options(args)
+        if nonopt and not all_allowed(nonopt):
+            hits.append("tee")
+    elif name == "sed":
+        if any(a.startswith("--in-place") or _flag_block_has(a, "i", "efl") for a in args):
+            hits.append("sed -i")
+        elif any(_SED_WRITE.search(a) for a in _non_options(args)):
+            hits.append("sed w")
+    elif name == "dd":
+        if any(a.startswith("of=") and not _allowed_target(a[3:], root, battle_id, ps)
+               for a in args):
+            hits.append("dd of=")
+    elif name in ("install", "rsync", "patch"):
+        if not any(a in ("--dry-run", "-n", "--list-only") for a in args):
+            hits.append(name)
+    elif name == "unzip":
+        if not any(a in ("-l", "-t", "-p", "-Z", "-v") for a in args):
+            hits.append("unzip")
+    elif name in ("tar", "bsdtar"):
+        if _tar_extracts(args):
+            hits.append("tar -x")
+    elif name == "curl":
+        for k, a in enumerate(args):
+            tgt = None
+            if a in ("-o", "--output") and k + 1 < len(args):
+                tgt = args[k + 1]
+            elif a.startswith("--output="):
+                tgt = a[9:]
+            elif a in ("-O", "--remote-name", "--remote-name-all", "-J"):
+                tgt = ""
+            if tgt is not None and not _allowed_target(tgt, root, battle_id, ps):
+                hits.append("curl -o")
+                break
+    elif name == "wget":
+        tgt = None
+        for k, a in enumerate(args):
+            if a in ("-O", "--output-document") and k + 1 < len(args):
+                tgt = args[k + 1]
+            elif a.startswith("--output-document="):
+                tgt = a[len("--output-document="):]
+        if "--spider" not in args and (tgt is None or (
+                tgt != "-" and not _allowed_target(tgt, root, battle_id, ps))):
+            hits.append("wget")
+    elif name == "perl":
+        if any(_flag_block_has(a, "i", "eEMmIxdDCVF") for a in args):
+            hits.append("perl -i")
+    elif name == "git":
+        sub, rest = _git_subcommand(args)
+        if sub in _GIT_BLOCKED:
+            hits.append(f"git {sub}")
+        elif sub == "config" and _git_config_writes(rest):
+            hits.append("git config")
+        elif sub == "branch" and any(a in _GIT_BRANCH_WRITE or a.startswith("--set-upstream")
+                                     for a in rest):
+            hits.append("git branch")
+        elif sub == "tag" and any(a in _GIT_TAG_WRITE for a in rest):
+            hits.append("git tag")
+        elif sub == "hash-object" and any(a == "-w" or (a.startswith("-") and not a.startswith("--")
+                                                        and "w" in a[1:]) for a in rest):
+            hits.append("git hash-object -w")
+        elif sub == "stash" and (not rest or rest[0] not in ("list", "show")):
+            hits.append("git stash")
+        elif sub == "apply" and not any(a in _GIT_APPLY_READONLY for a in rest):
+            hits.append("git apply")
+        elif sub == "worktree" and rest and rest[0] in _GIT_WORKTREE_BLOCKED:
+            hits.append(f"git worktree {rest[0]}")
+    elif name == "dotnet":
+        nonopt = _non_options(args)
+        sub = nonopt[0] if nonopt else None
+        if sub == "format" and not any(a.startswith("--verify-no-changes") for a in args):
+            hits.append("dotnet format sans --verify-no-changes")
+        elif sub in _DOTNET_BLOCKED:
+            hits.append(f"dotnet {sub}")
+    elif name in _PKG_MANAGERS:
+        nonopt = _non_options(args)
+        if nonopt and nonopt[0] in _PKG_BLOCKED:
+            hits.append(f"{name} {nonopt[0]}")
+    elif re.fullmatch(r"pip[0-9.]*", name):
+        nonopt = _non_options(args)
+        if nonopt and nonopt[0] == "install":
+            hits.append("pip install")
+    elif re.fullmatch(r"(python|py)[0-9.]*", name):
+        for k, a in enumerate(args[:-1]):
+            if a == "-m" and args[k + 1] == "pip" and "install" in args[k + 2 :]:
+                hits.append("pip install")
+                break
+    elif name == "find":
+        if "-delete" in args:
+            hits.append("find -delete")
+        for k, a in enumerate(args):
+            if a in ("-exec", "-execdir", "-ok", "-okdir"):
+                sub_words: list[str] = []
+                for b in args[k + 1 :]:
+                    if b in (";", "+"):
+                        break
+                    sub_words.append(b)
+                hits.extend(_argv_hits(sub_words, ps, root, battle_id))
+    if ps and name in _PS_CMDLETS:
+        hits.append(words[i])
+    if ps and any(a.casefold() in ("-outfile", "-filepath", "-literalpath") for a in args) \
+            and name not in _PS_CMDLETS and name in ("invoke-webrequest", "iwr", "invoke-restmethod",
+                                                    "irm", "curl", "wget"):
+        hits.append(words[i] + " -OutFile")
+    return hits
+
+
+def _command_hits(
+    command: str, ps: bool, root: Path, battle_id: str | None, depth: int = 0
+) -> list[str]:
+    """Libelles des motifs d'ecriture trouves dans `command` (liste vide = rien a signaler).
+
+    Leve `ValueError` si la commande n'est pas analysable (quote non fermee...) : l'appelant ferme.
+    """
+    if depth > _MAX_SUBST_DEPTH:
+        raise ValueError("substitutions trop imbriquees")
+    hits: list[str] = []
+    commands, subs = _split_simple_commands(command, ps)
+    for words, redirs in commands:
+        for op, target in redirs:
+            if not _allowed_target(target, root, battle_id, ps):
+                hits.append(f"redirection `{op} {target}`")
+        hits.extend(_argv_hits(words, ps, root, battle_id))
+    for sub in subs:
+        hits.extend(_command_hits(sub, ps, root, battle_id, depth + 1))
+    return hits
+
+
+def _shell_write_hits(
+    command: str, shell: str, root: Path, battle_id: str | None
+) -> list[str]:
+    """Motifs d'ecriture (dedoublonnes, ordre stable) d'une commande `Bash` / `PowerShell`."""
+    ps = shell == "PowerShell"
+    hits = _command_hits(command, ps, root, battle_id)
+    if ps and _PS_IO_FILE.search(command):
+        hits.append("[IO.File]::Write*")
+    return list(dict.fromkeys(hits))
+
+
+def _shell_decision(data: dict, repo_root: Path) -> tuple[int, str]:
+    """Decision pour un appel `Bash` / `PowerShell` (routee AVANT toute lecture du guard).
+
+    Seules les gates sont filtrees : la session principale et le builder ne passent jamais
+    par `_load_active_guard` (un bloc `guard` invalide ne doit pas bloquer leur shell, cf.
+    la reparation `set-guard`) ; leur perimetre d'ecriture est controle par l'empreinte de l'arbre.
+    """
+    if _IMPORT_ERROR is not None:
+        fallback = _fallback_decision(data, repo_root)
+        return fallback if fallback is not None else (0, "")  # session principale : silencieux
+    agent_type = data.get("agent_type")
+    if agent_type not in GATE_ARTIFACT:
+        return 0, ""
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return 2, (
+            f"BLOQUE : la gate `{agent_type}` a lance un appel shell sans commande lisible "
+            f"(fail-closed)."
+        )
+    battle_id = active_battle_id(repo_root)
+    try:
+        hits = _shell_write_hits(command, str(data.get("tool_name")), repo_root, battle_id)
+    except ValueError as exc:
+        return 2, (
+            f"BLOQUE : la gate `{agent_type}` a lance une commande non analysable ({exc}). "
+            f"Simplifie-la (une gate n'ecrit pas par shell)."
+        )
+    if not hits:
+        return 0, ""
+    shown = command if len(command) <= 200 else command[:200] + "..."
+    return 2, (
+        f"BLOQUE : la gate `{agent_type}` ne peut pas ecrire par shell "
+        f"(motif : {'; '.join(hits)}).\nCommande : `{shown}`\n"
+        f"Une ecriture hors de son artefact fait PERDRE le verdict (battle.md §E, faute de gate).\n"
+        f"Cibles autorisees pour un log : /dev/null, le dossier temporaire du systeme (hors depot), "
+        f"`.legion/battles/<id>/*.log`."
+    )
+
+
 def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     """Retourne (exit_code, message). exit 2 = blocage."""
-    if data.get("tool_name") not in WRITE_TOOLS:
+    tool_name = data.get("tool_name")
+    if tool_name in SHELL_TOOLS:
+        # Route AVANT `_load_active_guard` et la logique d'ecriture (cf. `_shell_decision`).
+        return _shell_decision(data, repo_root)
+    if tool_name not in WRITE_TOOLS:
         return 0, ""
 
     file_path = (data.get("tool_input") or {}).get("file_path", "")
@@ -749,6 +1453,317 @@ def _t_guard_repair_messages(bs) -> None:
             assert "battle.json" in msg and ".legion/active-battle" in msg, (raw[:8], msg)
 
 
+def _shell_repo(bs, root: Path, guard_json: str | None = None) -> None:
+    (root / ".legion" / "battles" / "B").mkdir(parents=True)
+    bs._write_pointer(root, "B")
+    body = "{}" if guard_json is None else '{"guard":' + guard_json + "}"
+    (root / ".legion" / "battles" / "B" / "battle.json").write_text(body, encoding="utf-8")
+
+
+def _sh(cmd, root: Path, agent: str = "legion:lint", tool: str = "Bash") -> tuple[int, str]:
+    return _decide({"tool_name": tool, "agent_type": agent, "tool_input": {"command": cmd}}, root)
+
+
+def _t_shell_blocked(bs) -> None:
+    """G1/G2/G4/G5 : ecritures de gate bloquees, motif nomme dans le message."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        _shell_repo(bs, root)
+        blocked = {
+            "echo x > src/a.cs": "redirection",
+            "sed -i 's/a/b/' f": "sed -i",
+            "sed -Ei 's/a/b/' f": "sed -i",
+            "sed --in-place s/a/b/ f": "sed -i",
+            "sed -i.bak s/a/b/ f": "sed -i",
+            "perl -pi -e 's/a/b/' f": "perl -i",
+            "git checkout -- f": "git checkout",
+            "git -C . add f": "git add",
+            "git -c core.x=1 --no-pager commit -m x": "git commit",
+            "git stash": "git stash",
+            "git stash push": "git stash",
+            "git apply p.diff": "git apply",
+            "git update-index --assume-unchanged f": "git update-index",
+            "git worktree add ../w": "git worktree add",
+            "dotnet format": "dotnet format",
+            "dotnet format whitespace": "dotnet format",
+            "dotnet new console": "dotnet new",
+            "npm install": "npm install",
+            "pip install x": "pip install",
+            "python -m pip install x": "pip install",
+            "rm f": "rm",
+            "cp a b": "cp",
+            "mkdir out": "mkdir",
+            "tee src/x": "tee",
+            "cmd >> src/x": "redirection",
+            "cmd >| src/x": "redirection",
+            "cmd &> src/x": "redirection",
+            "cmd 2> src/x": "redirection",
+            "echo a\nrm x": "rm",
+            "(rm x)": "rm",
+            "echo $(rm x)": "rm",
+            'echo "$(rm x)"': "rm",
+            "echo `rm x`": "rm",
+            "find . -exec rm {} \\;": "rm",
+            "find . -delete": "find -delete",
+            "xargs rm": "rm",
+            "ls | xargs -n1 rm": "rm",
+            "sudo rm x": "rm",
+            "sudo -u me rm x": "rm",
+            "/bin/rm x": "rm",
+            "\\rm x": "rm",
+            "FOO=1 rm x": "rm",
+            "env A=1 rm x": "rm",
+            "time rm x": "rm",
+            "for f in a; do rm $f; done": "rm",
+            "true && rm x": "rm",
+            "true || rm x": "rm",
+            "{ rm x; }": "rm",
+            "cmd > $OUT": "redirection",
+            'cmd > "$(mktemp)"': "redirection",
+            'rm -rf "$TMP/x"': "rm",
+            "cmd > /tmp/../etc/x": "redirection",
+            "cmd > .legion/battles/B/battle.json": "redirection",
+            "cmd > .legion/active-battle": "redirection",
+            "cmd > .legion/battles/B/gate-review.md": "redirection",
+            "cmd > .legion/battles/B/ci-failed-1.log": "redirection",
+            "cmd > .legion/battles/AUTRE/x.log": "redirection",
+            "cmd > .legion/battles/B/sub/x.log": "redirection",
+            "cmd > *.log": "redirection",
+            "cmd > ~/x": "redirection",
+            "echo 'unclosed": "non analysable",
+            'echo "unclosed': "non analysable",
+            "echo $(rm x": "non analysable",
+            # auto-correction 1 (security + review)
+            "git config core.fsmonitor /tmp/x": "git config",
+            "git config --local core.trustctime false": "git config",
+            "git config --unset core.fsmonitor": "git config",
+            "git config set core.hooksPath h": "git config",
+            "git config --add x y": "git config",
+            "git update-ref HEAD abc": "git update-ref",
+            # auto-correction 2 : --show-scope ecrit ; briques d'ecriture d'etat git
+            "git config --show-scope core.fsmonitor x": "git config",
+            "git config --show-origin a b": "git config",
+            "git commit-tree abc -m x": "git commit-tree",
+            "git mktree": "git mktree",
+            "git hash-object -w f": "git hash-object -w",
+            "git notes add -m x": "git notes",
+            "git maintenance register": "git maintenance",
+            "git replace a b": "git replace",
+            "git branch -f main abc": "git branch",
+            "git tag -f v1": "git tag",
+            "dd of=src/a.cs if=x": "dd of=",
+            "install a src/b": "install",
+            "rsync -a x src/": "rsync",
+            "patch -p1 < x.diff": "patch",
+            "tar -xf a.tgz": "tar -x",
+            "tar xzf a.tgz": "tar -x",
+            "unzip a.zip": "unzip",
+            "curl -o src/a http://x": "curl -o",
+            "curl -O http://x/a": "curl -o",
+            "wget -O src/a http://x": "wget",
+            "wget http://x/a": "wget",
+            "sed 's/a/b/w src/a' f": "sed w",
+            "sed -n '/x/w out.txt' f": "sed w",
+            "/usr/bin/env rm x": "rm",
+            "/usr/bin/sudo rm x": "rm",
+            "cat <<EOF\n$(rm x)\nEOF": "rm",
+            "cat <<EOF\n`rm x`\nEOF": "rm",
+            "cat <<EOF\nok\nEOF\nrm y": "rm",
+            "echo $((1<<X))\nrm -rf src\nX": "rm",
+        }
+        for cmd, motif in blocked.items():
+            code, msg = _sh(cmd, root)
+            assert code == 2 and motif in msg and "legion:lint" in msg, (cmd, code, msg)
+            assert motif == "non analysable" or "PERDRE" in msg, (cmd, msg)
+        for cmd in ("Set-Content f x", "sc f x", "Out-File f", "echo x > f", "set-content f x",
+                    "Remove-Item -Recurse f", "[IO.File]::WriteAllText('a','b')",
+                    "[System.IO.File]::AppendAllText('a','b')", "ni f", "git commit -m x",
+                    "dotnet format", "1..3 | ForEach-Object { rm $_ }"):
+            code, msg = _sh(cmd, root, tool="PowerShell")
+            assert code == 2, (cmd, code, msg)
+        for cmd in ("Set-Con`tent f x", "Tee-Object -FilePath f", "Export-Csv f", "Set-Item f x",
+                    "Invoke-WebRequest http://x -OutFile src/a", "iwr http://x -OutFile a",
+                    "& 'C:\\Windows\\System32\\Set-Content' f"):
+            code, msg = _sh(cmd, root, tool="PowerShell")
+            assert code == 2, (cmd, code, msg)
+        assert _sh("Set-Content f x", root)[0] == 0   # cmdlet PowerShell : sans effet sous Bash
+        assert "IO.File" in _sh("[IO.File]::WriteAllText('a','b')", root, tool="PowerShell")[1]
+
+
+def _t_shell_allowed(bs) -> None:
+    """G3 : commandes reelles des gates (faux positifs) -> exit 0."""
+    with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+        root = Path(d)
+        _shell_repo(bs, root)
+        tmp = out.replace("\\", "/")
+        allowed = [
+            "dotnet test", "dotnet build", "dotnet build -c Release --no-restore 2>&1",
+            "dotnet test --no-build --logger 'trx;LogFileName=x.trx'",
+            "dotnet format --verify-no-changes --include a.cs",
+            "dotnet format whitespace --verify-no-changes",
+            "dotnet list package --vulnerable", "dotnet restore",
+            "git log", "git log --oneline -5", "git diff", "git diff --stat HEAD~1", "git show HEAD",
+            "git status", "git status --porcelain", "git stash list", "git stash show -p",
+            "git blame f", "git grep x", "git rev-parse HEAD", "git -C . log", "git apply --check p",
+            "git worktree list", "git branch --show-current", "git ls-files",
+            'grep -rn "a>b" src', "grep -rn 'a > b' src", 'grep ">" f', "grep rm f",
+            "git log --format='%h > %s'", "cat f | grep x | wc -l",
+            "cmd 2>&1", "cmd >&2", "cmd 1>&2", "cmd > /dev/null", "cmd 2>/dev/null",
+            "cmd &> /dev/null", "cmd > /dev/null 2>&1", "cmd >> /dev/null",
+            "cmd > .legion/battles/B/x.log", "cmd 2>&1 | tee .legion/battles/B/run.log",
+            "cmd > ./.legion/battles/B/x.log 2>&1", "cmd < input.txt", "cat <<< hello",
+            "python - <<'EOF'\nprint(1 > 0)\nx = a > b\nEOF",
+            "cat <<EOF\nrm x > y\nEOF",
+            "python - <<-EOF\n\trm x > y\n\tEOF\necho done",
+            f"mkdir -p {tmp}/x", f"cmd > {tmp}/o.txt", f"rm -rf {tmp}/x",
+            f"touch {tmp}/t", f"tee {tmp}/t", "rm -f /dev/null",
+            "ls -la", "echo done # rm x > y", "echo 'a; rm x'", 'echo "a && rm x"',
+            "echo $((1 + 2))", "x=$(git rev-parse HEAD)", "echo $(git log -1)",
+            "sed -n '1,5p' f", "sed -e 's/a/b/' f", "sed 's/i/x/' f", "sed -es/i/x/ f",
+            "perl -e 'print 1'", "perl -Mstrict -e 1", "find . -name '*.cs'", "find . -exec grep x {} +",
+            "git diff > /dev/null", "python -m pytest", "python -m pip list", "pip list",
+            "npm test", "npm run build", "npm list", "yarn test",
+            "cd src && ls", "cd . && git status", "echo a\ngit status", "test -f x || echo no",
+            "ls \\\n  -la", "diff <(git show HEAD:f) f", "cmd 2> >(cat)",
+            # auto-correction 1 : formes de lecture des commandes nouvellement filtrees
+            "git config --get core.fsmonitor", "git config --list", "git config -l",
+            "git config --local --list", "git config user.name", "git config --get-all x",
+            "git config --show-origin --list", "git config --show-scope --get x",
+            "git hash-object f", "git branch -a", "git branch --list",
+            "git tag", "git tag -l", "git tag --list 'v*'", "git remote -v",
+            f"curl -o {tmp}/a http://x", "curl -s http://x", f"wget -O {tmp}/a http://x",
+            "wget -O - http://x", "tar -tf a.tgz", "tar -cf /dev/null x", "unzip -l a.zip",
+            "patch --dry-run -p1 < x.diff", "dd if=a of=/dev/null", f"dd if=a of={tmp}/o",
+            "sed -n 's/a/b/p' f", "sed '1d' f",
+            "cat <<EOF\n$HOME `date` \\$(rm x)\nEOF", "cat <<'EOF'\n$(rm x)\nEOF",
+            "cat <<\\EOF\n$(rm x)\nEOF", "echo $((1<<3))", "echo $((1 << 3))\nls",
+            "cat <<EOF\n$(git rev-parse HEAD)\nEOF",
+        ]
+        for cmd in allowed:
+            code, msg = _sh(cmd, root)
+            assert code == 0 and msg == "", (cmd, code, msg)
+        for cmd in ("Get-ChildItem C:\\repo\\src", "git status 2>&1", "dotnet test > $null",
+                    "Write-Output 'a > b'",
+                    "git log --format='%h > %s'"):
+            code, msg = _sh(cmd, root, tool="PowerShell")
+            assert code == 0 and msg == "", (cmd, code, msg)
+        # cible temporaire = dossier temporaire lui-meme, ou sous le depot : bloque
+        for cmd in (f"rm -rf {Path(out).parent}", f"cmd > {root}/src/a.cs", f"cmd > {root}/.legion/x.log"):
+            assert _sh(cmd, root)[0] == 2, cmd
+
+
+def _t_shell_pure() -> None:
+    """Fonctions pures : heredocs, decoupage, cibles."""
+    assert _strip_heredocs("cat <<'E'\nx > y\nE\nls") == "cat <<'E'\nls"
+    assert _strip_heredocs("cat <<E\nx\nE") == "cat <<E"
+    assert _strip_heredocs("echo '<<X'\nrm x\nX") == "echo '<<X'\nrm x\nX"  # << quote : pas un heredoc
+    assert _strip_heredocs("cat <<A <<B\n1\nA\n2\nB\nls") == "cat <<A <<B\nls"
+    assert _strip_heredocs("cat <<E\n$(rm x)\nE") == "cat <<E\n$(rm x)"     # non quote : reinjecte
+    assert _strip_heredocs("cat <<'E'\n$(rm x)\nE") == "cat <<'E'"           # quote : litteral
+    assert _strip_heredocs("cat <<\\E\n$(rm x)\nE") == "cat <<\\E"
+    assert _strip_heredocs("cat <<E\n\\$(rm x)\nE") == "cat <<E"            # `\$` litteral
+    assert _find_heredocs("echo $((1<<X))") == [] and _find_heredocs("(( a << 2 ))") == []
+    assert _find_heredocs("cat <<E") == [("E", False, False)]
+    assert _find_heredocs("cat <<-'E'") == [("E", True, True)]
+    assert _command_name("/usr/bin/env", False) == "env" and _command_name("SUDO.exe", True) == "sudo"
+    cmds, subs = _split_simple_commands("a 2>&1 | b >o.txt; c > /dev/null && d $(e f)")
+    assert [w for w, _ in cmds] == [["a"], ["b"], ["c"], ["d", "$SUB"]], cmds
+    assert cmds[1][1] == [(">", "o.txt")] and cmds[0][1] == [] and subs == ["e f"], (cmds, subs)
+    assert _split_simple_commands('grep ">" f')[0] == [(["grep", ">", "f"], [])]
+    assert _split_simple_commands("echo a\nrm x")[0] == [(["echo", "a"], []), (["rm", "x"], [])]
+    assert _split_simple_commands("echo a # b > c")[0] == [(["echo", "a"], [])]
+    assert _split_simple_commands("cmd >&2")[0] == [(["cmd"], [])]
+    assert _split_simple_commands("cmd >& out")[0] == [(["cmd"], [(">&", "out")])]
+    assert _split_simple_commands("dir C:\\a\\b", ps=True)[0] == [(["dir", "C:\\a\\b"], [])]
+    try:
+        _split_simple_commands("echo 'x")
+        raise AssertionError("quote non fermee doit lever ValueError")
+    except ValueError:
+        pass
+    root = Path("/nonexistent-root")
+    assert _allowed_target("/dev/null", root, "B") and not _allowed_target("$null", root, "B")
+    assert _allowed_target("$null", root, "B", ps=True)
+    assert _allowed_target(".legion/battles/B/x.log", root, "B")
+    assert not _allowed_target(".legion/battles/B/x.log", root, None)
+    assert not _allowed_target(".legion/battles/B/x.LOG.md", root, "B")
+    assert not _allowed_target(".legion/battles/B/CI-FAILED-2.log", root, "B")
+    assert not _allowed_target("", root, "B") and not _allowed_target("a*b", root, "B")
+
+
+def _t_shell_routing(bs) -> None:
+    """G6-G10 : routage avant le guard, non-gates libres, fail-closed, bypass, hooks.json."""
+    for guard_json in (None, '["x"]', '"x"', '{"allow":"src/**"}'):   # G7 : bloc invalide
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _shell_repo(bs, root, guard_json)
+            for agent in ("claude", "legion:builder", "some:other", None):
+                for cmd in ("rm -rf src", "git commit -m x", "echo > src/a"):
+                    ev = {"tool_name": "Bash", "tool_input": {"command": cmd}}
+                    if agent is not None:
+                        ev["agent_type"] = agent
+                    assert _decide(ev, root) == (0, ""), (guard_json, agent, cmd)
+            assert _sh("rm x", root)[0] == 2 and _sh("git status", root)[0] == 0
+    with tempfile.TemporaryDirectory() as d:   # battle.json illisible
+        root = Path(d)
+        _shell_repo(bs, root)
+        (root / ".legion" / "battles" / "B" / "battle.json").write_text("{oops", encoding="utf-8")
+        assert _sh("rm -rf src", root, agent="claude")[0] == 0
+        assert _sh("git commit", root, agent="legion:builder")[0] == 0
+        assert _sh("rm x", root, agent="legion:reviewer")[0] == 2
+        assert _sh("git log", root, agent="legion:reviewer")[0] == 0
+    with tempfile.TemporaryDirectory() as d:   # pas de battle active : la gate reste filtree
+        root = Path(d)
+        for agent in GATE_ARTIFACT:
+            assert _sh("echo x > src/a", root, agent=agent)[0] == 2, agent
+            assert _sh("cmd > .legion/battles/B/x.log", root, agent=agent)[0] == 2, agent
+            assert _sh("cmd > /dev/null", root, agent=agent)[0] == 0, agent
+        # G9 : tool_input absent / command non-str -> 2
+        for ti in (None, {}, {"command": None}, {"command": 5}, {"command": ["rm"]}, "rm x"):
+            ev = {"tool_name": "Bash", "agent_type": "legion:lint"}
+            if ti is not None:
+                ev["tool_input"] = ti
+            assert _decide(ev, root)[0] == 2, ti
+        assert _decide({"tool_name": "Bash", "agent_type": "legion:builder"}, root)[0] == 0
+        assert _sh("", root)[0] == 0
+        # exception injectee dans _shell_decision -> _safe_decide : 2, jamais 1
+        global _shell_decision
+        real = _shell_decision
+        try:
+            def boom(data, r):
+                raise RuntimeError("injecte")
+            _shell_decision = boom
+            code, msg = _safe_decide({"tool_name": "Bash", "agent_type": "legion:lint"}, root)
+            assert code == 2 and "injecte" in msg, (code, msg)
+        finally:
+            _shell_decision = real
+        # G10 : bypass via main() ; payload illisible non contournable
+        payload = json.dumps({"tool_name": "Bash", "agent_type": "legion:lint",
+                              "tool_input": {"command": "rm x"}})
+        saved_env, saved_cwd = os.environ.get("LEGION_GUARD_OFF"), os.getcwd()
+        os.environ.pop("LEGION_GUARD_OFF", None)
+        os.chdir(root)   # main() decide depuis le cwd du hook
+        try:
+            code, err = _run_main(payload)
+            assert code == 2 and "ne peut pas ecrire par shell" in err.getvalue(), (code, err.getvalue())
+            os.environ["LEGION_GUARD_OFF"] = "1"
+            code, err = _run_main(payload)
+            assert code == 0 and "[guard bypass]" in err.getvalue(), (code, err.getvalue())
+            code, _ = _run_main("{oops")   # payload illisible : pas de bypass
+            assert code == 2
+        finally:
+            os.chdir(saved_cwd)
+            if saved_env is None:
+                os.environ.pop("LEGION_GUARD_OFF", None)
+            else:
+                os.environ["LEGION_GUARD_OFF"] = saved_env
+    # G11 : hooks.json branche guard.py ET careful.py sur Bash|PowerShell
+    hooks = json.loads((Path(__file__).resolve().parent / "hooks.json").read_text(encoding="utf-8"))
+    entry = [e for e in hooks["hooks"]["PreToolUse"] if e["matcher"] == "Bash|PowerShell"]
+    assert len(entry) == 1, entry
+    cmds = [h["command"] for h in entry[0]["hooks"]]
+    assert any("hooks/guard.py" in c for c in cmds) and any("hooks/careful.py" in c for c in cmds), cmds
+
+
 def _self_test() -> int:
     global _IMPORT_ERROR
     if _IMPORT_ERROR is not None:
@@ -863,7 +1878,11 @@ def _self_test() -> int:
             code, msg = _decide({**_w, "agent_type": "claude",
                                  "tool_input": {"file_path": ".legion/battles/B/battle.json"}}, _root)
             assert code == 0 and "/freeze non applique" in msg, (code, msg)
-            assert _decide({"tool_name": "Bash", "agent_type": "legion:reviewer"}, _root)[0] == 0
+            # Bash en repli (GH#66) : gate et builder fermes, session principale silencieuse
+            _bash = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
+            assert _decide({**_bash, "agent_type": "legion:reviewer"}, _root)[0] == 2
+            assert _decide({**_bash, "agent_type": "legion:builder"}, _root)[0] == 2
+            assert _decide({**_bash, "agent_type": "claude"}, _root) == (0, "")
     finally:
         _IMPORT_ERROR = saved
 
@@ -884,6 +1903,10 @@ def _self_test() -> int:
     _t_guard_stdin_undecodable()
     _t_guard_main_no_exit_1()
     _t_guard_repair_messages(battle_state)
+    _t_shell_pure()
+    _t_shell_blocked(battle_state)
+    _t_shell_allowed(battle_state)
+    _t_shell_routing(battle_state)
 
     print("OK: guard self-test passed", file=sys.stderr)
     return 0

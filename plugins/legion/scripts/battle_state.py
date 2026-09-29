@@ -744,6 +744,41 @@ def guard_of(battle) -> tuple[dict | None, bool]:
     return guard, True
 
 
+def glob_to_regex(pattern: str) -> "re.Pattern[str]":
+    """Traduit un glob (`**`, `*`, `?`) en regex ancrée, en chemins posix.
+
+    Source unique du matcher de périmètre (GH#66) : `guard.py` et `artifact_check.py`
+    (`tree-verify --guard`) doivent matcher à l'identique.
+    """
+    pattern = pattern.replace("\\", "/")
+    out: list[str] = []
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "*":
+            if pattern[i : i + 2] == "**":
+                out.append(".*")
+                i += 2
+                if i < n and pattern[i] == "/":
+                    i += 1  # le .* couvre déjà le slash
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+def glob_match(rel_path: str, patterns) -> bool:
+    """True si `rel_path` (posix ou `\\`) matche au moins un glob de `patterns`."""
+    rel_path = rel_path.replace("\\", "/")
+    return any(glob_to_regex(p).search(rel_path) for p in patterns)
+
+
 def validate(battle) -> tuple[list[str], list[str]]:
     """Valide la structure. Champs inconnus tolérés. Retourne (errors, warnings)."""
     errors: list[str] = []
@@ -2242,6 +2277,23 @@ def _t_doc_profiles() -> None:
             assert cited == set(gates), (d.name, prof, sorted(cited ^ set(gates)))
 
 
+def _t_doc_tree_integrity() -> None:
+    root = Path(__file__).resolve().parents[1]
+    docs = [root / "commands/battle.md", root / "skills/battle-workflow/SKILL.md",
+            root / "ARCHITECTURE.md"]
+    if not all(d.is_file() for d in docs):
+        print("SKIP: _t_doc_tree_integrity (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    for d in docs:
+        text = d.read_text(encoding="utf-8")
+        assert "**6. Faute d'écriture d'une gate**" in text, f"cas 6 absent de {d.name}"
+    battle = docs[0].read_text(encoding="utf-8")
+    for needle in ("tree-snapshot", "tree-verify", "--fingerprint", "--guard", "--base"):
+        assert needle in battle, f"{needle!r} absent de battle.md"
+    assert "Bash non couvert" not in docs[2].read_text(encoding="utf-8")
+
+
 def _t_doc_abort_stale() -> None:
     root = Path(__file__).resolve().parents[1]
     battle_md, fleet_md = root / "commands/battle.md", root / "commands/fleet.md"
@@ -2552,7 +2604,22 @@ def _t_validate_delivery() -> None:
     assert any("delivery" in x for x in w("chaine"))
 
 
+def _t_glob_match() -> None:
+    m = glob_match
+    assert m("src/Billing.Api/Foo.cs", ["src/Billing.Api/**"])
+    assert m("tests/Bar.cs", ["tests/**"])
+    assert not m("src/Other/Foo.cs", ["src/Billing.Api/**"])
+    assert m("a/b.cs", ["a/*.cs"]) and not m("a/b/c.cs", ["a/*.cs"])
+    assert m("a/xb", ["a/?b"]) and not m("a/x/b", ["a/?b"])
+    assert m("x\\y.cs", ["x/*.cs"])                       # séparateur Windows
+    assert m(".legion/battles/x/battle.json", [".legion/**"])
+    assert m(".gitignore", [".gitignore"]) and not m("src/.gitignore", [".gitignore"])
+    assert m("a.b", ["a.b"]) and not m("axb", ["a.b"])     # `.` littéral
+    assert not m("x", []) and m("anything/deep/x", ["**"])
+
+
 _CORE_TESTS = (
+    _t_glob_match,
     _t_source_consistency, _t_unknown_phase_status, _t_verdict_status_coherence,
     _t_plan_requires_think, _t_build_refused_without_approval,
     _t_build_refused_plan_not_accepted, _t_approve_plan,
@@ -2573,7 +2640,7 @@ _CORE_TESTS = (
     _t_set_slices_replace_replan, _t_set_slices_replace_build_done, _t_set_slices_replace_invalidates_cascade,
     _t_replan_invalidates_cascade, _t_first_plan_no_invalidation_event,
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
-    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_abort_stale,
+    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_abort_stale,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,

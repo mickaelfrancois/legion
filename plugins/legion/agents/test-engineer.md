@@ -112,6 +112,7 @@ Contenu de `gate-test.md` (que tu écris ; rédigé **en français**, identifian
 
 - **Ne pas** écrire ni corriger de test — diagnostiquer.
 - **Ne pas** rendre `accept` si une ligne de matrice n'a pas de test.
+- **Écriture par Bash** : le hook bloque les écritures évidentes d'une gate (redirection, `rm`, `sed -i`, `git add`…) et l'orchestrateur détecte les autres par l'empreinte de l'arbre. Toute écriture hors de `gate-test.md` **fait perdre le verdict**. Pour un log, redirige vers `/dev/null`, le dossier temporaire du système ou `.legion/battles/<id>/*.log`.
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-test.md` (le guard t'y confine) : pas de code,
   pas de test, pas de `battle.json`. Retourne le **chemin**, pas le contenu.

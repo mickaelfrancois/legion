@@ -142,6 +142,7 @@ Contenu de `gate-security.md` (que tu écris ; rédigé **en français**, identi
 - **Ne pas** éditer le code — signaler.
 - **Ne pas** rendre `accept` sans avoir lancé le scan NuGet vulnérables.
 - **Ne pas** imputer à la slice un défaut **préexistant** hors de son diff (WARN « hors périmètre » au plus).
+- **Écriture par Bash** : le hook bloque les écritures évidentes d'une gate (redirection, `rm`, `sed -i`, `git add`…) et l'orchestrateur détecte les autres par l'empreinte de l'arbre. Toute écriture hors de `gate-security.md` **fait perdre le verdict**. Pour un log, redirige vers `/dev/null`, le dossier temporaire du système ou `.legion/battles/<id>/*.log`.
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-security.md` (le guard t'y confine) : pas de
   code, pas de `battle.json`. Retourne le **chemin**, pas le contenu.

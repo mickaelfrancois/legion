@@ -155,6 +155,7 @@ La gate `lint` est .NET-only ; la stack détectée n'est pas .NET. Aucune exécu
   slice n'a pas touché ne fonde **pas** un `revise` (imputation au diff, comme `reviewer`).
 - **Ne corrige pas** le formatage — diagnostique et reboucle (le `builder` reformate).
 - **Ne rends pas** `accept` si des fichiers restent à reformater (exit non-nul = `revise`).
+- **Écriture par Bash** : le hook bloque les écritures évidentes d'une gate (redirection, `rm`, `sed -i`, `git add`…) et l'orchestrateur détecte les autres par l'empreinte de l'arbre. Toute écriture hors de `gate-lint.md` **fait perdre le verdict**. Pour un log, redirige vers `/dev/null`, le dossier temporaire du système ou `.legion/battles/<id>/*.log`.
 - **Ne charge aucun** skill `dotnet-claude-kit`.
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-lint.md` (le guard t'y confine) : pas de code, pas

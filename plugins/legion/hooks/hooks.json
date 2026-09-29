@@ -16,6 +16,10 @@
           {
             "type": "command",
             "command": "$(command -v python || command -v python3) \"$CLAUDE_PLUGIN_ROOT/hooks/careful.py\""
+          },
+          {
+            "type": "command",
+            "command": "$(command -v python || command -v python3) \"$CLAUDE_PLUGIN_ROOT/hooks/guard.py\""
           }
         ]
       }
