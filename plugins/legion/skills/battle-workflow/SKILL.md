@@ -238,7 +238,7 @@ run time**):
   "run": {
     "mode": "autonomous",               // "autonomous" | "step"
     "autocorrect": {
-      "per_gate": {},                   // { "review": 1, "test": 0, … } — tentatives par gate
+      "per_gate": {},                   // { "review": 1, "test": 0, … } — tentatives par gate, indexées par CLÉ DE PHASE (lint|review|test|security), jamais par nom de gate
       "total": 0                        // compteur global de tentatives (plafond : 6 au global, maximum ferme)
     }
   },

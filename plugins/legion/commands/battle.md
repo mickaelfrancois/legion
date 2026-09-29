@@ -419,9 +419,15 @@ gate ran.
      d'auto-correction** :
 
      **Boucle d'auto-correction** (mode `autonomous` uniquement) :
-     a. Incrémenter `run.autocorrect.per_gate[<gate>]` et `run.autocorrect.total`.
+     a. Incrémenter `run.autocorrect.per_gate[<phase-key>]` et `run.autocorrect.total`.
+        La clé est la **clé de phase** (`lint` / `review` / `test` / `security` — même
+        mapping gate → phase que ci-dessus), **jamais** le nom de gate (`reviewer`,
+        `test-engineer`) : `scripts/eval.py` lit `per_gate.<phase>`.
+        Un `build_ok: false` survenu **pendant la correction d'une gate** compte sous la
+        clé de cette gate (c'est la même tentative). Un `build_ok: false` **hors de toute
+        gate** (premier build d'une slice, §D) compte sous la clé `build`.
      b. Vérifier les bornes **avant** de relancer :
-        - Si `run.autocorrect.per_gate[<gate>] >= 2` → **escalade** (cas 2 : plafond
+        - Si `run.autocorrect.per_gate[<phase-key>] >= 2` → **escalade** (cas 2 : plafond
           par gate atteint, 2 tentatives maximum).
         - Si `run.autocorrect.total >= 6` → **escalade** (cas 2 : plafond global
           atteint, 6 tentatives maximum au global).
