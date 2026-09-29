@@ -19,8 +19,9 @@ Source unique des listes de phases / gates / artefacts (importée par `fleet_syn
 
 Lecteurs partagés (hooks, GH#85), en lecture seule, sans exception : `active_battle_id(repo_root)
 -> str | None` (pointeur + liste blanche d'id, ne lit pas `battle.json`),
-`load_active_battle(repo_root) -> (id, dict) | None` (dict brut de `battle.json`) et
-`battles_dir(root)`.
+`load_active_battle(repo_root) -> (id, dict) | None` (dict brut de `battle.json`),
+`battles_dir(root)` et `guard_of(battle) -> (dict | None, bool)` (GH#104 : bloc `guard` et sa
+validité ; pur, ne lève jamais ; source unique de la forme valide, partagée avec `validate`).
 
 Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
@@ -583,6 +584,42 @@ def normalize(battle: dict) -> dict:
     return out
 
 
+def _guard_problem(guard) -> str | None:
+    """Diagnostic de forme du bloc `guard` (None = valide). Pur, ne lève jamais.
+
+    Valide : `None` (bloc null = absent, non armé) ou dict dont `allow` et `deny` sont
+    absents, null ou une liste de `str`.
+    Source unique de la règle, partagée par `guard_of` et `validate` (GH#104).
+    """
+    if guard is None:
+        return None
+    if not isinstance(guard, dict):
+        return f"guard n'est pas un objet ({type(guard).__name__})"
+    for key in ("allow", "deny"):
+        val = guard.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, list):
+            return f"guard.{key} n'est pas une liste ({type(val).__name__})"
+        if not all(isinstance(x, str) for x in val):
+            return f"guard.{key} contient un élément qui n'est pas une chaîne"
+    return None
+
+
+def guard_of(battle) -> tuple[dict | None, bool]:
+    """Bloc `guard` d'une battle et sa validité : `(guard, True)` ou `(None, False)`.
+
+    `guard` absent ou null (ou battle non-dict) -> `({}, True)` : bloc non armé.
+    Pur, ne lève jamais (GH#104).
+    """
+    if not isinstance(battle, dict) or battle.get("guard") is None:
+        return {}, True
+    guard = battle["guard"]
+    if _guard_problem(guard) is not None:
+        return None, False
+    return guard, True
+
+
 def validate(battle) -> tuple[list[str], list[str]]:
     """Valide la structure. Champs inconnus tolérés. Retourne (errors, warnings)."""
     errors: list[str] = []
@@ -631,6 +668,10 @@ def validate(battle) -> tuple[list[str], list[str]]:
                     seen.add(sid)
                 if s.get("status") not in STATUSES:
                     errors.append(f"slices[{i}].status invalide : {s.get('status')!r}")
+    if "guard" in battle:
+        problem = _guard_problem(battle["guard"])
+        if problem:
+            errors.append(problem)
     rg = battle.get("required_gates")
     if rg is not None:
         if not isinstance(rg, list):
@@ -719,7 +760,7 @@ def load_active_battle(repo_root: Path) -> tuple[str, dict] | None:
     try:
         path = _battle_dir(repo_root, battle_id) / "battle.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (_Refuse, OSError, ValueError):
+    except (_Refuse, OSError, ValueError, RecursionError):  # JSON trop imbrique = illisible
         return None
     if not isinstance(data, dict):
         return None
@@ -762,7 +803,7 @@ def _load(battle_dir: Path) -> dict:
         raise _Refuse(f"battle introuvable : {path}")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise _Refuse(f"battle.json illisible : {type(exc).__name__}: {exc}")
     if not isinstance(data, dict):
         raise _Refuse("battle.json illisible : la racine n'est pas un objet")
@@ -967,6 +1008,9 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
     if cmd == "set-guard":
         if args.allow is None and args.deny is None and args.careful is None:
             raise _Refuse("set-guard : aucune option (--allow, --deny ou --careful)")
+        repaired = not isinstance(out.get("guard", {}), dict)
+        if repaired:   # GH#104 : bloc non-dict remplacé avant d'appliquer les options
+            out["guard"] = {"allow": [], "deny": [], "careful": False}
         guard = out.setdefault("guard", {})
         if args.allow is not None:
             guard["allow"] = list(args.allow)
@@ -974,7 +1018,10 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
             guard["deny"] = list(args.deny)
         if args.careful is not None:
             guard["careful"] = args.careful == "on"
-        return out, {"guard": guard}
+        detail = {"guard": guard}
+        if repaired:
+            detail["repaired"] = True
+        return out, detail
     if cmd == "set-meta":
         touched = []
         for key in ("title", "profile"):
@@ -1909,6 +1956,63 @@ def _t_polish_keeps_in_progress_gate() -> None:
     assert det2["invalidated"] == [] and out2["phases"]["review"]["status"] == "in_progress"
 
 
+def _t_guard_of() -> None:
+    assert guard_of({}) == ({}, True) and guard_of({"guard": {}}) == ({}, True)
+    assert guard_of("x") == ({}, True) and guard_of(None) == ({}, True)
+    g = {"allow": ["src/**"]}
+    assert guard_of({"guard": g}) == (g, True)
+    g = {"allow": None, "deny": None}
+    assert guard_of({"guard": g}) == (g, True)
+    assert guard_of({"guard": None}) == ({}, True)   # guard: null = bloc absent (non armé)
+    for bad in ([], "x", 3, {"allow": "src/**"}, {"deny": {}}, {"allow": ["a", 1]},
+                {"deny": 5}, {"allow": [None]}):
+        assert guard_of({"guard": bad}) == (None, False), bad
+
+
+def _t_validate_guard() -> None:
+    def errs(g):
+        return validate({"id": "x", "phases": {}, "guard": g})[0]
+    assert any("guard" in e for e in errs([]))
+    assert any("guard" in e for e in errs({"allow": "src/**"}))
+    assert any("guard" in e for e in errs({"allow": ["a", 1]}))
+    assert errs({"allow": ["a"], "deny": [], "careful": True}) == []
+    assert errs({}) == [] and errs({"allow": None}) == []
+    assert errs(None) == []   # guard: null = bloc absent (non armé)
+    assert validate({"id": "x", "phases": {}})[0] == []
+
+
+def _t_set_guard_repair() -> None:
+    with _Repo() as r:
+        r.init()
+        b = r.load()
+        b["guard"] = ["x"]
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        code, res = r.run("validate")
+        assert code != 0 or res["errors"], res
+        res = r.ok("set-guard", "--allow", "src/**")
+        assert res.get("repaired") is True, res
+        assert r.load()["guard"] == {"allow": ["src/**"], "deny": [], "careful": False}
+        code, res = r.run("validate")
+        assert code == 0 and res["errors"] == [], res
+        res = r.ok("set-guard", "--deny", "d")
+        assert not res.get("repaired")
+        b = r.load()
+        b["guard"] = "x"
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        r.ok("set-guard", "--careful", "on")
+        assert r.load()["guard"] == {"allow": [], "deny": [], "careful": True}
+        b = r.load()
+        b["guard"] = {"allow": "s"}
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        r.ok("set-guard", "--deny", "d")
+        assert r.load()["guard"]["allow"] == "s"
+        code, res = r.run("validate")
+        assert code != 0 or res["errors"], res
+        r.ok("set-guard", "--allow", "a")
+        code, res = r.run("validate")
+        assert code == 0 and res["errors"] == [], res
+
+
 _CORE_TESTS = (
     _t_source_consistency, _t_unknown_phase_status, _t_verdict_status_coherence,
     _t_plan_requires_think, _t_build_refused_without_approval,
@@ -1933,6 +2037,7 @@ _CORE_TESTS = (
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
+    _t_guard_of, _t_validate_guard,
 )
 
 
@@ -2412,6 +2517,13 @@ def _t_load_active_battle() -> None:
         assert load_active_battle(root) is None
         (bdir / "battle.json").write_text("[]", encoding="utf-8")
         assert load_active_battle(root) is None
+        (bdir / "battle.json").write_text("[" * 200000, encoding="utf-8")   # RecursionError
+        assert load_active_battle(root) is None
+        try:
+            _load(bdir)
+            raise AssertionError("_load doit refuser un JSON trop imbrique")
+        except _Refuse as exc:
+            assert "illisible" in exc.reason, exc.reason
         content = {"guard": {"allow": ["src/**"]}, "x": 1}
         (bdir / "battle.json").write_text(json.dumps(content), encoding="utf-8")
         assert load_active_battle(root) == ("b1", content)
@@ -2445,7 +2557,7 @@ _INTEGRATION_TESTS = (
     _t_bump_build_failure_keeps_fails, _t_invalidate_cli, _t_slices_cli,
     _t_check_cascade_cli, _t_set_slices_replace_cli, _t_replan_invalidates_cli,
     _t_set_slices_replace_empty_cli, _t_active_battle_id, _t_load_active_battle,
-    _t_active_reader_after_close,
+    _t_active_reader_after_close, _t_set_guard_repair,
 )
 
 
