@@ -31,6 +31,13 @@ Regles :
   ecriture hors toujours-autorises (`.legion/**`, `.gitignore`, memoire Claude) est bloquee
   (exit 2), quel que soit l'appelant. Evalue APRES le confinement des gates et le blocage du
   builder sous `.legion/` (inchanges). Reparation : `battle_state.py set-guard`.
+- **`battle.json` illisible** (JSON invalide, racine non-dict...) : meme fail-closed, mais
+  `set-guard`/`close` refusent aussi de lire ce fichier : le message propose donc de le
+  retablir (`git checkout`) ou de le corriger a la main (`.legion/**` reste ecrivable), ou de
+  vider `.legion/active-battle` pour desactiver la battle.
+- **Entree stdin** (GH#106) : vide ou blanche -> exit 0 ; non vide et illisible (JSON invalide,
+  entier geant, non decodable, trop imbrique) ou non-objet -> exit 2 (fail-closed, sans bypass
+  `LEGION_GUARD_OFF`). Aucun chemin ne sort en exit 1, hors `--self-test`.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -119,10 +126,12 @@ def _matches(rel_path: str, patterns) -> bool:
 
 
 def _load_active_guard(repo_root: Path):
-    """Retourne (battle_id, allow, deny, valid) de la battle active, ou None.
+    """Retourne (battle_id, allow, deny, valid, unreadable) de la battle active, ou None.
 
-    `valid` faux (bloc `guard` mal forme, GH#104) : `allow`/`deny` valent `[]` et ne
-    doivent pas etre interpretes -- l'appelant ferme (fail-closed).
+    `valid` faux (bloc `guard` mal forme, GH#104, ou `battle.json` illisible) : `allow`/`deny`
+    valent `[]` et ne doivent pas etre interpretes -- l'appelant ferme (fail-closed).
+    `unreadable` vrai (GH#106) : `battle.json` present mais illisible (et non simple bloc
+    `guard` invalide) -- seul le message de reparation differe.
     """
     active = load_active_battle(repo_root)
     if active is None:
@@ -131,15 +140,15 @@ def _load_active_guard(repo_root: Path):
         # vide ou battle disparue : pas de battle active.
         battle_id = active_battle_id(repo_root)
         if battle_id is not None and (battles_dir(repo_root) / battle_id / "battle.json").exists():
-            return battle_id, [], [], False
+            return battle_id, [], [], False, True
         return None
     battle_id, data = active
     guard, valid = guard_of(data)
     if not valid:
-        return battle_id, [], [], False
+        return battle_id, [], [], False, False
     allow = guard.get("allow") or []
     deny = guard.get("deny") or []
-    return battle_id, allow, deny, True
+    return battle_id, allow, deny, True, False
 
 
 def _relative(repo_root: Path, file_path: str) -> str | None:
@@ -261,7 +270,9 @@ def _is_blank_content(content) -> bool:
     return content is None or not str(content).strip()
 
 
-def _invalid_guard_decision(data: dict, repo_root: Path, battle_id: str, file_path: str) -> tuple[int, str]:
+def _invalid_guard_decision(
+    data: dict, repo_root: Path, battle_id: str, file_path: str, unreadable: bool = False
+) -> tuple[int, str]:
     """Etat de guard invalide ou illisible : perimetre inconnu -> ferme hors toujours-autorises (GH#104)."""
     if not file_path or _is_claude_memory(file_path):
         return 0, ""
@@ -269,9 +280,20 @@ def _invalid_guard_decision(data: dict, repo_root: Path, battle_id: str, file_pa
     if rel is not None and _matches(rel, ALWAYS_ALLOW):
         return 0, ""  # `.legion/**` + `.gitignore` : la reparation reste possible
     target = f"`{rel}`" if rel is not None else "un chemin hors du repo"
+    if unreadable:
+        # `set-guard`/`close` lisent `battle.json` : ils refusent un fichier illisible.
+        return 2, (
+            f"BLOQUE par le guard de la battle {battle_id} : `.legion/battles/{battle_id}/battle.json` "
+            f"est illisible, le perimetre d'ecriture est inconnu.\n"
+            f"Ecriture refusee : {target}.\n"
+            f"Retablis-le (`git checkout -- .legion/battles/{battle_id}/battle.json` ou restauration) "
+            f"ou corrige-le a la main (`.legion/**` reste modifiable), ou vide `.legion/active-battle` "
+            f"pour desactiver la battle.\n"
+            f"Bypass delibere : LEGION_GUARD_OFF=1"
+        )
     return 2, (
         f"BLOQUE par le guard de la battle {battle_id} : le bloc `guard` de `battle.json` "
-        f"est invalide ou `battle.json` est illisible, le perimetre d'ecriture est inconnu.\n"
+        f"est invalide, le perimetre d'ecriture est inconnu.\n"
         f"Ecriture refusee : {target}.\n"
         f"Repare-le : `python3 {_SCRIPTS_DIR / 'battle_state.py'} set-guard --allow <glob...>` "
         f"(`--allow` sans glob pour desarmer), ou ferme la battle "
@@ -345,9 +367,9 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     active = _load_active_guard(repo_root)
     if active is None:
         return 0, ""
-    battle_id, allow, deny, valid = active
+    battle_id, allow, deny, valid, unreadable = active
     if not valid:
-        return _invalid_guard_decision(data, repo_root, battle_id, file_path)
+        return _invalid_guard_decision(data, repo_root, battle_id, file_path, unreadable=unreadable)
     if not allow:
         return 0, ""  # guard non arme
 
@@ -398,26 +420,71 @@ def _safe_decide(data, repo_root: Path) -> tuple[int, str]:
         )
 
 
+def _parse_payload(raw: str) -> tuple[int | None, dict | None, str]:
+    """Analyse le stdin du hook (fonction pure). Retourne (code, data, message).
+
+    - vide ou blanc -> (0, None, "") : rien a decider ;
+    - illisible (toute exception du parseur : JSON invalide, entier geant, trop imbrique) ou
+      non-objet -> (2, None, message) : fail-closed ;
+    - objet JSON -> (None, data, "") : a decider.
+    """
+    if not raw.strip():
+        return 0, None, ""
+    try:
+        data = json.loads(raw)
+    except BaseException as exc:  # noqa: BLE001 - fail-closed, y compris RecursionError
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        return 2, None, (
+            f"BLOQUE par le guard : entree du hook illisible "
+            f"({type(exc).__name__}: {str(exc)[:200]}). "
+            f"Ecriture refusee par prudence (fail-closed)."
+        )
+    if not isinstance(data, dict):
+        return 2, None, (
+            f"BLOQUE par le guard : entree du hook invalide "
+            f"(objet JSON attendu, recu {type(data).__name__})."
+        )
+    return None, data, ""
+
+
+def _emit(message: str) -> None:
+    """Ecrit sur stderr en best-effort : un echec d'ecriture ne change jamais le code de sortie."""
+    if not message:
+        return
+    try:
+        print(message, file=sys.stderr)
+    except BaseException as exc:  # noqa: BLE001
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+
+
 def main() -> int:
     if "--self-test" in sys.argv:
         return _self_test()
 
+    # Filet global (GH#106) : aucun chemin ne sort en exit 1 (lecture, cwd, decision, ecriture).
     try:
-        data = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        return 0
-    except RecursionError:  # entree trop imbriquee : illisible -> ferme (jamais exit 1)
-        print("BLOQUE par le guard : entree du hook illisible (JSON trop imbrique).", file=sys.stderr)
+        code, data, message = _parse_payload(sys.stdin.read())
+        if code is not None:
+            _emit(message)  # rejet de parsing : pas de bypass LEGION_GUARD_OFF
+            return code
+
+        code, message = _safe_decide(data, Path.cwd())
+
+        if code == 2 and os.environ.get("LEGION_GUARD_OFF") == "1":
+            _emit(f"[guard bypass] {message}")
+            return 0
+        _emit(message)
+        return code
+    except BaseException as exc:  # noqa: BLE001 - fail-closed
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        _emit(
+            f"BLOQUE par le guard : erreur interne ({type(exc).__name__}: {str(exc)[:200]}). "
+            f"Ecriture refusee par prudence (fail-closed)."
+        )
         return 2
-
-    code, message = _safe_decide(data, Path.cwd())
-
-    if code == 2 and os.environ.get("LEGION_GUARD_OFF") == "1":
-        print(f"[guard bypass] {message}", file=sys.stderr)
-        return 0
-    if message:
-        print(message, file=sys.stderr)
-    return code
 
 
 def _ev(tool: str, agent: str, path: str, **extra) -> dict:
@@ -541,7 +608,8 @@ def _t_guard_unreadable_active(bs) -> None:
             bs._write_pointer(root, "B")
             (root / ".legion" / "battles" / "B" / "battle.json").write_text(raw, encoding="utf-8")
             code, msg = _decide(_ev("Edit", "claude", "src/x.cs"), root)
-            assert code == 2 and "set-guard" in msg and "close" in msg, (raw[:8], code, msg)
+            assert code == 2 and "set-guard" not in msg and "close" not in msg, (raw[:8], code, msg)
+            assert "battle.json" in msg and ".legion/active-battle" in msg, (raw[:8], msg)
             assert _decide(_ev("Edit", "claude", ".legion/battles/B/battle.json"), root)[0] == 0
             assert _decide(_ev("Edit", "legion:builder", "src/x.cs"), root)[0] == 2
             art = ".legion/battles/B/gate-review.md"   # confinement des gates inchange
@@ -578,6 +646,107 @@ def _t_guard_safety_net() -> None:
         assert main() == 2
     finally:
         _decide, sys.stdin, sys.stderr, sys.argv = real, real_stdin, real_stderr, real_argv
+
+
+def _run_main(stdin, stderr=None, **patches):
+    """Execute `main()` avec stdin/stderr/argv (et attributs de module) remplaces, restaures en `finally`."""
+    import io
+    g = globals()
+    saved = {k: g[k] for k in patches}
+    real_stdin, real_stderr, real_argv = sys.stdin, sys.stderr, sys.argv
+    err = stderr if stderr is not None else io.StringIO()
+    sys.argv = [real_argv[0]]
+    sys.stdin = io.StringIO(stdin) if isinstance(stdin, str) else stdin
+    sys.stderr = err
+    g.update(patches)
+    try:
+        return main(), err
+    finally:
+        g.update(saved)
+        sys.stdin, sys.stderr, sys.argv = real_stdin, real_stderr, real_argv
+
+
+def _t_guard_stdin_blank() -> None:
+    for raw in ("", "  \n\t"):
+        assert _parse_payload(raw) == (0, None, ""), raw
+        code, err = _run_main(raw)
+        assert code == 0 and err.getvalue() == "", (raw, code, err.getvalue())
+
+
+def _t_guard_stdin_invalid_json() -> None:
+    for raw in ("{oops", "not json", '{"tool_name":'):
+        code, data, msg = _parse_payload(raw)
+        assert code == 2 and data is None and "illisible" in msg, (raw, code, msg)
+        code, err = _run_main(raw)
+        assert code == 2 and "illisible" in err.getvalue(), (raw, code, err.getvalue())
+
+
+def _t_guard_stdin_huge_int() -> None:
+    raw = "1" * 5000
+    code, data, msg = _parse_payload(raw)
+    assert code == 2 and data is None and len(msg) < 500, (code, len(msg))
+    code, err = _run_main(raw)
+    assert code == 2 and len(err.getvalue()) < 500, (code, len(err.getvalue()))
+
+
+def _t_guard_stdin_non_object() -> None:
+    for raw in ("[]", "[1]", "42", '"x"', "null"):
+        code, data, msg = _parse_payload(raw)
+        assert code == 2 and data is None and "objet JSON attendu" in msg, (raw, code, msg)
+        code, err = _run_main(raw)
+        assert code == 2 and "objet JSON attendu" in err.getvalue(), (raw, code, err.getvalue())
+
+
+def _t_guard_stdin_undecodable() -> None:
+    class _Bad:
+        def read(self):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "injecte")
+
+    code, err = _run_main(_Bad())
+    assert code == 2 and "erreur interne" in err.getvalue(), (code, err.getvalue())
+
+
+def _t_guard_main_no_exit_1() -> None:
+    """Le filet couvre `Path.cwd()` et l'ecriture stderr ; le nominal reste en 0."""
+    class _NoCwd:
+        @staticmethod
+        def cwd():
+            raise FileNotFoundError("cwd supprime")
+
+    code, err = _run_main('{"tool_name":"Bash"}', Path=_NoCwd)
+    assert code == 2 and "erreur interne" in err.getvalue(), (code, err.getvalue())
+
+    class _BrokenErr:
+        def write(self, s):
+            raise OSError("pipe casse")
+
+        def flush(self):
+            raise OSError("pipe casse")
+
+    code, _ = _run_main('{"tool_name":"Edit"}', stderr=_BrokenErr(), _decide=lambda d, r: (2, "x"))
+    assert code == 2, code
+    code, err = _run_main('{"tool_name":"Bash"}')
+    assert code == 0 and err.getvalue() == "", (code, err.getvalue())
+
+
+def _t_guard_repair_messages(bs) -> None:
+    """Deux causes, deux reparations : bloc invalide -> set-guard ; battle.json illisible -> fichier/pointeur."""
+    for raw in ('["x"]', '"x"'):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            bs._write_pointer(root, "B")
+            _guard_repo(root, raw)
+            code, msg = _decide(_ev("Edit", "claude", "src/x.cs"), root)
+            assert code == 2 and "set-guard" in msg and "active-battle" not in msg, (raw, code, msg)
+    for raw in ("{oops", "", "[]", "[" * 200000):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".legion" / "battles" / "B").mkdir(parents=True)
+            bs._write_pointer(root, "B")
+            (root / ".legion" / "battles" / "B" / "battle.json").write_text(raw, encoding="utf-8")
+            code, msg = _decide(_ev("Edit", "claude", "src/x.cs"), root)
+            assert code == 2 and "set-guard" not in msg and "close" not in msg, (raw[:8], code, msg)
+            assert "battle.json" in msg and ".legion/active-battle" in msg, (raw[:8], msg)
 
 
 def _self_test() -> int:
@@ -708,6 +877,13 @@ def _self_test() -> int:
     _t_guard_invalid_confinement(battle_state)
     _t_guard_unreadable_active(battle_state)
     _t_guard_safety_net()
+    _t_guard_stdin_blank()
+    _t_guard_stdin_invalid_json()
+    _t_guard_stdin_huge_int()
+    _t_guard_stdin_non_object()
+    _t_guard_stdin_undecodable()
+    _t_guard_main_no_exit_1()
+    _t_guard_repair_messages(battle_state)
 
     print("OK: guard self-test passed", file=sys.stderr)
     return 0
