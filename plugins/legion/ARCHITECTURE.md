@@ -220,7 +220,7 @@ lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`, `invalidate`, `set-delivery`,
-`set-guard`, `set-meta`, `activate`, `close`, `validate`). `build done` exige que toutes les
+`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`). `build done` exige que toutes les
 slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
 pendant un re-plan ouvert (`approved_at` à `null`) ou tant que `build` est `pending`
 (déclarer les slices **avant** `approve-plan`) ; sans id, elle vide la liste (BUILD agrégé,
@@ -230,7 +230,10 @@ qu'une slice résultante ne l'est pas, `build` passe à `blocked`. `check-cascad
 phases requises sont `done` avant un push ADDRESS ; `address done` porte la même
 précondition. Le script vérifie chaque transition de phase (ex. `build` — y compris `blocked` — refusé
 tant que le plan n'est pas `accept*` **et** approuvé : `phases.plan.approved_at`), écrit de façon
-atomique (temp + `os.replace`) et resynchronise le shard fleet. Il porte aussi la **source
+atomique (temp + `os.replace`) et resynchronise le shard fleet. `abort [--reason]` marque une
+battle comme abandonnée (`aborted = {at, reason}`) : refusé si la battle est close ou déjà
+abandonnée ; ensuite seul `validate` passe et le pointeur `active-battle` est vidé si
+elle était active. Il porte aussi la **source
 unique** des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
 dérivent `guard.py`, `fleet_sync.py` et `eval.py`. Les command-files l'appellent ; ils
 n'éditent plus `battle.json` à la main.

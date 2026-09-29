@@ -43,11 +43,14 @@ _IMPORT_ERROR: str | None = None
 try:
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))
-    from battle_state import PHASES as _PHASES
+    from battle_state import PHASES as _PHASES, is_aborted as _is_aborted
     PHASE_ORDER = list(_PHASES)
 except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
     PHASE_ORDER = []
+
+    def _is_aborted(battle) -> bool:  # repli (GH#75) : même règle que battle_state.is_aborted
+        return isinstance(battle, dict) and battle.get("aborted") is not None
 
 
 def _state_base() -> Path:
@@ -96,10 +99,13 @@ def _current_phase(phases: dict) -> tuple[str, str]:
     return PHASE_ORDER[0], (phases.get(PHASE_ORDER[0]) or {}).get("status", "pending")
 
 
-def _battle_status(phases: dict) -> str:
+def _battle_status(phases: dict, aborted: bool = False) -> str:
     """État GLOBAL de la battle (vs phase courante), pour filtrer terminé/en cours :
+    `aborted` si la battle est abandonnée (prime sur `closed`),
     `closed` si la rétro est faite, sinon `blocked` si la phase courante l'est,
     sinon `active`. Dérivé des phases — jamais stocké en double dans battle.json."""
+    if aborted:
+        return "aborted"
     if (phases.get("reflect") or {}).get("status") == "done":
         return "closed"
     _, status = _current_phase(phases)
@@ -159,7 +165,7 @@ def upsert(battle_dir: Path, repo_root: Path, fleet_dir: Path) -> bool:
         "profile": battle.get("profile"),
         "phase": phase,
         "status": status,
-        "battle_status": _battle_status(phases),
+        "battle_status": _battle_status(phases, aborted=_is_aborted(battle)),
         "pr_url": delivery.get("pr_url"),
         "updated": _now_iso(),
     }
@@ -280,6 +286,25 @@ def main() -> int:
     return 0
 
 
+def _t_battle_status_aborted() -> None:
+    assert _battle_status({"build": {"status": "in_progress"}}, aborted=True) == "aborted"
+    assert _battle_status({"reflect": {"status": "done"}}, aborted=True) == "aborted"
+    assert _battle_status({"reflect": {"status": "done"}}) == "closed"
+
+
+def _t_upsert_aborted() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        bp = base / "r" / ".legion" / "battles" / "b9"
+        bp.mkdir(parents=True)
+        (bp / "battle.json").write_text(json.dumps(
+            {"id": "b9", "phases": {"build": {"status": "in_progress"}},
+             "aborted": {"at": "T", "reason": None}}), encoding="utf-8")
+        assert upsert(bp, base / "r", base / "fleet.d")
+        shard = next(e for e in read_fleet(base / "fleet.d") if e["id"] == "b9")
+        assert shard["battle_status"] == "aborted", shard
+
+
 def _self_test() -> int:
     global _IMPORT_ERROR
     if _IMPORT_ERROR is not None:
@@ -304,6 +329,7 @@ def _self_test() -> int:
     assert _current_phase({"deliver": {"status": "done"}, "address": {"status": "in_progress"}}) == ("address", "in_progress")
     # address jamais jouée (absente) : transparente, reflect=done => closed
     assert _battle_status({"deliver": {"status": "done"}, "reflect": {"status": "done"}}) == "closed"
+    _t_battle_status_aborted()
     assert _battle_dir_from_path("x/.legion/battles/b1/battle.json").name == "b1"
     assert _battle_dir_from_path("x/src/foo.cs") is None
     assert _shard_name("a::b") == _shard_name("a::b") and _shard_name("a::b").endswith(".json")
@@ -378,6 +404,7 @@ def _self_test() -> int:
         sys.stderr, sys.stdin, sys.argv, _IMPORT_ERROR = _stderr, _stdin, _argv, saved
     assert rc == 0 and not wrote and "installation legion incomplete" in warned, (rc, wrote, warned)
 
+    _t_upsert_aborted()
     print("OK: fleet_sync self-test passed", file=sys.stderr)
     return 0
 

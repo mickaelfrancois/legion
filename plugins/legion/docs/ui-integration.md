@@ -60,7 +60,7 @@ Chaque fichier contient **une** entrée, pas un tableau :
   "profile": "feature",                     // feature | hotfix | security | spike
   "phase": "build",                         // phase COURANTE (cf. §4)
   "status": "in_progress",                  // statut de la phase courante
-  "battle_status": "active",                // GLOBAL : active | blocked | closed
+  "battle_status": "active",                // GLOBAL : active | blocked | closed | aborted
   "pr_url": null,                            // URL de la PR une fois deliver fait
   "tokens_total": 184320,                    // coût approx. = Σ(input+output) ; absent si rien encore
   "tokens": { "input": 150000, "output": 34320, "cache_read": 0, "cache_creation": 0 },
@@ -89,19 +89,23 @@ Chaque fichier contient **une** entrée, pas un tableau :
 | Champ | Portée | Valeurs | Usage UI |
 |---|---|---|---|
 | `phase` + `status` | la **phase courante** | phase ∈ §4 ; status ∈ `pending`/`in_progress`/`done`/`blocked` | « où en est la battle » (ex. *build — in_progress*) |
-| `battle_status` | la **battle entière** | `active` / `blocked` / `closed` | filtre liste : en cours / à traiter / terminé |
+| `battle_status` | la **battle entière** | `active` / `blocked` / `closed` / `aborted` | filtre liste : en cours / à traiter / terminé / abandonné |
 
 - `battle_status == "blocked"` ⇒ une gate a renvoyé `revise`/`reject` : **réclame
   l'attention de l'humain** (à mettre en avant dans l'UI).
 - `battle_status == "closed"` ⇒ rétro faite. L'index **garde** les battles clôturées
   (historique) ; elles ne disparaissent pas.
+- `battle_status == "aborted"` ⇒ battle abandonnée (`battle.json.aborted` posé par
+  `battle_state.py abort`). Elle ne sera pas livrée : la traiter comme terminée (hors de
+  la vue par défaut), la garder dans l'historique. Un lecteur ancien qui ne connaît pas
+  la valeur doit la lire comme inconnue, sans planter.
 
 **Lecture défensive obligatoire** : `title`, `profile`, `battle_status`, `pr_url`
 peuvent être `null` (ou absents) sur une entrée écrite avant l'enrichissement du
 schéma. Traiter l'absence sans planter ; ré-hydratation au prochain upsert.
 
 **Tri / filtres recommandés** : trier par `updated` décroissant ; vue par défaut =
-`battle_status != "closed"` ; remonter les `blocked` en tête.
+`battle_status` hors `{closed, aborted}` ; remonter les `blocked` en tête.
 
 ---
 
@@ -160,6 +164,8 @@ du repo (utile si l'UI veut signaler « la battle en cours dans ce repo »).
 Champs ajoutés (tous **optionnels** pour un lecteur : lecture défensive, une battle
 antérieure peut ne pas les avoir) :
 
+- `aborted` : `{ "at": ISO-8601, "reason": str|null }`, posé par `battle_state.py abort`
+  quand la battle est abandonnée. Absent sinon.
 - `phases.plan.approved_at` : horodatage ISO-8601 de l'approbation humaine du plan
   (`null` tant que non approuvé). Posé par `battle_state.py approve-plan`.
 - `phases.<phase>.fails` : FAILs ciblés du dernier passage (`{target, dimension}`) ;
