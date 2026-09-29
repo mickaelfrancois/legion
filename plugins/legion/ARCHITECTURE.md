@@ -291,8 +291,11 @@ PreToolUse(Edit|Write|MultiEdit) :
      exit 2 hors `.legion/**`, `.gitignore` et mémoire Claude, quel que soit l'appelant
      (évalué après 0 et 0b). Réparer via `battle_state.py set-guard`. `guard: null` = bloc
      absent (non armé). Même branche si le pointeur désigne une battle dont `battle.json`
-     existe mais est illisible (JSON invalide ou trop imbriqué, racine non-dict) : réparer
-     ou `close` la battle. Toute exception imprévue de la décision → exit 2 (jamais exit 1).
+     existe mais est illisible (JSON invalide ou trop imbriqué, racine non-dict) : `set-guard`
+     et `close` refusent aussi ce fichier, donc réparer le fichier (`git checkout` ou à la main,
+     `.legion/**` reste modifiable) ou vider `.legion/active-battle`. Toute exception imprévue
+     de la décision → exit 2 (jamais exit 1). Entrée stdin : vide ou blanche → exit 0 ; illisible
+     ou non-objet JSON → exit 2 ; jamais exit 1 (hors `--self-test`).
   3. `.legion/**` toujours autorisé (sauf builder, cf. 0b). Bypass délibéré : env var LEGION_GUARD_OFF=1.
 ```
 
