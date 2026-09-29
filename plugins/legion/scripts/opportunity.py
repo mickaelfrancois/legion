@@ -267,7 +267,11 @@ def main() -> int:
         out = opt("--out")
         if out:
             # --out: write the body directly (no shell redirection needed by the caller).
-            Path(out).write_text(body + "\n", encoding="utf-8")
+            try:
+                Path(out).write_text(body + "\n", encoding="utf-8")
+            except OSError as exc:
+                print(f"ecriture de --out impossible: {exc}", file=sys.stderr)
+                return 2
         else:
             print(body)
         return 0
