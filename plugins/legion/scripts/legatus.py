@@ -1,21 +1,23 @@
 """Lanceur Legatus multi-OS de legion (`/legion:legatus`), sans PowerShell.
 
 Résout le clone marketplace de Legatus (glob, jamais de chemin en dur), vérifie que
-`dotnet` est disponible, détecte si Legatus écoute déjà (port 5021), le lance **détaché**
+`dotnet` est disponible, détecte si Legatus écoute déjà (port 5021 par défaut, `--port`), le lance **détaché**
 (il survit à la session Claude) puis ouvre le navigateur. Fonctionne sous Linux, WSL2,
 macOS et Windows natif.
 
-Le cœur de décision est **pur** (`_is_wsl`, `_pick_project`, `_choose_opener`, `_plan`,
-`_wait_ready`) : ni disque, ni socket, ni process réels. La couche I/O (`_find_projects`,
+Le cœur de décision est **pur** (`_is_wsl`, `_pick_project`, `_choose_opener`, `_command`,
+`_plan`, `_wait_ready`) : ni disque, ni socket, ni process réels. La couche I/O (`_find_projects`,
 `_port_listening`, `_launch`, `_open_browser`) reste mince. `--self-test` est hermétique.
 
 Usage :
     python legatus.py [--project <csproj>] [--dry-run] [--timeout <s>] [--port 5021]
+`--port` fixe le port sondé ET le port d'écoute de Legatus (`--urls` transmis à l'application
+quand il diffère de 5021).
     python legatus.py --self-test
 
 Sortie : un objet JSON sur stdout
     { ok, state, url, project, built, wsl, opener, listening, pid, ready,
-      browser_opened, log, message }
+      browser_opened, log, command, message }
 `state` : started | already_running | not_found | no_dotnet | failed | dry_run.
 Exit : 0 si ok, 2 si refusé/échec (no_dotnet, not_found, failed), 1 si usage invalide.
 """
@@ -65,6 +67,14 @@ def _choose_opener(is_wsl: bool, which, url: str) -> list[str] | None:
             return ["wslview", url]
         return ["cmd.exe", "/c", "start", "", url]
     return None
+
+
+def _command(proj_dir: str, port: int) -> list[str]:
+    """argv de `dotnet run`. `--urls` n'est ajouté que si le port diffère du défaut."""
+    argv = ["dotnet", "run", "--project", proj_dir, "--launch-profile", "http"]
+    if port != DEFAULT_PORT:
+        argv += ["--", "--urls", f"http://localhost:{port}"]
+    return argv
 
 
 def _plan(*, dotnet: str | None, project: tuple[str, bool] | None, listening: bool,
@@ -146,9 +156,8 @@ def _log_path() -> Path:
     return Path.home() / ".claude" / "legion" / "legatus.log"
 
 
-def _launch(csproj: str, log: Path):
-    """`dotnet run` détaché : survit à la session, aucun pipe gardé ouvert."""
-    proj_dir = str(Path(csproj).parent)
+def _launch(argv: list[str], cwd: str, log: Path):
+    """Exécute `argv` détaché : survit à la session, aucun pipe gardé ouvert."""
     log.parent.mkdir(parents=True, exist_ok=True)
     logf = open(log, "ab")
     kwargs: dict = {}
@@ -159,8 +168,7 @@ def _launch(csproj: str, log: Path):
         kwargs["start_new_session"] = True
     try:
         return subprocess.Popen(
-            ["dotnet", "run", "--project", proj_dir, "--launch-profile", "http"],
-            cwd=proj_dir, stdin=subprocess.DEVNULL, stdout=logf, stderr=logf, **kwargs)
+            argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=logf, stderr=logf, **kwargs)
     finally:
         logf.close()
 
@@ -199,14 +207,17 @@ def run(args: dict, *, which=shutil.which, probe=_port_listening, root: Path | N
     plan = _plan(dotnet=dotnet, project=project, listening=listening,
                  dry_run=args["dry_run"], wsl=wsl, opener=opener, url=url)
     action = plan.pop("action")
-    out = {**plan, "pid": None, "ready": None, "browser_opened": None, "log": None}
+    proj_dir = str(Path(project[0]).parent) if project else None
+    cmd = _command(proj_dir, port) if project else None
+    out = {**plan, "pid": None, "ready": None, "browser_opened": None, "log": None,
+           "command": cmd}
     if action == "open":
         out["browser_opened"] = opener_fn(opener, url)
     elif action == "launch":
         log = _log_path()
         out["log"] = str(log)
         try:
-            proc = launch(project[0], log)
+            proc = launch(cmd, proj_dir, log)
         except OSError as exc:
             out.update(ok=False, state="failed", message=f"Could not start dotnet: {exc}")
             return out, 2
@@ -298,6 +309,7 @@ def _self_test() -> int:
                             which=lambda n: "/x/dotnet", probe=lambda p: False,
                             root=Path(t), proc_version="Linux")
             assert out["state"] == "not_found" and out["ok"] is False and code == 2, out
+            assert out["command"] is None, out
 
     def t_project_override():
         with tempfile.TemporaryDirectory() as t:
@@ -354,6 +366,9 @@ def _self_test() -> int:
             assert out["wsl"] is True and out["opener"] == "wslview", out
             assert out["listening"] is False and out["url"] == "http://localhost:5021", out
             assert out["pid"] is None, out
+            assert out["command"] == ["dotnet", "run", "--project", str(Path(csproj).parent),
+                                      "--launch-profile", "http"], out
+            assert "--urls" not in out["command"], out
 
     def t_already_running():
         with tempfile.TemporaryDirectory() as t:
@@ -381,10 +396,57 @@ def _self_test() -> int:
             out, code = run({"project": None, "dry_run": False, "timeout": 5, "port": 5021},
                             which=lambda n: "/x/dotnet", probe=lambda p: False,
                             root=Path(t), proc_version="Linux",
-                            launch=lambda c, l: FakeProc(1),
+                            launch=lambda a, c, l: FakeProc(1),
                             opener_fn=lambda o, u: True, sleep=lambda s: None)
             assert out["state"] == "failed" and out["ok"] is False and code == 2, out
             assert out["log"], out
+
+    def t_command_default_port():
+        assert _command("/p", 5021) == ["dotnet", "run", "--project", "/p",
+                                        "--launch-profile", "http"]
+
+    def t_command_custom_port():
+        c = _command("/p", 5099)
+        assert c[-5:] == ["--launch-profile", "http", "--", "--urls",
+                          "http://localhost:5099"], c
+        assert c.index("--launch-profile") < c.index("--urls"), c
+
+    def t_dry_run_custom_port():
+        def boom(*a, **k):
+            raise AssertionError("must not launch/open in dry-run")
+        with tempfile.TemporaryDirectory() as t:
+            mk_tree(Path(t), "a", True)
+            out, code = run({"project": None, "dry_run": True, "timeout": 1, "port": 5099},
+                            which=lambda n: "/x/dotnet", probe=lambda p: False,
+                            root=Path(t), proc_version="Linux", launch=boom, opener_fn=boom)
+            assert code == 0 and out["state"] == "dry_run", out
+            assert out["url"] == "http://localhost:5099", out
+            c = out["command"]
+            assert c[c.index("--urls") + 1] == "http://localhost:5099", c
+
+    def t_launch_receives_command():
+        with tempfile.TemporaryDirectory() as t:
+            csproj = mk_tree(Path(t), "a", True)
+            seen, opened, state = [], [], {"up": False}
+
+            class Proc:
+                pid = 7
+
+                def poll(self):
+                    return None
+
+            def fake_launch(argv, cwd, log):
+                seen.append((argv, cwd))
+                state["up"] = True
+                return Proc()
+            out, code = run({"project": None, "dry_run": False, "timeout": 5, "port": 5099},
+                            which=lambda n: "/x/dotnet", probe=lambda p: state["up"],
+                            root=Path(t), proc_version="Linux", launch=fake_launch,
+                            opener_fn=lambda o, u: opened.append(u) or True,
+                            sleep=lambda s: None)
+            assert out["state"] == "started" and out["ready"] is True and code == 0, out
+            assert seen == [(out["command"], str(Path(csproj).parent))], seen
+            assert opened == ["http://localhost:5099"], opened
 
     def t_wait_timeout_and_ready():
         ticks = iter(range(0, 1000))
@@ -407,6 +469,10 @@ def _self_test() -> int:
                      ("t_dry_run_output", t_dry_run_output),
                      ("t_already_running", t_already_running),
                      ("t_failed_early_exit", t_failed_early_exit),
+                     ("t_command_default_port", t_command_default_port),
+                     ("t_command_custom_port", t_command_custom_port),
+                     ("t_dry_run_custom_port", t_dry_run_custom_port),
+                     ("t_launch_receives_command", t_launch_receives_command),
                      ("t_wait_timeout_and_ready", t_wait_timeout_and_ready)]:
         check(name, fn)
     if failures:
