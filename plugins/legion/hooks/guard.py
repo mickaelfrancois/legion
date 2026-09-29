@@ -22,6 +22,10 @@ Regles :
   garantie « une gate ne touche pas le code ». La session principale (`agent_type`
   "claude") et le `builder` (`<plugin>:builder`) ne sont **pas** confines : regles
   de perimetre standard ci-dessous. S'applique meme guard non arme.
+- **Builder sous `.legion/`** : le `builder` n'y ecrit QUE son `build-report.md`
+  (battle active). Sinon `.legion/**` (toujours autorise) lui permettrait de
+  reecrire `battle.json` -- donc d'elargir son propre `guard.allow`. Hors `.legion/`,
+  regles de perimetre standard. S'applique meme guard non arme.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -60,6 +64,12 @@ GATE_ARTIFACT = {
     "legion:test-engineer": "gate-test.md",
     "legion:security": "gate-security.md",
     "legion:pr-triage": "pr-feedback.md",
+}
+
+# Producteur : hors `.legion/`, regles de perimetre standard ; SOUS `.legion/`, seul
+# son rapport est autorise (jamais `battle.json` -> pas d'auto-elargissement du guard).
+PRODUCER_ARTIFACT = {
+    "legion:builder": "build-report.md",
 }
 
 
@@ -178,6 +188,19 @@ def _gate_decision(agent_type, rel: str | None, battle_id: str | None):
     return rel == f".legion/battles/{battle_id}/{artifact}"
 
 
+def _producer_state_decision(agent_type, rel: str | None, battle_id: str | None):
+    """Decision pour un producteur (builder) visant l'etat `.legion/` (fonction pure).
+
+    - None  -> pas un producteur, ou cible hors `.legion/` : regles standard.
+    - True  -> son rapport dans la battle active : autorise.
+    - False -> tout autre chemin sous `.legion/` (`battle.json`, artefact de gate…).
+    """
+    artifact = PRODUCER_ARTIFACT.get(agent_type)
+    if artifact is None or rel is None or not (rel == ".legion" or rel.startswith(".legion/")):
+        return None
+    return battle_id is not None and rel == f".legion/battles/{battle_id}/{artifact}"
+
+
 def _is_blank_content(content) -> bool:
     """True si le contenu d'un `Write` est absent ou entierement blanc (artefact 0 octet)."""
     return content is None or not str(content).strip()
@@ -217,6 +240,22 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
             f"Une gate retourne son verdict + le chemin de son artefact ; elle "
             f"n'ecrit ni code, ni `battle.json`, ni l'artefact d'une autre gate."
         )
+
+    # Producteur sous `.legion/` : seul son rapport (pas d'auto-elargissement du guard).
+    if agent_type in PRODUCER_ARTIFACT and file_path:
+        battle_id = _active_battle_id(repo_root)
+        rel = _relative(repo_root, file_path)
+        decision = _producer_state_decision(agent_type, rel, battle_id)
+        if decision is False:
+            expected = f".legion/battles/{battle_id or '<aucune battle active>'}/{PRODUCER_ARTIFACT[agent_type]}"
+            return 2, (
+                f"BLOQUE : le `{agent_type}` n'ecrit sous `.legion/` QUE son rapport "
+                f"`{expected}`.\nTentative : `{rel}`.\n"
+                f"L'etat de la battle (`battle.json`, perimetre, artefacts de gate) "
+                f"appartient a l'orchestrateur."
+            )
+        if decision is True:
+            return 0, ""
 
     active = _load_active_guard(repo_root)
     if active is None:
@@ -308,6 +347,14 @@ def _self_test() -> int:
     assert _gate_decision("legion:reviewer", ".legion/battles/B/battle.json", "B") is False     # pas battle.json
     assert _gate_decision("legion:reviewer", ".legion/battles/B/gate-review.md", None) is False # hors battle active
     assert _gate_decision("legion:reviewer", None, "B") is False                                # chemin hors repo
+    # producteur (builder) sous .legion/ : seul build-report.md de la battle active
+    assert _producer_state_decision("legion:builder", ".legion/battles/B/build-report.md", "B") is True
+    assert _producer_state_decision("legion:builder", ".legion/battles/B/battle.json", "B") is False
+    assert _producer_state_decision("legion:builder", ".legion/active-battle", "B") is False
+    assert _producer_state_decision("legion:builder", ".legion/battles/B/gate-review.md", "B") is False
+    assert _producer_state_decision("legion:builder", ".legion/battles/B/build-report.md", None) is False
+    assert _producer_state_decision("legion:builder", "src/x.cs", "B") is None      # hors .legion -> standard
+    assert _producer_state_decision("claude", ".legion/battles/B/battle.json", "B") is None  # orchestrateur libre
     # decision : pas de write tool -> 0
     assert _decide({"tool_name": "Bash"}, Path.cwd())[0] == 0
     # artefact vide (RETEX A1) : contenu blanc -> bloque ; contenu reel -> autorise
@@ -331,6 +378,18 @@ def _self_test() -> int:
         # un Edit (pas de contenu complet) n'est pas soumis a la regle du Write vide
         assert _decide({"tool_name": "Edit", "agent_type": "legion:reviewer",
                         "tool_input": _art}, _root)[0] == 0
+        # builder : battle.json bloque (meme guard non arme), build-report.md autorise,
+        # code hors .legion laisse aux regles standard (guard non arme -> libre)
+        assert _decide({"tool_name": "Edit", "agent_type": "legion:builder",
+                        "tool_input": {"file_path": ".legion/battles/B/battle.json"}}, _root)[0] == 2
+        assert _decide({"tool_name": "Write", "agent_type": "legion:builder",
+                        "tool_input": {"file_path": ".legion/battles/B/build-report.md",
+                                       "content": "# Build"}}, _root)[0] == 0
+        assert _decide({"tool_name": "Edit", "agent_type": "legion:builder",
+                        "tool_input": {"file_path": "src/x.cs"}}, _root)[0] == 0
+        # session principale (orchestrateur) : battle.json toujours ecrivable
+        assert _decide({"tool_name": "Edit", "agent_type": "claude",
+                        "tool_input": {"file_path": ".legion/battles/B/battle.json"}}, _root)[0] == 0
     print("OK: guard self-test passed", file=sys.stderr)
     return 0
 
