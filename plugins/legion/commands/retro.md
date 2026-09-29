@@ -9,7 +9,8 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    (`.legion/active-battle`). No battle → say so and stop.
 
 2. **Read its artifacts** under `.legion/battles/<id>/`: `spec.md`, `plan.md`,
-   every `gate-*.md`, `build-report.md`, `pr-body.md`. Reconstruct the story: what
+   every `gate-*.md`, `build-report.md`, `pr-body.md`, and `pr-feedback.md` when the
+   battle went through ADDRESS (its rounds show what human review caught). Reconstruct the story: what
    shipped, what got blocked and why (gate `revise`/`reject` + the FAILs), how
    many build/gate round-trips, which opportunities were logged. **Also collect every
    `## Hors périmètre — candidats issue` section** (out-of-scope observations logged by
@@ -110,7 +111,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    artifacts do not — this is the whole point: a RETEX must be actionable without the
    repo). For every item set: `title` and `profile` from `battle.json`, `intent` a
    one-line summary of `spec.md`'s intent, and `phase` = the phase where the friction
-   surfaced (`think|plan|build|review|test|deliver|reflect`) — **per item**, since one
+   surfaced (`think|plan|build|lint|review|test|security|deliver|address|reflect`) — **per item**, since one
    battle's frictions can arise at different phases. These four fields are **optional**
    and never affect the entry's stable `id` (derived from `ts|plugin|observation`);
    `--battle`/`--repo` stay as they are.
@@ -165,7 +166,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
       marker (`<!-- legion-opportunity: <fp> -->`), the pivot of the anti-duplicate net:
 
       ```bash
-      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> > ".legion/battles/<id>/opp-<fingerprint>.md"
+      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> --out ".legion/battles/<id>/opp-<fingerprint>.md"
       ```
 
    e. **CONFIRM (outward effect).** Show the user the list to create — each title + body,

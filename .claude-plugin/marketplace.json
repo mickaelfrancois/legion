@@ -6,7 +6,7 @@
     {
       "name": "legion",
       "source": "./plugins/legion",
-      "description": "Battle orchestration for solo .NET projects on GitHub. Drives a Think→Plan→Build→Review→Test→Deliver→Reflect pipeline with role-based gate agents, a builder producer, per-repo battle state, a multi-repo fleet view and write-scope guardrails. Orchestrates — delegates the actual .NET work to dotnet-claude-kit."
+      "description": "Battle orchestration for solo .NET projects on GitHub. Drives a Think→Plan→Build→Lint→Review→Test→Deliver→Reflect pipeline with role-based gate agents, a builder producer, per-repo battle state, a multi-repo fleet view and write-scope guardrails. Orchestrates — delegates the actual .NET work to dotnet-claude-kit."
     }
   ]
 }
