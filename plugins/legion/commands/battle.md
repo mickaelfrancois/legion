@@ -617,14 +617,19 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    `feat|fix|refactor|perf|docs|test|build|ci|chore`; `scope` = the touched area.
    This subject feeds **both** the commit subject **and** the PR title (step 5).
 
-   Then commit with the global co-author trailer:
+   Then commit with the session's co-author trailer:
    ```
    <summary>
 
    <1–3 lines: what & why, from spec.md>
 
-   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+   <co-author trailer>
    ```
+
+   `<co-author trailer>` is the attribution line **this session** prescribes (the
+   harness attribution instructions, or the user's `CLAUDE.md` / memory rule, which
+   take precedence). **Never hard-code a model name** here — it goes stale at the next
+   model change. If the session prescribes no trailer, omit it.
 
    **Where the commit-message file lives (if you use one).** A multi-line body with
    accents or other non-ASCII punctuation is fragile through `-m` on a Windows console;
