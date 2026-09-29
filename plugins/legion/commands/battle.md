@@ -301,7 +301,9 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      équivaut à une déclaration simple) et à un re-plan (les slices d'id conservé gardent
      leur statut, les nouvelles sont `pending`, les retirées disparaissent). Un re-plan
      (`transition plan in_progress`) invalide déjà la cascade rendue (raison `replan`,
-     un seul événement) : `check-cascade` reste rouge jusqu'au rejeu. Si `build`
+     un seul événement), y compris une gate `in_progress` : `check-cascade` reste rouge
+     jusqu'au rejeu, et toute transition de cascade (`in_progress`/`done`) est refusée
+     (« plan non approuvé ») tant que `approve-plan` n'a pas été rejoué. Si `build`
      était déjà `done` et qu'une slice du résultat n'est pas `done`, `build` passe à
      `blocked` (`set-slices --replace` n'écrit alors pas de nouvel événement, la cascade
      étant déjà `pending`) : enchaîner `approve-plan`,

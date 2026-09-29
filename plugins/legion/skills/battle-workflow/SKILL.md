@@ -226,7 +226,7 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
     // (refusé si le plan n'est pas `accept*`). Un nouveau passage `plan in_progress` le remet
     // à null : `build in_progress` est refusé tant que le plan n'est pas (ré)approuvé
     // (battle legacy sans la clé : chemin de compatibilité, cf. battle.md §B).
-    // Ce nouveau passage invalide aussi la cascade déjà rendue (raison `replan`, un seul événement).
+    // Ce nouveau passage invalide aussi la cascade déjà rendue, `in_progress` compris (raison `replan`, un seul événement) ; la cascade reste refusée tant que le plan n'est pas ré-approuvé.
     // plan.fails — sur `revise`, l'orchestrateur relaie les FAILs verbatim et le script les persiste
     // (ciblés fichier:ligne + dimension) ET snapshote spec.md → `spec.plan-baseline.md`
     // dans le dossier de la battle. Les deux forment le contexte de reprise du re-run

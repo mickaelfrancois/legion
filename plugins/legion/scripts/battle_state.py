@@ -20,7 +20,7 @@ Source unique des listes de phases / gates / artefacts (importée par `fleet_syn
 Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
 - `apply_transition(..., now_iso=None) -> battle` (copie ; lève `ValueError` si la transition est refusée) ;
-  `plan in_progress` (re-plan, GH#93) invalide d'office la cascade `done`/`blocked` (raison `replan`,
+  `plan in_progress` (re-plan, GH#93) invalide d'office la cascade `done`/`blocked`/`in_progress` (raison `replan`,
   un seul événement dans `run.invalidations` ; rien si la cascade est déjà `pending`) ;
 - `approve_plan(battle, now_iso) -> (ok, reason, battle)` ;
 - `bump_autocorrect(battle, phase, fails, keep_fails=False, now_iso=None) -> (decision, reason, battle, detail)`,
@@ -35,6 +35,7 @@ Cœur pur :
   de `required_gates` (phase absente : statut `absente`) ; `deliver` et `address done` l'exigent
   vide (sortie `check-cascade`) ;
 - `build` (`in_progress`, `done` et `blocked`) exige un plan `done`/`accept*` approuvé (#86) ;
+  la cascade (`in_progress`/`done`) exige aussi ce plan approuvé, ou la voie legacy (GH#97) ;
 - état par slice (GH#70), champ racine optionnel `slices: [{id, status, warnings?, files?}]`
   (absent ou vide = BUILD agrégé, comportement legacy) :
   `set_slices(battle, ids, replace=False) -> (ok, reason, battle, detail)` (remplacement tant que
@@ -206,6 +207,16 @@ def fail_identity(item) -> str:
 
 # --- Transitions -------------------------------------------------------------------------
 
+def _plan_approved(battle: dict) -> bool:
+    """Le plan est-il approuvé ? `approved_at` renseigné, ou voie legacy : battle antérieure au
+    champ (clé `approved_at` absente) dont `build` est déjà sorti de `pending`. Un re-plan laisse
+    la clé à null : nouvelle approbation obligatoire. Règle partagée par BUILD et la cascade."""
+    plan = _phase_entry(battle, "plan")
+    if plan.get("approved_at"):
+        return True
+    return "approved_at" not in plan and _status(battle, "build") != "pending"
+
+
 def check_transition(battle: dict, phase: str, status: str, verdict: str | None = None,
                      fails=None, round_=None, threads=None) -> tuple[bool, str]:
     """Précondition d'une transition de phase. Pur. Retourne (ok, raison du refus)."""
@@ -244,10 +255,7 @@ def check_transition(battle: dict, phase: str, status: str, verdict: str | None 
         plan = _phase_entry(battle, "plan")
         if plan.get("status") != "done" or not _is_accept(plan.get("verdict")):
             return False, "build exige un plan done avec verdict accept*"
-        # Legacy : battle antérieure au champ (clé `approved_at` absente) déjà entamée. Un
-        # re-plan laisse la clé à null : nouvelle approbation obligatoire.
-        legacy = "approved_at" not in plan and _status(battle, "build") != "pending"
-        if not plan.get("approved_at") and not legacy:
+        if not _plan_approved(battle):
             return False, "plan non approuvé (approve-plan requis avant build)"
 
     if status == "blocked":
@@ -265,6 +273,8 @@ def check_transition(battle: dict, phase: str, status: str, verdict: str | None 
     elif phase in CASCADE_PHASES:
         if _status(battle, "build") != "done":
             return False, f"{phase} exige build done"
+        if not _plan_approved(battle):
+            return False, "plan non approuvé (approve-plan requis avant la cascade)"
     elif phase == "deliver":
         missing = cascade_missing(battle)
         if missing:
@@ -285,7 +295,7 @@ def apply_transition(battle: dict, phase: str, status: str, verdict: str | None 
                      fails=None, round_=None, threads=None, now_iso=None) -> dict:
     """Applique la transition sur une copie. Lève ValueError si `check_transition` refuse.
 
-    `plan in_progress` (re-plan, GH#93) invalide la cascade `done`/`blocked` (raison `replan`,
+    `plan in_progress` (re-plan, GH#93) invalide la cascade `done`/`blocked`/`in_progress` (raison `replan`,
     `now_iso` horodate l'événement) ; sans cascade rendue, rien n'est écrit."""
     ok, reason = check_transition(battle, phase, status, verdict, fails, round_, threads)
     if not ok:
@@ -432,15 +442,17 @@ def next_slice(battle: dict) -> dict | None:
 # --- Invalidation de la cascade ----------------------------------------------------------
 
 def _invalidate_cascade(out: dict, reason: str, now_iso) -> list[str]:
-    """Remet a `pending` chaque phase de cascade PRESENTE `done`/`blocked` (verdict -> null,
+    """Remet a `pending` chaque phase de cascade PRESENTE `done`/`blocked` (et `in_progress` si
+    `reason == "replan"`, GH#97) (verdict -> null,
     `fails` conserves, `invalidated_at` pose). Mute `out` (copie deja faite). Trace un
     evenement dans `run.invalidations` seulement si une phase a change. Retourne les phases."""
     phases = out.get("phases")
     changed: list[str] = []
     if isinstance(phases, dict):
+        targets = ("done", "blocked", "in_progress") if reason == "replan" else ("done", "blocked")
         for p in CASCADE_PHASES:
             entry = phases.get(p)
-            if isinstance(entry, dict) and entry.get("status") in ("done", "blocked"):
+            if isinstance(entry, dict) and entry.get("status") in targets:
                 entry["status"] = "pending"
                 entry["verdict"] = None
                 if "covers" in entry:
@@ -1801,6 +1813,62 @@ def _t_doc_subcommands() -> None:
         assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
 
 
+def _t_cascade_refused_during_replan() -> None:
+    b = _fx({"think": "done", "plan": ("done", "accept"), "build": "done"})
+    b["phases"]["plan"]["approved_at"] = "T0"
+    b = apply_transition(b, "plan", "in_progress", now_iso="T")
+    b = apply_transition(b, "plan", "done", "accept")   # approved_at reste à null
+    assert b["phases"]["plan"]["approved_at"] is None
+    for p in CASCADE_PHASES:
+        assert "plan non approuvé" in _refused(b, p, "in_progress"), p
+        assert "plan non approuvé" in _refused(b, p, "done", verdict="accept"), p
+        assert check_transition(b, p, "blocked", "revise")[0], p   # C1 : blocked hors spec, permis
+    ok, reason, b2 = approve_plan(b, "T1")
+    assert ok, reason
+    for p in CASCADE_PHASES:
+        assert check_transition(b2, p, "in_progress")[0], p
+        assert check_transition(b2, p, "done", "accept")[0], p
+
+
+def _t_cascade_legacy_no_approval_key() -> None:
+    b = _fx({"plan": ("done", "accept"), "build": "done"})
+    assert "approved_at" not in b["phases"]["plan"]
+    for p in CASCADE_PHASES:
+        assert check_transition(b, p, "in_progress")[0], p
+        assert check_transition(b, p, "done", "accept")[0], p
+    b["phases"]["plan"]["approved_at"] = None
+    for p in CASCADE_PHASES:
+        assert "plan non approuvé" in _refused(b, p, "in_progress"), p
+        assert "plan non approuvé" in _refused(b, p, "done", verdict="accept"), p
+
+
+def _t_replan_invalidates_in_progress_gate() -> None:
+    b = _fx({"think": "done", "plan": ("done", "accept"), "build": "done",
+             "lint": ("done", "accept"), "review": "in_progress"})
+    b["phases"]["plan"]["approved_at"] = "T0"
+    snap = copy.deepcopy(b)
+    out = apply_transition(b, "plan", "in_progress", now_iso="T")
+    assert b == snap   # entrée non mutée
+    for p in ("lint", "review"):
+        e = out["phases"][p]
+        assert e["status"] == "pending" and e["verdict"] is None and e["invalidated_at"] == "T", (p, e)
+    assert out["run"]["invalidations"] == [{"at": "T", "reason": "replan", "phases": ["lint", "review"]}]
+
+
+def _t_polish_keeps_in_progress_gate() -> None:
+    b = _fx({"build": "done", "plan": ("done", "accept"), "lint": ("done", "accept"),
+             "review": ("done", "accept"), "test": ("done", "accept"),
+             "security": "in_progress", "deliver": "pending"})
+    ok, reason, out, det = invalidate(b, "polish", "T")
+    assert ok, reason
+    assert det["invalidated"] == ["lint", "review", "test"], det
+    assert out["phases"]["security"] == {"status": "in_progress"}, out["phases"]["security"]
+    b2 = _fx({"build": "done", "plan": ("done", "accept"), "review": "in_progress"})
+    ok, reason, out2, det2 = invalidate(b2, "rebase", "T")
+    assert ok, reason
+    assert det2["invalidated"] == [] and out2["phases"]["review"]["status"] == "in_progress"
+
+
 _CORE_TESTS = (
     _t_source_consistency, _t_unknown_phase_status, _t_verdict_status_coherence,
     _t_plan_requires_think, _t_build_refused_without_approval,
@@ -1823,6 +1891,8 @@ _CORE_TESTS = (
     _t_replan_invalidates_cascade, _t_first_plan_no_invalidation_event,
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
+    _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
+    _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
 )
 
 
@@ -2240,6 +2310,7 @@ def _t_replan_invalidates_cli() -> None:
         code, res = r.run("check-cascade")
         assert code == 2 and res["ok"] is False
         r.ok("transition", "plan", "done", "--verdict", "accept")
+        assert "plan non approuvé" in r.refused("transition", "lint", "in_progress")
         r.ok("set-slices", "--replace", "s1", "s2")
         b = r.load()
         assert b["phases"]["build"]["status"] == "blocked"
