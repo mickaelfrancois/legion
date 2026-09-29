@@ -17,9 +17,11 @@ gates/schémas). Contrat de données confirmé sur artefacts réels :
   `tokens_total`. `tokens_total` **peut manquer** → toujours `.get`, ne compter dans la
   moyenne coût que les shards qui le portent. `battle_status == "aborted"` marque une battle
   abandonnée (GH#75).
-- **Battle close** : (`status == "done"` **ou** `phase == "reflect"`) **et** non abandonnée
-  (GH#109) : shard `battle_status != "aborted"`, avec un filet sur `battle.json.aborted`
-  (`battle_state.is_aborted`) pour les shards anciens. `coverage["aborted"]` compte les
+- **Battle close** : shard `battle_status == "closed"` (rétro faite, GH#112) ; pour un shard
+  ancien sans `battle_status`, `phase == "reflect"`. Le `status` du shard est celui de la
+  phase courante : `status == "done"` seul ne prouve pas la clôture. Une battle abandonnée
+  (GH#109) n'est jamais close : `battle_status == "aborted"`, avec un filet sur
+  `battle.json.aborted` (`battle_state.is_aborted`) pour les shards anciens. `coverage["aborted"]` compte les
   abandons écartés, et le rapport les annonce.
 - **`battle.json`** (sous `<repo_path>/.legion/battles/<id>/`) : verdicts sous
   `phases.<phase>.verdict`, statut de phase sous `phases.<phase>.status`, rondes revise sous
@@ -71,11 +73,14 @@ _GATE_LABEL = {
 # --------------------------------------------------------------------------- #
 
 def _is_closed(shard: dict) -> bool:
-    """Battle close (spec) : `status == "done"` **ou** `phase == "reflect"`, sauf battle
-    abandonnée (`battle_status == "aborted"`, GH#109)."""
-    if not isinstance(shard, dict) or shard.get("battle_status") == "aborted":
+    """Battle close : `battle_status == "closed"` (GH#112) ; repli `phase == "reflect"` pour
+    un shard ancien sans `battle_status`. `status` est celui de la phase courante, il ne
+    suffit pas. Une battle abandonnée (`battle_status == "aborted"`, GH#109) n'est pas close."""
+    if not isinstance(shard, dict):
         return False
-    return shard.get("status") == "done" or shard.get("phase") == "reflect"
+    if "battle_status" in shard:
+        return shard.get("battle_status") == "closed"
+    return shard.get("phase") == "reflect"
 
 
 def _phase_ran(battle: dict, phase: str) -> bool:
@@ -276,14 +281,17 @@ def _self_test() -> int:
     import tempfile
 
     # ---- cœur pur : _is_closed ----
-    assert _is_closed({"status": "done"})
+    assert not _is_closed({"status": "done"})  # GH#112 : shard ancien, phase courante done
     assert _is_closed({"phase": "reflect"})
     assert not _is_closed({"status": "active", "phase": "build"})
     assert not _is_closed("pas un dict")  # type: ignore[arg-type]
     # GH#109 : une battle abandonnée n'est jamais close, même phase done / reflect.
     assert not _is_closed({"status": "done", "phase": "reflect", "battle_status": "aborted"})
     assert _is_closed({"status": "done", "battle_status": "closed"})
-    assert _is_closed({"status": "done"})  # shard ancien sans battle_status
+    # GH#112 : battle active dont la phase courante vient de finir → pas close.
+    assert not _is_closed({"status": "done", "phase": "plan", "battle_status": "active"})
+    assert not _is_closed({"status": "done", "phase": "reflect", "battle_status": "active"})
+    assert not _is_closed({"status": "blocked", "phase": "review", "battle_status": "blocked"})
 
     # ---- cœur pur : _gate_metrics ----
     b1 = {"phases": {"review": {"status": "done", "verdict": "accept"},
@@ -362,6 +370,12 @@ def _self_test() -> int:
         _write(fleet_d / "d.json",
                {"id": "D", "repo_path": str(repo), "status": "active", "phase": "build",
                 "tokens_total": 999})
+        # Battle E : active, phase courante plan done (GH#112) → exclue des closes.
+        _write(fleet_d / "e.json",
+               {"id": "E", "repo_path": str(repo), "status": "done", "phase": "plan",
+                "battle_status": "active", "tokens_total": 5000})
+        _write(repo / ".legion" / "battles" / "E" / "battle.json", {
+            "phases": {"plan": {"status": "done", "verdict": "reject"}}, "run": {}})
         # Battle F : abandonnée (shard), phase done, coût élevé et reject → exclue partout.
         b_rej = {"phases": {"review": {"status": "done", "verdict": "reject"}}, "run": {}}
         _write(fleet_d / "f.json",
@@ -391,10 +405,10 @@ def _self_test() -> int:
             else:
                 os.environ["LEGION_FLEET"] = prev
 
-        # Couverture : A,B,C closes (D active exclue, bad ignoré) ; A,B avec artefacts.
+        # Couverture : A,B,C closes (D, E actives exclues, bad ignoré) ; A,B avec artefacts.
         assert coverage["m_closed"] == 3, coverage
         assert coverage["n_with_artifacts"] == 2, coverage
-        assert coverage["total_shards"] == 7, coverage  # a..d, f, g, h (bad non parsé)
+        assert coverage["total_shards"] == 8, coverage  # a..h (bad non parsé)
         assert coverage["aborted"] == 3, coverage  # F, H (shard) + G (filet battle.json)
         # Coût : {100, 200, 300} closes au coût connu → moyenne 200, K = 3.
         assert cost["avg_tokens"] == 200.0 and cost["k_with_cost"] == 3, cost
@@ -403,7 +417,7 @@ def _self_test() -> int:
         assert metrics["review"]["avg_rounds"] == 1.0, metrics
         assert metrics["test"]["reject"] == 1, metrics
         assert metrics["review"]["reject"] == 0, metrics  # rejects de F et G exclus
-        # plan n'a de phase dans aucune fixture (A/B) → jamais tourné → None, pas 0.0.
+        # plan ne tourne dans aucune close (le reject de E, active, est exclu) → None, pas 0.0.
         assert metrics["plan"]["ran"] == 0 and metrics["plan"]["revise_rate"] is None, metrics
         # Le rendu ne crashe pas et annonce la couverture réelle.
         report = _render(metrics, cost, coverage)
