@@ -65,7 +65,7 @@ fiablement que haiku.
 |---|---|---|
 | `target` | `builder` \| `architect` \| `none` | `builder` = correction de code/test localisée. `architect` = le commentaire remet en cause l'archi ou le scope (touche le `plan.md`). `none` = question/discussion sans changement de code. |
 | `kind` | `code-trivial` \| `code-logic` \| `test` \| `question` \| `disagreement` | `code-trivial` = renommage, typo, lisibilité (aucun risque de régression). `code-logic` = changement de comportement. `test` = ajout/correction de test. `question` = demande d'explication. `disagreement` = tu juges le retour discutable. |
-| `requires_regate` | `true` \| `false` | `true` pour `code-logic` et `test` (re-passe reviewer/test). `false` pour `code-trivial` (la réponse + résolution suivent directement). |
+| `requires_regate` | `true` \| `false` | `true` pour `code-logic` et `test` : l'orchestrateur invalide les gates et relance la cascade complète depuis `lint`. `false` pour `code-trivial` : `lint` seul, puis la réponse + résolution suivent. |
 
 > **Prudence > zèle.** Si un commentaire est ambigu sur l'intention, classe-le
 > `question` (pas d'écriture spéculative). Si une correction « triviale » touche en

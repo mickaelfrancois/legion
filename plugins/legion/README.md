@@ -132,7 +132,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 | `/legion:battle build [slice\|all] [--auto]` | Code une slice (toi en direct, ou l'agent builder). |
 | `/legion:battle review` / `test` | Lance les gates lint → reviewer → test-engineer → security. |
 | `/legion:battle deliver` | Branche `<moi>/<n>`, commit, push, PR avec `Closes #<n>` (auto en mode autonome ; confirmation avant push en `--step`). |
-| `/legion:battle address` | *(post-deliver, répétable)* Traite les commentaires de revue de la PR : la gate `pr-triage` classe chaque fil, l'orchestrateur corrige (re-gate si besoin), répond et résout. |
+| `/legion:battle address` | *(post-deliver, répétable)* Traite les commentaires de revue de la PR : la gate `pr-triage` classe chaque fil, l'orchestrateur corrige (invalide et relance la cascade depuis `lint` si besoin), répond et résout. |
 | `/legion:battle resume <id>` | Reprend une battle existante (respecte son `run.mode`). |
 | `/legion:battle status` | État des phases de la battle courante. |
 | `/legion:retro [<id>]` | Rétrospective + apprentissage en mémoire + opportunités hors-scope → issues GitHub (dédup) + clôture. |

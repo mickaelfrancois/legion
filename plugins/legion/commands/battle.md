@@ -18,7 +18,7 @@ session's context.
 > through the deterministic script, called as
 > `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" <sub> …` (fall back to
 > `python3`, same interpreter as the other script calls). Subcommands: `init`,
-> `transition`, `approve-plan`, `bump-autocorrect`, `set-delivery`, `set-guard`,
+> `transition`, `approve-plan`, `bump-autocorrect`, `invalidate`, `set-delivery`, `set-guard`,
 > `set-meta`, `activate`, `close`, `validate`. The script prints one JSON object on
 > stdout; **read it**. Exit code `2` means **refused** (or invalid usage): relay the
 > `reason` to the user and **do not advance**. The script enforces the phase
@@ -523,8 +523,14 @@ though the gate ran.
           et le rejouer ; ne pas avancer.
      d. Passer au builder le **chemin de l'artefact** `gate-*.md` (lire depuis le
         disque, ne pas injecter le contenu dans ce contexte) et relancer BUILD pour
-        cette slice. Puis re-invoquer la gate (`transition <phase-key> in_progress`,
-        puis verdict comme ci-dessus). Retour à l'étape (a).
+        cette slice. Le `continue` de `bump-autocorrect` a **déjà invalidé** la cascade
+        (`lint`/`review`/`test`/`security` présentes et `done`/`blocked` → `pending`,
+        `verdict` remis à `null`, `fails` conservés) : le code corrigé n'est plus couvert
+        par aucun verdict. Après le BUILD correctif, **relancer toute la cascade requise
+        depuis `lint`** dans l'ordre (`transition <phase-key> in_progress`, puis verdict
+        comme ci-dessus), et pas seulement la gate qui avait demandé la correction :
+        DELIVER reste refusé tant qu'une gate requise n'est pas revenue à `done`.
+        Retour à l'étape (a).
 
      **Escalade** : la phase reste `blocked` (déjà posée par `transition … blocked`),
      relayer le détail du blocage (gate, FAIL résolus/persistants/nouveaux, tentatives
@@ -537,6 +543,22 @@ When all required review/test/security gates are `done`: in mode `autonomous`,
 **enchaîner directement vers §G (DELIVER)** sans attendre une commande séparée —
 annoncer l'enchaînement. En mode `step`, annoncer la disponibilité pour DELIVER et
 rendre la main.
+
+#### Polishing round
+
+Optional, **at most once per battle**, between the last gate and DELIVER.
+
+- **Trigger**: every required gate is `accept*` (all `done`) and at least one carries a
+  useful WARN worth fixing before shipping.
+- **Procedure**: `battle_state.py invalidate --reason polish`, then a corrective BUILD
+  (pass the builder the WARN detail by artifact path), then re-run the **whole required
+  cascade from `lint`**.
+- **Outside the 2/6 budget**: the polishing round never touches `run.autocorrect`. A
+  `revise` raised *during* the round enters the normal loop above, which does consume
+  the budget.
+- **Enforced by the script**: a second `polish` is refused (exit `2`), and so is one
+  requested when a required gate is not `done` or `deliver` is not `pending`. Relay the
+  `reason` and go on to DELIVER.
 
 ### Non-.NET stack — gate adaptation
 
@@ -590,7 +612,8 @@ Les deux budgets sont **indépendants et non additionnés** :
   sur le run. Ces budgets sont **appliqués par le script** (`bump-autocorrect`, §E :
   `CAP_PER_PHASE = 2`, `CAP_TOTAL = 6` dans `battle_state.py`) ; l'orchestrateur lit la
   décision `continue` / `escalate` et ne compte pas à la main. Un `build_ok: false` du builder après ses 3 essais **compte pour
-  1 tentative** de la boucle orchestrateur.
+  1 tentative** de la boucle orchestrateur. La **ronde de polissage** (§E, `invalidate
+  --reason polish`, une seule fois) ne consomme **pas** ce budget.
 
 La boucle orchestrateur opère un cran au-dessus : elle borne les **re-gate**, pas
 les re-builds internes du builder.
@@ -646,8 +669,10 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
           base delta that was a single orthogonal `.gitignore` commit.)
         - **Intersecting** — the delta touches a file the slice changed or depends on
           (work merged under another SHA, a dependency/SDK migration): **stop, integrate
-          first** (rebase or merge origin), then **re-run BUILD + the review/test gates
-          on the updated base** before delivering. A rebase changes what ships, so gate
+          first** (rebase or merge origin), then run
+          `battle_state.py invalidate --reason rebase` (the verdicts are stale) and
+          **re-run BUILD + the whole required cascade from `lint` on the updated base**
+          before delivering. A rebase changes what ships, so gate
           verdicts on the stale base do **not** carry over. (RETEX: a base behind
           origin's default was only caught at deliver, after the gates had validated a
           base that wasn't shipped.)
@@ -844,9 +869,13 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    - **`target: architect`** → re-judge via the `architect` gate (§A.1 step 5). On
      `revise`/`reject`, update `plan.md`, then the `builder` applies → commit.
    - **Re-gate by blast radius** (`requires_regate`): for `code-logic` / `test`
-     threads, re-run the **§E** cascade (`reviewer` then `test-engineer`) **on the
-     fix**. A `revise` loops back to BUILD (fix, re-commit) before the thread may be
-     resolved. `code-trivial` skips the re-gate.
+     threads (`requires_regate: true`), run
+     `battle_state.py invalidate --reason address:<round>`, then re-run the **whole
+     required §E cascade from `lint`** **on the fix**. A `revise` loops back to BUILD
+     (fix, re-commit) before the thread may be resolved. `code-trivial`
+     (`requires_regate: false`) re-runs `lint` only, without invalidating the other
+     gates. Do not push (step 6) until the required gates are back to `done`: `deliver`
+     is already `done` here, so the script will not stop a premature push.
 
 4. **Update `pr-feedback.md`** — fill each thread's **Commit** (SHA) and target
    **Resolution**.

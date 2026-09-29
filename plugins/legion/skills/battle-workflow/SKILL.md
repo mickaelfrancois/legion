@@ -122,7 +122,7 @@ never invokes another agent; the builder never invokes a gate.
 |---|---|---|
 | `accept` | 0 FAIL, criteria met | Phase closed, advance. |
 | `accept_with_opportunity` | 0 FAIL, ≥1 improvement spotted | Advance; opportunity logged in the artifact. |
-| `revise` | ≥1 FAIL | **Does not advance.** Review-cascade gate (lint/reviewer/test/security): fix (back to BUILD) and re-run the gate — automatically in `autonomous` (bounded auto-correction loop), by hand-back in `step`. PLAN gate (`architect`): **always** hands back to adjust the spec. |
+| `revise` | ≥1 FAIL | **Does not advance.** Review-cascade gate (lint/reviewer/test/security): fix (back to BUILD) and re-run the whole required cascade from `lint` (the correction invalidated the earlier verdicts) — automatically in `autonomous` (bounded auto-correction loop), by hand-back in `step`. PLAN gate (`architect`): **always** hands back to adjust the spec. |
 | `reject` | Major regression / unusable | **Stop — immediate escalation** (case 1), in every mode. Redesign required. |
 
 ## Phases and delegation
@@ -171,8 +171,8 @@ stabilized.
 fetches the unresolved review threads (`gh api graphql` — the REST API does not
 expose `isResolved`), hands them to the read-only `pr-triage` gate (classifies each
 thread → `target` builder/architect/none, `kind`, `requires_regate` + drafts a FR
-reply), then the orchestrator applies the fixes (one commit per thread, re-gating
-`code-logic`/`test` through REVIEW/TEST), pushes, and **replies + resolves** each
+reply), then the orchestrator applies the fixes (one commit per thread; `code-logic`/`test`
+invalidate the gates and re-run the cascade from `lint`; `code-trivial` re-runs `lint` only), pushes, and **replies + resolves** each
 thread — verifying the resolution actually stuck server-side before persisting.
 Repeatable: one **round** per comment wave (`phases.address.round`). Artifact:
 `pr-feedback.md`. GitHub has no `fixed`/`wontFix` distinction — both resolve the
@@ -187,7 +187,8 @@ thread; a `question` is left unresolved for the author.
 |---|---|
 | **Run autonome** | Enchaînement BUILD → gates → DELIVER déclenché automatiquement après l'approbation du plan, sans intervention humaine intermédiaire, sauf escalade. |
 | **Arbitrage** | Décision que seul l'humain peut trancher (taxonomie d'escalade ci-dessous). L'orchestrateur s'arrête et rend la main uniquement dans ces cas. |
-| **Boucle d'auto-correction** | Sur `revise` d'une gate ou `build_ok == false`, l'orchestrateur re-build et re-gate sans rendre la main, jusqu'à convergence ou épuisement du budget (2 tentatives/gate, 6 tentatives au global — maximums fermes). |
+| **Boucle d'auto-correction** | Sur `revise` d'une gate ou `build_ok == false`, l'orchestrateur re-build, invalide la cascade et la relance depuis `lint` sans rendre la main, jusqu'à convergence ou épuisement du budget (2 tentatives/gate, 6 tentatives au global — maximums fermes). |
+| **Ronde de polissage** | Une seule fois par battle, quand toutes les gates sont `accept*` : `invalidate --reason polish`, BUILD correctif, cascade depuis `lint`. Hors budget 2/6 ; une seconde ronde est refusée par le script. |
 | **Escalade** | L'orchestrateur rend la main à l'humain avec le détail du blocage. Toujours motivée par un cas de la taxonomie d'escalade. |
 
 ## State layout
@@ -202,7 +203,7 @@ gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
 
 `battle.json` schema (**no need to open `ARCHITECTURE.md` at run time**). It is written
 **only by `scripts/battle_state.py`** (subcommands `init`, `transition`, `approve-plan`,
-`bump-autocorrect`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`,
+`bump-autocorrect`, `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`,
 `validate`), which checks every phase transition, writes atomically and resyncs the fleet
 shard — never edit it by hand. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
 single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
@@ -253,7 +254,12 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
     "autocorrect": {
       "per_gate": {},                   // (écrit par `bump-autocorrect`) { "review": 1, "test": 0, … } — tentatives par gate, indexées par CLÉ DE PHASE (lint|review|test|security), jamais par nom de gate
       "total": 0                        // compteur global de tentatives (plafond : 6 au global, maximum ferme)
-    }
+    },
+    // (optionnel, écrit par `invalidate` / `bump-autocorrect` continue) trace des invalidations de cascade,
+    // uniquement quand au moins une phase a changé : [{ "at": ISO, "reason": "polish|rebase|address:<n>|autocorrect:<phase>|manual", "phases": ["lint","review"] }].
+    // Une phase invalidée repasse `pending`, `verdict` null, `fails` conservés, et porte `phases.<p>.invalidated_at`.
+    // Une seule entrée `polish` est permise par battle.
+    "invalidations": []
   },
   "delivery": { "pr_url": null }
 }
