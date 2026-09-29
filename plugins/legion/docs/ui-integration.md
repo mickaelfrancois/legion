@@ -141,18 +141,32 @@ du repo (utile si l'UI veut signaler « la battle en cours dans ce repo »).
   "required_gates": ["architect", "lint", "reviewer", "test-engineer"],
   "phases": {
     "think":   { "status": "done", "artifact": "spec.md" },
-    "plan":    { "status": "done", "artifact": "plan.md", "verdict": "accept" },
+    "plan":    { "status": "done", "artifact": "plan.md", "verdict": "accept", "fails": [], "approved_at": "2026-06-08T09:30:00+00:00" },
     "build":   { "status": "in_progress" },
     "lint":    { "status": "pending" },
-    "review":  { "status": "pending" },
+    "review":  { "status": "pending" },   // phases de cascade : `verdict` + `fails` après un passage
     "test":    { "status": "pending" },
     "deliver": { "status": "pending" },
     "reflect": { "status": "pending" }
   },
   "guard": { "allow": ["src/Billing.Api/**", "tests/**"], "deny": [], "careful": false },
+  "run": { "mode": "autonomous", "autocorrect": { "per_gate": {}, "total": 0 } },
   "delivery": { "pr_url": null }
 }
 ```
+
+Champs ajoutés (tous **optionnels** pour un lecteur : lecture défensive, une battle
+antérieure peut ne pas les avoir) :
+
+- `phases.plan.approved_at` : horodatage ISO-8601 de l'approbation humaine du plan
+  (`null` tant que non approuvé). Posé par `battle_state.py approve-plan`.
+- `phases.<phase>.fails` : FAILs ciblés du dernier passage (`{target, dimension}`) ;
+  présent sur `plan` et sur les phases de cascade (`lint`, `review`, `test`, `security`).
+- `run` : `mode` (`autonomous` | `step`) et `autocorrect` (`per_gate` par clé de phase,
+  `total`) — compteurs de la boucle d'auto-correction.
+
+Ce fichier est écrit **uniquement** par `scripts/battle_state.py` (transitions vérifiées,
+écriture atomique) ; l'UI le lit, ne l'écrit jamais.
 
 Le shard `fleet.d/*.json` est une **projection** de ce fichier ; pour le détail par
 phase (verdicts, artefacts), l'UI lit `phases` ici. La source de vérité est toujours
@@ -187,7 +201,8 @@ extrait du verdict (lu dans le `gate-*.md`) quand `battle_status == "blocked"`.
   (Windows ⇒ antislashs `C:\src\...`). Normaliser avant de composer le chemin
   des artefacts ; ne pas supposer `/`.
 - **Fraîcheur** : le shard d'une battle est réécrit par un hook `PostToolUse` à
-  **chaque écriture de son `battle.json`** par l'orchestrateur — donc à chaque
+  **chaque écriture de son `battle.json`** — `battle_state.py` réécrit lui-même le shard
+  après chaque mutation, le hook n'est qu'un filet — donc à chaque
   transition de phase, pas en temps réel. Pour du quasi-temps-réel, l'UI peut
   *watcher* le dossier `fleet.d/` et/ou les `<repo_path>/.legion/battles/`.
 - **Shard orphelin** : si une battle est supprimée/déplacée, son shard subsiste

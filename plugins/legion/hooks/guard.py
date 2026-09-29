@@ -44,6 +44,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 ACTIVE_POINTER = Path(".legion/active-battle")
@@ -56,21 +57,29 @@ ALWAYS_ALLOW = (".legion/**", ".gitignore")  # etat de la battle + .gitignore (s
 # le builder "<plugin>:builder" (tous deux hors table -> regles de perimetre standard).
 # Chaque gate listee ici ne peut ecrire QUE l'artefact associe, dans le dossier de
 # la battle active. Le prefixe de plugin (`legion:`) doit matcher le `name` du
-# marketplace ; sur un fork (ex. `divalto-legion`) adapter le prefixe.
-GATE_ARTIFACT = {
-    "legion:architect": "plan.md",
-    "legion:lint": "gate-lint.md",
-    "legion:reviewer": "gate-review.md",
-    "legion:test-engineer": "gate-test.md",
-    "legion:security": "gate-security.md",
-    "legion:pr-triage": "pr-feedback.md",
-}
+# marketplace ; sur un fork (ex. `divalto-legion`) adapter `PLUGIN_PREFIX`.
+#
+# Les tables (agent -> artefact) sont derivees de la source unique
+# `scripts/battle_state.py` (GH#69), sans copie de repli. Chemin resolu depuis `__file__`
+# (jamais le cwd). Si l'import echoue (installation incomplete), le hook ne plante pas
+# mais se ferme : cf. `_fallback_decision` ; et son --self-test echoue (exit 1).
+PLUGIN_PREFIX = "legion:"
 
-# Producteur : hors `.legion/`, regles de perimetre standard ; SOUS `.legion/`, seul
-# son rapport est autorise (jamais `battle.json` -> pas d'auto-elargissement du guard).
-PRODUCER_ARTIFACT = {
-    "legion:builder": "build-report.md",
-}
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+_IMPORT_ERROR: str | None = None
+try:
+    if str(_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR))
+    from battle_state import GATE_ARTIFACT as _GATE_ARTIFACT_SRC
+    from battle_state import PRODUCER_ARTIFACT as _PRODUCER_ARTIFACT_SRC
+    GATE_ARTIFACT = {PLUGIN_PREFIX + g: a for g, a in _GATE_ARTIFACT_SRC.items()}
+    # Producteur : hors `.legion/`, regles de perimetre standard ; SOUS `.legion/`, seul
+    # son rapport est autorise (jamais `battle.json` -> pas d'auto-elargissement du guard).
+    PRODUCER_ARTIFACT = {PLUGIN_PREFIX + g: a for g, a in _PRODUCER_ARTIFACT_SRC.items()}
+except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
+    _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
+    GATE_ARTIFACT = {}
+    PRODUCER_ARTIFACT = {}
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -227,6 +236,37 @@ def _resolved_parts(repo_root: Path, file_path: str) -> tuple[str, ...]:
         return ()
 
 
+def _fallback_decision(data: dict, repo_root: Path) -> tuple[int, str] | None:
+    """Repli quand la source unique est introuvable (C1, option B) : fermer, sans copie.
+
+    - `<plugin>:builder` : bloque sous un `.legion/` (casse ignoree, racine ou non), regles
+      standard ailleurs (retourne None) ;
+    - tout autre `<plugin>:*` (gates) : bloque ;
+    - session principale et autres agents : None (regles standard).
+    """
+    agent_type = data.get("agent_type")
+    if not isinstance(agent_type, str) or not agent_type.startswith(PLUGIN_PREFIX):
+        return None
+    file_path = (data.get("tool_input") or {}).get("file_path", "")
+    detail = "installation legion incomplete (scripts/battle_state.py introuvable)"
+    if agent_type == PLUGIN_PREFIX + "builder":
+        if not file_path:
+            return None
+        rel = _relative(repo_root, file_path)
+        parts = _resolved_parts(repo_root, file_path.replace("\\", "/"))
+        in_state = (rel is not None and _touches_legion_state(rel.split("/"))) or _touches_legion_state(parts)
+        if not in_state:
+            return None
+        return 2, (
+            f"BLOQUE : {detail}.\nLe `{agent_type}` ne peut pas ecrire sous `.legion/` "
+            f"tant que l'installation n'est pas reparee ({_IMPORT_ERROR})."
+        )
+    return 2, (
+        f"BLOQUE : {detail}.\nLa gate `{agent_type}` ne peut pas ecrire tant que "
+        f"l'installation n'est pas reparee ({_IMPORT_ERROR})."
+    )
+
+
 def _is_blank_content(content) -> bool:
     """True si le contenu d'un `Write` est absent ou entierement blanc (artefact 0 octet)."""
     return content is None or not str(content).strip()
@@ -238,6 +278,11 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
         return 0, ""
 
     file_path = (data.get("tool_input") or {}).get("file_path", "")
+
+    if _IMPORT_ERROR is not None:
+        fallback = _fallback_decision(data, repo_root)
+        if fallback is not None:
+            return fallback
 
     # Confinement des gates : une gate n'ecrit QUE son artefact (cf. GATE_ARTIFACT).
     # Prioritaire sur tout le reste, et actif meme guard non arme.
@@ -345,6 +390,16 @@ def main() -> int:
 
 
 def _self_test() -> int:
+    global _IMPORT_ERROR
+    if _IMPORT_ERROR is not None:
+        print(f"FAIL: import de scripts/battle_state.py impossible ({_IMPORT_ERROR})", file=sys.stderr)
+        return 1
+    import battle_state
+    # tables derivees de la source unique (memes cles prefixees, memes artefacts)
+    assert GATE_ARTIFACT == {PLUGIN_PREFIX + g: a for g, a in battle_state.GATE_ARTIFACT.items()}
+    assert PRODUCER_ARTIFACT == {PLUGIN_PREFIX + g: a for g, a in battle_state.PRODUCER_ARTIFACT.items()}
+    assert set(GATE_ARTIFACT) == {f"legion:{g}" for g in battle_state.GATES}
+    assert PRODUCER_ARTIFACT == {"legion:builder": "build-report.md"}
     # glob matching
     assert _matches("src/Billing.Api/Foo.cs", ["src/Billing.Api/**"])
     assert _matches("tests/Bar.cs", ["tests/**"])
@@ -395,7 +450,6 @@ def _self_test() -> int:
     # artefact vide (RETEX A1) : contenu blanc -> bloque ; contenu reel -> autorise
     assert _is_blank_content("") and _is_blank_content("  \n\t ") and _is_blank_content(None)
     assert not _is_blank_content("# Review\nverdict")
-    import tempfile
     with tempfile.TemporaryDirectory() as _d:
         _root = Path(_d)
         (_root / ".legion" / "battles" / "B").mkdir(parents=True)
@@ -425,6 +479,31 @@ def _self_test() -> int:
         # session principale (orchestrateur) : battle.json toujours ecrivable
         assert _decide({"tool_name": "Edit", "agent_type": "claude",
                         "tool_input": {"file_path": ".legion/battles/B/battle.json"}}, _root)[0] == 0
+    # repli simule (import echoue) : gates bloquees, builder bloque sous .legion/ seulement,
+    # session principale en regles standard
+    saved, _IMPORT_ERROR = _IMPORT_ERROR, "ImportError: simule"
+    try:
+        with tempfile.TemporaryDirectory() as _d:
+            _root = Path(_d)
+            _w = {"tool_name": "Write"}
+            code, msg = _decide({**_w, "agent_type": "legion:reviewer",
+                                 "tool_input": {"file_path": ".legion/battles/B/gate-review.md",
+                                                "content": "x"}}, _root)
+            assert code == 2 and "installation legion incomplete" in msg, (code, msg)
+            assert _decide({**_w, "agent_type": "legion:lint",
+                            "tool_input": {"file_path": "src/x.cs"}}, _root)[0] == 2
+            assert _decide({**_w, "agent_type": "legion:builder",
+                            "tool_input": {"file_path": ".legion/battles/B/build-report.md"}}, _root)[0] == 2
+            assert _decide({**_w, "agent_type": "legion:builder",
+                            "tool_input": {"file_path": ".LEGION/battles/B/battle.json"}}, _root)[0] == 2
+            assert _decide({**_w, "agent_type": "legion:builder",
+                            "tool_input": {"file_path": "src/x.cs"}}, _root)[0] == 0
+            assert _decide({**_w, "agent_type": "claude",
+                            "tool_input": {"file_path": ".legion/battles/B/battle.json"}}, _root)[0] == 0
+            assert _decide({"tool_name": "Bash", "agent_type": "legion:reviewer"}, _root)[0] == 0
+    finally:
+        _IMPORT_ERROR = saved
+
     print("OK: guard self-test passed", file=sys.stderr)
     return 0
 

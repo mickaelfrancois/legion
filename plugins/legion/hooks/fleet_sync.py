@@ -25,6 +25,7 @@ Tests CLI :
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import sys
@@ -33,11 +34,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit")
-# `address` is optional + repeatable (post-deliver PR review loop); when never run
-# its phase entry is simply absent, which _current_phase treats transparently.
-# `lint` (.NET formatting gate) heads the review cascade, right after `build`.
-# `security` closes the cascade; optional (only when required), absent otherwise.
-PHASE_ORDER = ["think", "plan", "build", "lint", "review", "test", "security", "deliver", "address", "reflect"]
+# Liste des phases : source unique `scripts/battle_state.py` (GH#69), pas de copie de repli.
+# Chemin resolu depuis `__file__` (jamais le cwd). Si l'import echoue (installation
+# incomplete), le hook ne fait rien (exit 0 + stderr) et son --self-test echoue (exit 1) :
+# un hook ne doit jamais planter la session, mais la panne doit se voir.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+_IMPORT_ERROR: str | None = None
+try:
+    if str(_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR))
+    from battle_state import PHASES as _PHASES
+    PHASE_ORDER = list(_PHASES)
+except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
+    _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
+    PHASE_ORDER = []
 
 
 def _state_base() -> Path:
@@ -219,6 +229,14 @@ def main() -> int:
     if "--self-test" in sys.argv:
         return _self_test()
 
+    if _IMPORT_ERROR is not None:
+        print(
+            "fleet_sync: installation legion incomplete (scripts/battle_state.py "
+            f"introuvable) : synchro fleet ignoree ({_IMPORT_ERROR})",
+            file=sys.stderr,
+        )
+        return 0
+
     fleet_dir = _fleet_dir()
     try:
         _migrate_legacy(fleet_dir, _legacy_fleet_path())  # best-effort, idempotent
@@ -249,6 +267,12 @@ def main() -> int:
 
 
 def _self_test() -> int:
+    global _IMPORT_ERROR
+    if _IMPORT_ERROR is not None:
+        print(f"FAIL: import de scripts/battle_state.py impossible ({_IMPORT_ERROR})", file=sys.stderr)
+        return 1
+    import battle_state
+    assert PHASE_ORDER == list(battle_state.PHASES), PHASE_ORDER  # source unique
     assert _current_phase({"plan": {"status": "done"}, "build": {"status": "in_progress"}}) == ("build", "in_progress")
     assert _current_phase({"plan": {"status": "done"}}) == ("plan", "done")
     assert _current_phase({"review": {"status": "blocked"}}) == ("review", "blocked")
@@ -302,6 +326,29 @@ def _self_test() -> int:
         b1 = next(e for e in read_fleet(fleet_dir) if e["id"] == "b1")
         assert b1["tokens_total"] == 135 and b1["skills"] == ["scaffold", "build-fix"]
         assert b1["battle_status"] == "active", b1
+
+    # repli simule (import echoue) : main() ne fait rien, exit 0, avertit sur stderr, n'ecrit rien
+    saved, _IMPORT_ERROR = _IMPORT_ERROR, "ImportError: simule"
+    _argv, sys.argv = sys.argv, [sys.argv[0]]
+    _stderr, sys.stderr = sys.stderr, io.StringIO()
+    _stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(
+        {"tool_name": "Write", "tool_input": {"file_path": "x/.legion/battles/z/battle.json"}}))
+    try:
+        with tempfile.TemporaryDirectory() as d2:
+            prev = os.environ.get("LEGION_FLEET")
+            os.environ["LEGION_FLEET"] = str(Path(d2) / "fleet.json")
+            try:
+                rc = main()
+            finally:
+                if prev is None:
+                    os.environ.pop("LEGION_FLEET", None)
+                else:
+                    os.environ["LEGION_FLEET"] = prev
+            wrote = list(Path(d2).rglob("*"))
+        warned = sys.stderr.getvalue()
+    finally:
+        sys.stderr, sys.stdin, sys.argv, _IMPORT_ERROR = _stderr, _stdin, _argv, saved
+    assert rc == 0 and not wrote and "installation legion incomplete" in warned, (rc, wrote, warned)
 
     print("OK: fleet_sync self-test passed", file=sys.stderr)
     return 0

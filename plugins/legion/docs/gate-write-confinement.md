@@ -89,7 +89,7 @@ On remplace « gates pures » par :
 
 La garantie « une gate ne touche pas le code » devient **structurelle** (portée par le
 hook), au lieu d'être seulement déclarée dans le prompt. L'orchestrateur écrit le reste
-(`battle.json`, `spec.md`, artefacts de PR) et **lit** les artefacts de gate sur disque
+(`spec.md`, artefacts de PR ; `battle.json` via `battle_state.py`) et **lit** les artefacts de gate sur disque
 au besoin.
 
 **Pourquoi c'est sûr sans politique de dégradation.** La règle ne s'arme que pour un
@@ -104,7 +104,10 @@ une gate confinée.
 
 ### 4.1 `hooks/guard.py` — le cœur
 
-Ajouter la table (clés **namespacées** — adapter le préfixe au plugin) :
+Ajouter la table (clés **namespacées** — adapter le préfixe au plugin). Dans legion, cette
+table est désormais **dérivée** de `battle_state.GATE_ARTIFACT` (source unique, préfixe
+`legion:` ajouté par `guard.py`, repli fail-closed si le script est introuvable) ; le
+bloc ci-dessous reste l'illustration du principe :
 
 ```python
 GATE_ARTIFACT = {

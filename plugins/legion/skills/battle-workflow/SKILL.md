@@ -89,7 +89,9 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
 - **Orchestrateur (re-gate)** : 2 tentatives par gate (maximum ferme), plafond global de 6 tentatives au global (maximum ferme).
   Progrès = au moins un FAIL ciblé résolu entre deux tentatives (mesuré par l'identité
   des FAIL — `fichier:ligne` + dimension —, pas le compte brut) ; aucun FAIL précédent
-  résolu → escalade immédiate.
+  résolu → escalade immédiate. Ces budgets sont **appliqués par le script**
+  (`battle_state.py bump-autocorrect`, seul écrivain de `run.autocorrect`) : le plafond
+  et le test de progrès ne dépendent plus de la discipline de l'orchestrateur.
 
 ## Two natures of actor
 
@@ -105,7 +107,7 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
 "a gate never touches the _code_" (judge ≠ party), not "a gate writes nothing"**; a
 gate writing its own artifact serves context discipline. Rationale:
 [`../../docs/gate-write-confinement.md`](../../docs/gate-write-confinement.md) §1. The orchestrator persists
-  the rest (`battle.json`, `spec.md`, PR artifacts) and reads gate artifacts from disk
+  the rest (`spec.md`, PR artifacts; `battle.json` only through `battle_state.py`) and reads gate artifacts from disk
   on demand. (`pr-triage` also returns its TRIAGE JSON for routing.) Because a verdict
   no longer proves the artifact exists, the orchestrator runs a deterministic
   **delivery check** before trusting it (artifact exists, non-empty, canonical path,
@@ -198,8 +200,12 @@ spec.md  plan.md  build-report.md  gate-lint.md  gate-review.md  gate-test.md
 gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
 ```
 
-`battle.json` schema (write it from this — **no need to open `ARCHITECTURE.md` at
-run time**):
+`battle.json` schema (**no need to open `ARCHITECTURE.md` at run time**). It is written
+**only by `scripts/battle_state.py`** (subcommands `init`, `transition`, `approve-plan`,
+`bump-autocorrect`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`,
+`validate`), which checks every phase transition, writes atomically and resyncs the fleet
+shard — never edit it by hand. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
+single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
 
 ```jsonc
 {
@@ -211,12 +217,18 @@ run time**):
   "required_gates": ["architect", "lint", "reviewer", "test-engineer"],
   "phases": {
     "think":   { "status": "done", "artifact": "spec.md" },
-    "plan":    { "status": "in_progress", "artifact": "plan.md", "verdict": null, "fails": [] },
-    // plan.fails — sur `revise`, l'orchestrateur y persiste les FAILs verbatim relayés
+    "plan":    { "status": "in_progress", "artifact": "plan.md", "verdict": null, "fails": [], "approved_at": null },
+    // plan.approved_at — horodatage de l'OK humain, posé par `battle_state.py approve-plan`
+    // (refusé si le plan n'est pas `accept*`). Un nouveau passage `plan in_progress` le remet
+    // à null : `build in_progress` est refusé tant que le plan n'est pas (ré)approuvé
+    // (battle legacy sans la clé : chemin de compatibilité, cf. battle.md §B).
+    // plan.fails — sur `revise`, l'orchestrateur relaie les FAILs verbatim et le script les persiste
     // (ciblés fichier:ligne + dimension) ET snapshote spec.md → `spec.plan-baseline.md`
     // dans le dossier de la battle. Les deux forment le contexte de reprise du re-run
     // incrémental (les FAILs vivent sinon dans le seul contexte live et disparaissent
     // sur session reprise / compaction). Vidé ([]) dès qu'un passage rend `accept*`.
+    // Les phases de cascade (lint|review|test|security) portent aussi `verdict` et `fails`
+    // (FAILs ciblés du dernier passage, alimentés par `bump-autocorrect --fails`).
     "build":   { "status": "pending" },
     "lint":    { "status": "pending" },     // .NET-only — self-retires (neutral accept) on non-.NET
     "review":  { "status": "pending" },
@@ -232,14 +244,14 @@ run time**):
   // nothing on a root-projects repo and silently blocks every builder edit.
   "guard": { "allow": ["src/**", "tests/**"], "deny": [], "careful": false },
   "stack": { "kind": ".net", "build_target": null, "test_target": null },  // *_target: explicit csproj when the repo has NO .sln; null ⇒ run dotnet from root
-  // run — mode d'exécution de la battle (écrit par /battle start).
+  // run — mode d'exécution de la battle (créé par `battle_state.py init`, jamais à la main).
   // Absent (battle antérieure à la feature) ⇒ "autonomous" par défaut : aucune battle
   // en cours n'est cassée par l'ajout de ce champ.
   // --step sur start écrit run.mode = "step" (comportement pas-à-pas, cf. §B/§D/§E/§G).
   "run": {
     "mode": "autonomous",               // "autonomous" | "step"
     "autocorrect": {
-      "per_gate": {},                   // { "review": 1, "test": 0, … } — tentatives par gate, indexées par CLÉ DE PHASE (lint|review|test|security), jamais par nom de gate
+      "per_gate": {},                   // (écrit par `bump-autocorrect`) { "review": 1, "test": 0, … } — tentatives par gate, indexées par CLÉ DE PHASE (lint|review|test|security), jamais par nom de gate
       "total": 0                        // compteur global de tentatives (plafond : 6 au global, maximum ferme)
     }
   },
@@ -282,7 +294,8 @@ opportunities** → deduplicated GitHub issues on the target repo (from the
 
 ## Guardrails
 
-`/freeze`, `/guard`, `/careful` set `battle.json.guard`. PreToolUse hooks enforce:
+`/freeze`, `/guard`, `/careful` set `battle.json.guard` through
+`battle_state.py set-guard` (never by hand). PreToolUse hooks enforce:
 `guard.py` **blocks** edits outside `guard.allow` (`exit 2`), `careful.py`
 **warns** (never blocks) on destructive shell commands. Bypass:
 `LEGION_GUARD_OFF=1`. The `builder` is subject to the same guard, and under `.legion/`
