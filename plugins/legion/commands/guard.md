@@ -13,8 +13,24 @@ Arguments: `$ARGUMENTS`
 
 3. Otherwise build the preset:
    - **allow** ← the file targets declared in the slices of `plan.md` (the paths
-     the architect locked), plus `tests/**`. This keeps edits within what the
-     plan actually touches.
+     the architect locked), plus the **test directories derived from the real
+     layout** — never a blind `tests/**`:
+     - **.NET** (`battle.json.stack.kind`): `Glob '**/*.csproj'`, keep the test
+       projects (name ending in `.Tests` / `.UnitTests` / `.IntegrationTests`, or
+       referencing a test SDK such as `xunit` / `NUnit` / `MSTest`), and add
+       `<containing folder>/**` for each. A repo whose projects sit at the root
+       (`HttpForge.Tests/`) gets `HttpForge.Tests/**`, not a `tests/**` that
+       matches nothing. (`/legion:battle start` §A.1 step 4 derives the whole
+       perimeter from every csproj folder; this preset narrows it to the plan, so
+       it only adds the test folders.)
+     - **Non-.NET**: add the test roots that actually exist — `test/`, `tests/`,
+       `__tests__/`, `spec/`, or the roots configured by the test runner
+       (`jest` / `vitest` config, `pyproject.toml` `testpaths`, …).
+   - **Check every allow glob matches at least one existing path** (or a path a
+     slice declares it will create). A glob that matches nothing is a dead perimeter
+     that silently blocks the builder: **warn the user**, propose the derived
+     replacement, and **persist only after their confirmation** — never persist a
+     dead glob blind.
    - **deny** ← sensitive-file patterns regardless of allow:
      `**/appsettings*.json` (secrets sections), `**/*.pfx`, `**/*.pem`,
      `**/secrets.json`, `**/.env`, and any path the repo marks as protected.
