@@ -78,6 +78,7 @@ L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants :
 | **3. Déviation du plan** | La correction sort du périmètre de `plan.md` ou `guard.allow`. | Escalade : re-planification nécessaire. |
 | **4. Filets DELIVER** | Base en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit. | Escalade : résoudre le filet d'abord. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
+| **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (contrôle d'intégrité, `battle.md` §E). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. |
 
 Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiquement.
 
@@ -111,7 +112,11 @@ gate writing its own artifact serves context discipline. Rationale:
   on demand. (`pr-triage` also returns its TRIAGE JSON for routing.) Because a verdict
   no longer proves the artifact exists, the orchestrator runs a deterministic
   **delivery check** before trusting it (artifact exists, non-empty, canonical path,
-  freshly written this pass via mtime) — see `battle.md` §E.
+  freshly written this pass via mtime) — see `battle.md` §E. A second deterministic check,
+  the **tree integrity check** (`tree-snapshot` / `tree-verify`), fingerprints the working
+  tree around every gate and builder: a gate write outside its artifact (Bash included) makes
+  the verdict void (escalation case 6). The `guard.py` hook also filters obvious Bash writes
+  of a gate upstream, as a first filter only.
 
 Sequencing rule: the **orchestrator** (`/battle`) chains `builder → gates`. A gate
 never invokes another agent; the builder never invokes a gate.
@@ -338,7 +343,11 @@ confinement**: `guard.py` also reads `agent_type` and restricts each gate
 (`architect`/`lint`/`reviewer`/`test-engineer`/`security`/`pr-triage`) to writing
 **only** its own artifact under `.legion/battles/<active>/` — any other write (code,
 `battle.json`, another gate's file) is blocked, even when the perimeter guard is not
-armed.
+armed. The same hook filters a **gate's** Bash / PowerShell writes (redirections, `rm`,
+`sed -i`, `git add`/`commit`…); it is a best-effort first filter. The guarantee is the
+**tree integrity check** (`artifact_check.py tree-snapshot` / `tree-verify`, `battle.md` §E),
+which also catches what the filter cannot see (`python -c`, `bash -c`) and checks the
+builder against `guard.allow` (`--guard`).
 
 ## Conventions
 

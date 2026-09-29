@@ -87,8 +87,9 @@ On remplace « gates pures » par :
 > `agent_type` (toute autre écriture → `exit 2`). La gate **retourne** alors son
 > verdict + le **chemin** de l'artefact — jamais le contenu.
 
-La garantie « une gate ne touche pas le code » devient **structurelle** (portée par le
-hook), au lieu d'être seulement déclarée dans le prompt. L'orchestrateur écrit le reste
+La garantie « une gate ne touche pas le code » devient **structurelle**, au lieu d'être
+seulement déclarée dans le prompt. Elle repose sur l'**empreinte de l'arbre** (§ 4.6), le
+hook n'étant qu'un premier filtre. L'orchestrateur écrit le reste
 (`spec.md`, artefacts de PR ; `battle.json` via `battle_state.py`) et **lit** les artefacts de gate sur disque
 au besoin.
 
@@ -237,6 +238,130 @@ sans PowerShell) :
 > le seul séquenceur** (qui décide d'avancer ou de bloquer), couvre le risque sans ce
 > coût. À reconsidérer si, en pratique, des gates ratent l'écriture malgré tout.
 
+### 4.6 Deux couches : empreinte de l'arbre et filtre Bash (#66)
+
+Le hook `PreToolUse(Edit|Write|MultiEdit)` ne voit pas l'outil `Bash`. Une gate (ou un
+builder) pouvait donc écrire par `echo > f`, `sed -i` ou `git checkout`. Deux couches
+comblent ce trou.
+
+**Couche 1 — empreinte de l'arbre (la garantie).** `artifact_check.py tree-snapshot` prend
+une empreinte : `HEAD`, entrées de `git status` avec le hash de leur contenu, état protégé
+(`.legion/active-battle`, `battle.json`), masques d'index, config git locale et worktree,
+hooks (dossier réel et `core.hooksPath`), `info/attributes`, `.gitignore` eux-mêmes ignorés, la
+config git globale et système, les fichiers `attributes`/`ignore` effectifs (explicites ou XDG)
+et **l'état du dossier git** (voir ci-dessous).
+
+*État du dossier git.* L'empreinte hashe les chemins du git-dir (et du dossier commun pour un
+worktree lié) **que git lit** : `HEAD` et tout `*_HEAD` (`MERGE_HEAD`, `CHERRY_PICK_HEAD`,
+`REVERT_HEAD`, `ORIG_HEAD`, `REBASE_HEAD`…), `BISECT_*`, `AUTO_MERGE`, `MERGE_MSG`, `SQUASH_MSG`,
+`refs/` (tags, remotes, notes, stash, **branches**), `packed-refs`, `rebase-merge/`, `rebase-apply/`,
+`sequencer/`, `shallow`, `info/` (grafts…), `modules/`, `commondir`, `config.worktree`, ainsi que
+la liste des worktrees enregistrés (chemin, branche, `gitdir`). Tout écart est la faute
+`[git-state]`, jamais filtrable. Un fichier que git ne connaît pas à la racine du git-dir (par
+exemple les `.git/sg-hook-once-toolu_*` qu'écrit un hook tiers à chaque appel d'outil) est inerte :
+git l'ignore, ce n'est pas une faute. Exclusions, chacune justifiée : `objects/` (limite, voir
+plus bas) ; `index`, `*.lock`, `sharedindex.*` (un `git status`/`diff` de l'orchestrateur
+rafraîchit l'index : octets instables) ; `logs/` (reflogs), `FETCH_HEAD`, `COMMIT_EDITMSG`,
+`gc.log`, `gc.pid` (journaux écrits par git, jamais lus pour décider d'un commit ou d'un push) ;
+les **seules** branches extraites dans un worktree enregistré (`refs/heads/<b>` et lignes de
+`packed-refs`) : celles des builders isolés bougent pendant un lot. Toute autre branche est
+hashée : une gate qui crée la branche de livraison `<me>/<token>` est vue. Le dossier `worktrees/`
+du dossier commun est remplacé par la liste des worktrees (un faux `.git/worktrees/x` qui ferait
+sortir un dossier suivi de l'empreinte apparaît dans cette liste). Exception unique : après un
+lot de builders `--auto` isolés, `tree-verify --batch-worktrees` sur le tronc accepte les
+worktrees **apparus depuis le snapshot** qui sont sous `<racine>/.claude/worktrees/`, non
+`prunable`, et dont l'entrée admin et le fichier `.git` se renvoient l'un à l'autre. Un worktree
+disparu ou redirigé, ou tout autre worktree, reste une faute. L'exception est aussi refusée
+(faute) si `.claude`, `.claude/worktrees` ou un composant du chemin du worktree est un lien
+symbolique, ou si le chemin du worktree contient des fichiers suivis par le tronc
+(`git ls-files -- <chemin>` non vide). `hooks/`, `config`, `info/exclude`
+et `info/attributes` sont hashés à part.
+Le contenu de l'index est couvert autrement : `git status` tourne sur une copie de l'index sans
+données stat (`ls-files -s` puis `update-index --index-info` dans un index temporaire), donc git
+rehashe le contenu de chaque fichier suivi. Un `.git/index` réécrit (blob d'origine, stat du nouveau
+fichier) ne masque plus une modification, et le rafraîchissement de l'index réel ne crée pas de
+fausse faute. Un `GIT_INDEX_FILE` hérité du shell est ignoré. Pour un builder isolé (`--base`),
+le git-dir privé du worktree ne doit contenir que les entrées que git y crée (`HEAD`, `commondir`,
+`gitdir`, `index`, `logs`, `refs`, `ORIG_HEAD`…) : tout autre fichier d'état est `[git-state]`.
+Chaque appel `git` impose `core.fsmonitor=false`, `core.untrackedCache=false`,
+`core.trustctime=true`, `core.checkStat=default`, `core.ignoreStat=false` et
+`GIT_NO_REPLACE_OBJECTS=1` : un réglage posé par la gate ne rend pas un fichier modifié
+invisible. Un écart de config, de hooks ou d'attributs est une faute nommée (`[git-config]`,
+`[git-hooks]`, `[git-attributes]`), jamais filtrable. Un `HEAD` qui bouge sans chemin
+(commit vide, `reset --soft`) est la faute `[HEAD]`. `tree-verify` recalcule l'empreinte après
+l'agent. Pour une gate, tout changement est une faute. Pour un builder, `--guard` ne
+signale que les chemins hors de `guard.allow` (ou dans `deny`), lus dans la battle active.
+Un builder isolé en worktree se vérifie avec `--base <sha> --root <worktree>`. L'orchestrateur
+retient l'empreinte de `tree-snapshot` et la passe à `tree-verify --fingerprint` : un
+snapshot réécrit est refusé. Une faute de gate rend le verdict caduc (escalade cas 6).
+
+**Couche 2 — filtre Bash (premier filtre).** `guard.py` est lancé sur `Bash|PowerShell` et
+bloque, pour les gates seulement, les écritures évidentes en tête de commande (voir
+`ARCHITECTURE.md` § 6.1), dont `git config` en écriture (les formes `--get*`, `--list`, une
+seule clé passent ; `--show-origin`/`--show-scope` ne sont que des modificateurs : `git config
+--show-scope <clé> <valeur>` écrit) et les briques d'écriture d'état `git commit-tree`, `mktree`,
+`hash-object -w`, `notes`, `maintenance`. Le nom de commande est le basename (`/usr/bin/env rm x` est vu). Le corps
+d'un heredoc à délimiteur non quoté est analysé pour ses `$(…)` et backticks ; un `<<` dans
+`$((…))` n'est pas un heredoc. Les redirections vers `/dev/null`, vers un `*.log` de la battle
+ou vers le dossier temporaire restent permises. Le filtre est best-effort et fail-closed
+sur une commande non analysable.
+
+**Limites assumées.**
+- Le filtre ne voit ni `python -c "open(...).write"`, ni `bash -c`, ni `eval`. La couche 1
+  les détecte après coup (état du dossier git, index et config comprises).
+- Limites de l'état git : `objects/` n'est pas empreinté (`objects/info/alternates` inclus).
+  Cas connu : une gate peut écrire, sous le sha du futur blob d'un fichier de la slice, un objet
+  libre au contenu différent ; le `git add` suivant ne le réécrit pas et le commit local porte ce
+  contenu. Le `git push` échoue (le receveur recalcule les hash : « missing necessary
+  objects »), donc rien n'est livré. Piste : `git fsck --no-dangling` après le commit de DELIVER.
+  En mode `--base`, `gitstate` commun est recopié de `after` :
+  une écriture du builder dans le dossier commun est vue par le `tree-verify` du tronc qui suit
+  le lot (l'ordre imposé par `battle.md` doit rester). Garde-fou de doctrine en plus : `battle.md`
+  refuse tout `git commit` si `MERGE_HEAD`, `CHERRY_PICK_HEAD` ou `REVERT_HEAD` répond, et refuse de
+  réutiliser une branche `<me>/<token>` déjà présente sans livraison enregistrée (cas 4), sauf
+  reprise d'un DELIVER interrompu : branche au même commit que `HEAD`, ou un seul commit
+  au-dessus de `HEAD` dont les chemins sont dans la liste blanche et dont le contenu est
+  identique à l'arbre jugé. Aucun champ d'état n'enregistre la branche.
+  Trois limites restantes, sans chemin prouvé de livraison de contenu non jugé : (1) le format de
+  refs `reftable` (défaut prévu de git 3.0) n'est pas empreinté : `reftable/` n'est pas dans
+  `_STATE_READ` ; piste : hasher `git for-each-ref` ou refuser si `extensions.refStorage` vaut
+  `reftable`. (2) Sur un système de fichiers insensible à la casse (NTFS, APFS), `_git_reads`
+  compare sans tenir compte de la casse : `.git/merge_head` est vu ; l'inverse, sur un système
+  sensible, est une fausse faute rare et sans danger. Les autres noms (`Packed-Refs`…) suivent la
+  même comparaison. (3) Un worktree du lot accepté par `--batch-worktrees` peut porter la branche
+  `<me>/<token>` (ses branches sont exclues des refs) ; le vérificateur ne connaît pas ce nom, et
+  `git checkout` d'une branche extraite ailleurs échoue, ce qui ferme le chemin en doctrine.
+  Le sha de l'entrée d'index fait partie de l'empreinte de chaque chemin de `status` : un blob
+  indexé changé sous « MM » est vu. Le worktree `--batch-worktrees` suppose que les worktrees du
+  harness restent en place jusqu'au `tree-verify` du tronc.
+- La couche 1 ne voit ni un dossier vide créé, ni un fichier git-ignoré, ni un déplacement de branche
+  dans un worktree enregistré (`git branch -f` sur une branche de builder). Le filtre bloque `git push`. Exception : un `.gitignore`
+  qui s'ignore lui-même (`*`) est empreinté ; seul celui au sommet d'un dossier neuf replié
+  l'est, un `.gitignore` plus profond dans un dossier ignoré échappe. Un fichier ignoré par
+  `core.excludesFile` global n'est plus invisible : la config globale/système et les fichiers
+  `attributes`/`ignore` effectifs sont hashés (`[git-config]`). Reste hors empreinte : les
+  fichiers inclus par `include.path`, et toute autre écriture hors du dépôt.
+- Tout `.legion/` hors état protégé est exclu de l'empreinte : une gate qui réécrit `plan.md`,
+  `spec.md`, l'artefact d'une autre gate ou le `battle.json` d'une autre battle n'est pas
+  vue. Les verdicts restent protégés (ils sont dans le `battle.json` actif).
+- Les écritures hors du dépôt ne sont pas vues, ni celles dans un worktree enregistré (exclu
+  de l'empreinte de l'arbre principal). Le vérificateur lui-même (`artifact_check.py`,
+  `guard.py`, dans l'installation du plugin) n'est pas protégé : il faudrait un sandbox (#49).
+- Le filtre ne connaît qu'une liste finie de commandes : d'autres écritures (`awk` avec
+  redirection interne, `git diff --output=`, `Set-Content` par alias exotique…) passent.
+- Aucun filtre ne s'applique si `agent_type` manque sur l'appel (H1) ; la couche 1 reste la
+  garantie. Pas de `python`/`python3` sur le PATH : le hook n'est pas bloquant (motif déjà
+  présent pour `careful.py`).
+- L'orchestrateur n'écrit jamais `battle.json` entre `tree-snapshot` et `tree-verify`
+  (l'état protégé est dans l'empreinte) ; pour un lot de gates en parallèle, les verdicts
+  sont enregistrés après le `tree-verify` du lot.
+- Une modification de l'humain pendant une gate (IDE, formateur à l'enregistrement) est
+  imputée à la gate ; la liste des chemins permet de trancher.
+- `bin/`, `obj/`, `TestResults/`, `coverage/` doivent être git-ignorés, sinon `lint` et
+  `test-engineer` tombent en faute.
+- `agent_type` sur un appel `Bash` reste à confirmer sur une vraie session (méthode du § 2).
+  S'il manquait, seule la couche 2 serait inactive ; la couche 1 resterait la garantie.
+
 ---
 
 ## 5. Tests & vérification
@@ -270,6 +395,8 @@ sans PowerShell) :
   `--self-test`. Une erreur de **clé namespacée** (mauvais préfixe de plugin) ⇒ la gate
   retombe en règles standard (peut écrire dans tout `.legion/**`) **ou** est bloquée
   selon le cas — d'où l'étape de validation empirique (§2) **obligatoire** par plugin.
+- **Écritures par Bash** : le hook seul ne les couvre pas. La garantie tient à l'empreinte de
+  l'arbre (§ 4.6) ; le filtre Bash n'est qu'un premier filtre, aux limites listées au § 4.6.
 - **Livraison** : le verdict ne prouvant plus l'artefact, le **garde-fou §4.5** (check
   de livraison côté orchestrateur) est **indissociable** du levier — ne pas le porter
   laisserait passer un verdict sans artefact frais.

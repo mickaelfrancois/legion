@@ -116,7 +116,10 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 > `guard.py` l'y **confine**
 > via `agent_type` (toute autre écriture — code, `battle.json`, artefact d'une autre
 > gate → `exit 2`) : la garantie « une gate ne touche pas le code » est ainsi
-> **structurelle** (portée par le hook), non plus seulement déclarative.
+> **structurelle** : elle repose sur **deux couches**. La couche 1 est l'**empreinte de
+> l'arbre** (`artifact_check.py tree-snapshot` / `tree-verify`, autour de chaque gate et de
+> chaque builder), qui détecte toute écriture, Bash compris. La couche 2 est le hook, un
+> **premier filtre** qui bloque en amont les écritures évidentes (y compris par Bash).
 > **L'invariant immuable est « une gate ne touche pas le _code_ » (juge ≠ partie) —
 > *pas* « une gate n'écrit rien ».** Qu'une gate écrive son propre artefact ne le viole
 > pas : ce canal sert la **discipline de contexte** (sortir le contenu des artefacts du
@@ -167,6 +170,8 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 > Chacune **écrit son seul artefact** (`plan.md` / `gate-*.md`), confinée par
 > `guard.py` ; aucune ne touche le code (cf. invariant § 4). `Write` figure donc dans
 > leur whitelist d'outils, mais le hook borne cette écriture à l'unique artefact.
+> « Lecture seule » vaut aussi pour `Bash` : le hook bloque les écritures évidentes d'une
+> gate par ce canal, et `tree-verify` détecte les autres (faute de gate, cas 6 du § 12).
 
 > **Paliers de modèle.** Opus pour les gates à plus fort discernement et coût
 > d'erreur (`architect`, `security`) ; sonnet pour `lint`/`reviewer`/`test-engineer`
@@ -270,7 +275,7 @@ stderr).
 ### 6.1 `guard.py` — périmètre d'écriture
 
 ```
-PreToolUse(Edit|Write|MultiEdit) :
+PreToolUse(Edit|Write|MultiEdit) :   (+ Bash|PowerShell, voir « Filtre Bash » plus bas)
   0. CONFINEMENT DES GATES (prioritaire, actif même guard non armé).
      Si `agent_type` ∈ GATE_ARTIFACT (table dérivée de `battle_state.GATE_ARTIFACT`,
      avec repli fail-closed si le script est introuvable ; legion:architect → plan.md,
@@ -289,7 +294,7 @@ PreToolUse(Edit|Write|MultiEdit) :
      (battle.json, active-battle, artefact de gate) → exit 2. Empêche le builder
      d'élargir son propre `guard.allow`. Comparaison insensible à la casse, et tout
      `.legion/` visé hors de la racine du hook (checkout principal vu d'un worktree)
-     est aussi bloqué. Limite : l'outil `Bash` n'est pas couvert (#66).
+     est aussi bloqué. L'outil `Bash` est traité à part (filtre Bash ci-dessous).
   1. Lire la battle active (.legion/active-battle → battle.json → guard.allow/deny).
   2. Le file_path visé est-il dans `allow` et hors `deny` ?
      - oui  → exit 0 (autorisé)
@@ -306,6 +311,18 @@ PreToolUse(Edit|Write|MultiEdit) :
      ou non-objet JSON → exit 2 ; jamais exit 1 (hors `--self-test`).
   3. `.legion/**` toujours autorisé (sauf builder, cf. 0b). Bypass délibéré : env var LEGION_GUARD_OFF=1.
 ```
+
+**Filtre Bash (`PreToolUse(Bash|PowerShell)`, couche 2).** `guard.py` est aussi lancé sur
+`Bash` et `PowerShell`, à côté de `careful.py`. Il ne filtre **que les gates** : la session
+principale et le builder ne sont jamais bloqués ici (le builder est contrôlé par la
+couche 1). Pour une gate, il découpe la commande en respectant les quotes et refuse, en tête
+de commande, les redirections vers une cible non autorisée, `rm`/`mv`/`cp`/`touch`…, `sed -i`,
+`git add`/`commit`/`checkout`…, `dotnet format` sans `--verify-no-changes`, `npm install`,
+et les cmdlets PowerShell d'écriture. Cibles autorisées : `/dev/null`, `*.log` dans le dossier
+de la battle (hors `ci-failed-*`), dossier temporaire du système hors dépôt. Une commande non
+analysable ou un payload sans `command` est bloqué (fail-closed). **Limites assumées** : le
+filtre ne voit ni `python -c`, ni `bash -c`, ni `eval`, ni un nom de commande dynamique ;
+c'est la couche 1 qui couvre ces cas.
 
 > **Pourquoi `agent_type`.** Le payload `PreToolUse` porte `agent_type` (nom
 > namespacé du sous-agent appelant, ex. `legion:reviewer` ; la session principale
@@ -374,15 +391,15 @@ plugins/legion/
 │   ├── security.md              # gate sécurité
 │   └── pr-triage.md             # gate ADDRESS (triage des retours de PR)
 ├── hooks/
-│   ├── hooks.json               # PreToolUse: guard,careful · PostToolUse: fleet_sync · Stop/SubagentStop: usage_track
-│   ├── guard.py                 # périmètre d'écriture + confinement gates + artefact non vide (exit 2 = block)
+│   ├── hooks.json               # PreToolUse: guard (Edit|Write|MultiEdit, Bash|PowerShell), careful (Bash|PowerShell) · PostToolUse: fleet_sync · Stop/SubagentStop: usage_track
+│   ├── guard.py                 # périmètre d'écriture + confinement gates + artefact non vide + filtre Bash des gates (exit 2 = block)
 │   ├── careful.py               # avertit sur commandes destructrices (warn)
 │   ├── fleet_sync.py            # écrit le shard fleet.d/<battle> à chaque écriture de battle.json (PHASE_ORDER dérivé de battle_state)
 │   └── usage_track.py           # append tokens + skills réels à la battle active
 ├── scripts/
 │   ├── plugin_retex.py          # journal central RETEX outillage (append/list/resolve, --self-test)
 │   ├── base_freshness.py        # filet base-freshness §G.0.a (verdict déterministe, --self-test)
-│   ├── artifact_check.py        # delivery check d'artefact de gate §E (snapshot/verify métadonnées-seules, --self-test)
+│   ├── artifact_check.py        # delivery check d'artefact de gate §E (snapshot/verify métadonnées-seules) + empreinte de l'arbre (tree-snapshot/tree-verify, --self-test)
 │   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
@@ -516,6 +533,7 @@ Toute correction déterministe se fait sans lui.
 | **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`). | Escalade : re-planification nécessaire. |
 | **4. Filets DELIVER** | Base locale en retard sur `origin`, remote vide, fichier hors whitelist de commit, `.gitignore` auto-induit. | Escalade : résoudre le filet, puis DELIVER reprend. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
+| **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (contrôle d'intégrité de l'arbre, `battle.md` §E). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. Relayer `changed` / `out_of_scope`. |
 
 Hors liste = pas d'escalade.
 
