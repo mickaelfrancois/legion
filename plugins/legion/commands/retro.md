@@ -8,6 +8,22 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 1. **Resolve the battle**: the given `<battle-id>`, else the active one
    (`.legion/active-battle`). No battle → say so and stop.
 
+1b. **Check the PR state.** Validate `<battle-id>` (from `$ARGUMENTS`) against
+   `^[A-Za-z0-9][A-Za-z0-9-]*$` before any shell call; never substitute `$ARGUMENTS` raw.
+   If `battle.json` has `delivery.pr_url`, refresh it as in `/legion:battle status` (§C):
+   take `<n>` from the tail of `pr_url` (`^[0-9]+$`), run
+   ```bash
+   gh pr view <n> --json state,mergedAt,statusCheckRollup,url > ".legion/battles/<id>/pr-status.json"
+   ```
+   and, only if `gh` exited `0`:
+   ```bash
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json ".legion/battles/<id>/pr-status.json" --battle <id>
+   ```
+   - `open` → warn that the PR is not merged and **ask for confirmation** before going on.
+   - `closed` → note it in `retro.md` (`Outcome`: `Shipped: no — PR fermée sans merge`).
+   - `merged` → `Shipped: yes`.
+   - No `gh`, or `gh` fails → warn and go on.
+
 2. **Read its artifacts** under `.legion/battles/<id>/`: `spec.md`, `plan.md`,
    every `gate-*.md`, `build-report.md`, `pr-body.md`, and `pr-feedback.md` when the
    battle went through ADDRESS (its rounds show what human review caught). Reconstruct the story: what
@@ -42,6 +58,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    ## Outcome
    - Shipped: <yes/no> — <one line>
    - Round-trips: build×N, review×N, ...
+   - PR : <pr_state> · CI : <ci>
 
    ## Cost (approximate)
    - Tokens: ~<tokens_total> (subagents <Σ>, main <Σ>)

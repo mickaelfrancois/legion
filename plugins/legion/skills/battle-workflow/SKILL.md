@@ -208,9 +208,10 @@ thread; a `question` is left unresolved for the author.
 Per repo — `.legion/battles/<battle-id>/`:
 
 ```
-battle.json   # metadata, profile, required_gates, per-phase status, guard, delivery.pr_url
+battle.json   # metadata, profile, required_gates, per-phase status, guard, delivery.pr_url, pr_state, ci
 spec.md  plan.md  build-report.md  gate-lint.md  gate-review.md  gate-test.md
 gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
+pr-status.json  ci-failed-<run-id>.log   # ADDRESS/status : sortie `gh` (PR/CI) et log CI en échec
 ```
 
 `battle.json` schema (**no need to open `ARCHITECTURE.md` at run time**). It is written
@@ -282,7 +283,10 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
     // `security` a été ajoutée à `required_gates` automatiquement. Absent sinon.
     "security_auto": null
   },
-  "delivery": { "pr_url": null }
+  // `pr_state` ∈ open | merged | closed ; `ci` ∈ pass | fail | pending | none ; `checked_at` : ISO de la dernière lecture.
+  // Écrits par `set-delivery --pr-url <url>` (remet `pr_state` à open, `ci` et `checked_at` à null)
+  // ou `set-delivery --pr-json <fichier>` (lit la sortie de `gh pr view`, sans réseau). Absents sur une battle ancienne.
+  "delivery": { "pr_url": null, "pr_state": null, "ci": null, "checked_at": null }
   // aborted (optionnel) — { "at": ISO, "reason": str|null }, posé par `abort` ; toute commande sauf `validate` est alors refusée
 }
 ```

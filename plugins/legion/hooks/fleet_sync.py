@@ -145,7 +145,8 @@ def _atomic_write(path: Path, data: dict) -> None:
 def upsert(battle_dir: Path, repo_root: Path, fleet_dir: Path) -> bool:
     """Ecrit le shard de CETTE battle (un fichier dedie). Aucune lecture/reecriture
     d'un index partage => sur en concurrence multi-sessions. Retourne True si ecrit.
-    Projette aussi `slices_done` / `slices_total` quand la battle declare des slices."""
+    Projette aussi `slices_done` / `slices_total` quand la battle declare des slices, et
+    `pr_state` / `ci` quand `delivery` porte ces cles (absentes pour une battle legacy)."""
     battle = _read_json(battle_dir / "battle.json")
     if battle is None:
         return False
@@ -153,7 +154,9 @@ def upsert(battle_dir: Path, repo_root: Path, fleet_dir: Path) -> bool:
     repo_path = str(repo_root)
     phases = battle.get("phases") or {}
     phase, status = _current_phase(phases)
-    delivery = battle.get("delivery") or {}
+    delivery = battle.get("delivery")
+    if not isinstance(delivery, dict):
+        delivery = {}
     key = f"{repo_path}::{battle_id}"
 
     entry = {
@@ -169,6 +172,9 @@ def upsert(battle_dir: Path, repo_root: Path, fleet_dir: Path) -> bool:
         "pr_url": delivery.get("pr_url"),
         "updated": _now_iso(),
     }
+    for k in ("pr_state", "ci"):  # GH#74 : projetes des que la cle existe (meme a null)
+        if k in delivery:
+            entry[k] = delivery[k]
     entry.update(_slice_counts(battle.get("slices")))  # absent si pas de slices
     entry.update(_read_usage(battle_dir))  # tokens_total, tokens, skills (snapshot)
     _atomic_write(fleet_dir / _shard_name(key), entry)
@@ -305,6 +311,29 @@ def _t_upsert_aborted() -> None:
         assert shard["battle_status"] == "aborted", shard
 
 
+def _t_upsert_pr_fields() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+
+        def shard_for(bid: str, delivery) -> dict:
+            bp = base / "r" / ".legion" / "battles" / bid
+            bp.mkdir(parents=True)
+            (bp / "battle.json").write_text(json.dumps(
+                {"id": bid, "phases": {"build": {"status": "in_progress"}},
+                 "delivery": delivery}), encoding="utf-8")
+            assert upsert(bp, base / "r", base / "fleet.d")
+            return next(e for e in read_fleet(base / "fleet.d") if e["id"] == bid)
+
+        s = shard_for("b1", {"pr_url": "u", "pr_state": "merged", "ci": "pass"})
+        assert s["pr_state"] == "merged" and s["ci"] == "pass", s
+        s = shard_for("b2", {"pr_url": "u"})   # legacy : cles absentes
+        assert "pr_state" not in s and "ci" not in s, s
+        s = shard_for("b3", {"pr_url": "u", "pr_state": "open", "ci": None})
+        assert s["pr_state"] == "open" and "ci" in s and s["ci"] is None, s
+        s = shard_for("b4", "chaine")   # delivery malforme : jamais d'exception
+        assert s["pr_url"] is None and "ci" not in s, s
+
+
 def _self_test() -> int:
     global _IMPORT_ERROR
     if _IMPORT_ERROR is not None:
@@ -405,6 +434,7 @@ def _self_test() -> int:
     assert rc == 0 and not wrote and "installation legion incomplete" in warned, (rc, wrote, warned)
 
     _t_upsert_aborted()
+    _t_upsert_pr_fields()
     print("OK: fleet_sync self-test passed", file=sys.stderr)
     return 0
 

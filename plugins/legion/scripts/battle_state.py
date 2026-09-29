@@ -16,6 +16,7 @@ Source unique des listes de phases / gates / artefacts (importée par `fleet_syn
 - `STATUSES`, `VERDICTS`, `ACCEPT_VERDICTS`, `DEFAULT_REQUIRED_GATES` ;
 - `PROFILES`, `DEFAULT_PROFILE` (gates requises par profil ; `init` en dérive `required_gates`) ;
 - `CAP_PER_PHASE`, `CAP_TOTAL` ;
+- `PR_STATES`, `CI_STATES` (état de la PR et agrégat CI, GH#74 ; champs `delivery.pr_state` / `delivery.ci`) ;
 - `SUBCOMMANDS` (sous-commandes du CLI, dans l'ordre du parser ; la doctrine est testée contre elle).
 
 Lecteurs partagés (hooks, GH#85), en lecture seule, sans exception : `active_battle_id(repo_root)
@@ -36,6 +37,12 @@ Cœur pur :
 - `invalidate(battle, reason, now_iso) -> (ok, reason, battle, detail)` : remet a `pending`
   les gates de cascade `done`/`blocked` (les FAIL sont conserves), trace dans
   `run.invalidations` ; `reason == "polish"` = ronde de polissage, une seule fois, hors budget ;
+- `pr_status_from_gh(obj) -> {pr_state, ci, failing}` (GH#74) : interprète la sortie JSON de
+  `gh pr view --json state,mergedAt,statusCheckRollup,url` (déjà parsée). Pure, sans réseau ; lève
+  `ValueError` sur toute entrée invalide ou valeur inconnue (`STALE` -> `pending`) ; précédence
+  `fail` > `pending` > `pass`, `none` si le rollup est vide ou `null` ;
+- `ci_fails(failing) -> [{target, dimension: "CI"}]` (GH#74) : FAIL du round CI, `target`
+  assaini (`ci:<nom>`, sûr en shell, `#2`… pour un nom en double), sortie de `set-delivery --pr-json`.
 - `fail_identity(item) -> str`, `normalize(battle)`, `validate(battle) -> (errors, warnings)`,
   `derive_required_phases(battle)` ;
 - `cascade_missing(battle) -> [{phase, status}]` (#88) : phases requises non `done`, dans l'ordre
@@ -67,7 +74,7 @@ Usage (options globales `--battle <id>` défaut : pointeur `.legion/active-battl
     python battle_state.py approve-plan | close | validate
     python battle_state.py bump-autocorrect <phase> (--fails <json> | --build-failure)
     python battle_state.py invalidate [--reason R]     # defaut R = manual
-    python battle_state.py set-delivery --pr-url <url>
+    python battle_state.py set-delivery (--pr-url <url> | --pr-json <fichier>)
     python battle_state.py set-guard [--allow [g…]] [--deny [g…]] [--careful on|off]
     python battle_state.py set-meta [--title] [--profile] [--required-gates …] [--stack-kind]
                                     [--build-target] [--test-target]
@@ -126,6 +133,9 @@ PRODUCER_ARTIFACT: dict[str, str] = {"builder": "build-report.md"}
 VERDICT_PHASES: tuple[str, ...] = ("plan", "lint", "review", "test", "security")
 CASCADE_PHASES: tuple[str, ...] = ("lint", "review", "test", "security")
 AUTOCORRECT_KEYS: tuple[str, ...] = ("build",) + CASCADE_PHASES
+
+PR_STATES: tuple[str, ...] = ("open", "merged", "closed")
+CI_STATES: tuple[str, ...] = ("pass", "fail", "pending", "none")
 
 STATUSES: tuple[str, ...] = ("pending", "in_progress", "done", "blocked")
 ACCEPT_VERDICTS: tuple[str, ...] = ("accept", "accept_with_opportunity")
@@ -790,6 +800,17 @@ def validate(battle) -> tuple[list[str], list[str]]:
         problem = _guard_problem(battle["guard"])
         if problem:
             errors.append(problem)
+    if "delivery" in battle:
+        dl = battle["delivery"]
+        if not isinstance(dl, dict):
+            warnings.append("delivery n'est pas un objet")
+        else:
+            if dl.get("pr_state") is not None and dl["pr_state"] not in PR_STATES:
+                warnings.append(f"delivery.pr_state inconnu : {dl['pr_state']!r}")
+            if dl.get("ci") is not None and dl["ci"] not in CI_STATES:
+                warnings.append(f"delivery.ci inconnu : {dl['ci']!r}")
+            if dl.get("checked_at") is not None and not isinstance(dl["checked_at"], str):
+                warnings.append("delivery.checked_at n'est pas une chaîne")
     ab = battle.get("aborted")
     if ab is not None and not (isinstance(ab, dict) and ab.get("at")):
         warnings.append("aborted n'est pas un objet avec `at`")
@@ -809,6 +830,110 @@ def validate(battle) -> tuple[list[str], list[str]]:
                 if k not in AUTOCORRECT_KEYS:
                     warnings.append(f"run.autocorrect.per_gate : clé hors phase {k!r}")
     return errors, warnings
+
+
+# --- Statut PR / CI (GH#74) --------------------------------------------------------------
+
+_GH_PR_STATES = {"OPEN": "open", "MERGED": "merged", "CLOSED": "closed"}
+_CHECK_STATUSES = ("COMPLETED", "QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED")
+_CHECK_FAIL = ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
+_CHECK_PASS = ("SUCCESS", "NEUTRAL", "SKIPPED")
+_CHECK_CONCLUSIONS = _CHECK_FAIL + _CHECK_PASS + ("STALE",)
+_CONTEXT_FAIL = ("FAILURE", "ERROR")
+_CONTEXT_PENDING = ("PENDING", "EXPECTED")
+_CONTEXT_STATES = _CONTEXT_FAIL + _CONTEXT_PENDING + ("SUCCESS",)
+
+
+def _check_verdict(el) -> tuple[str, str | None, str | None]:
+    """Un élément de `statusCheckRollup` -> (`pass`|`fail`|`pending`, nom, url). `ValueError` si invalide."""
+    if not isinstance(el, dict):
+        raise ValueError(f"élément de statusCheckRollup non objet : {el!r}")
+    typename = el.get("__typename")
+    if typename is None:
+        if "status" in el or "conclusion" in el:
+            typename = "CheckRun"
+        elif "state" in el:
+            typename = "StatusContext"
+        else:
+            raise ValueError("élément de statusCheckRollup sans status/conclusion ni state")
+    if typename == "CheckRun":
+        status = el.get("status")
+        if status not in _CHECK_STATUSES:
+            raise ValueError(f"CheckRun.status inconnu : {status!r}")
+        conclusion = el.get("conclusion")
+        if conclusion in ("", None):
+            if status == "COMPLETED":
+                raise ValueError("CheckRun COMPLETED sans conclusion")
+            verdict = "pending"
+        elif conclusion not in _CHECK_CONCLUSIONS:
+            raise ValueError(f"CheckRun.conclusion inconnue : {conclusion!r}")
+        elif status != "COMPLETED" or conclusion == "STALE":
+            verdict = "pending"
+        elif conclusion in _CHECK_FAIL:
+            verdict = "fail"
+        else:
+            verdict = "pass"
+        return verdict, el.get("name"), el.get("detailsUrl")
+    if typename == "StatusContext":
+        state = el.get("state")
+        if state not in _CONTEXT_STATES:
+            raise ValueError(f"StatusContext.state inconnu : {state!r}")
+        verdict = "fail" if state in _CONTEXT_FAIL else "pending" if state in _CONTEXT_PENDING else "pass"
+        return verdict, el.get("context"), el.get("targetUrl")
+    raise ValueError(f"__typename inconnu : {typename!r}")
+
+
+def pr_status_from_gh(obj) -> dict:
+    """Sortie de `gh pr view --json state,mergedAt,statusCheckRollup,url` (déjà parsée) ->
+    `{"pr_state", "ci", "failing"}`. Pure (ni disque ni réseau). `state` fait foi (`mergedAt` est
+    ignoré) ; `ci` : `fail` > `pending` > `pass`, `none` si le rollup est `[]` ou `null` ;
+    `failing` : `[{"name", "url"}]` des checks en échec. `ValueError` sur toute entrée invalide."""
+    if not isinstance(obj, dict):
+        raise ValueError("la sortie de gh n'est pas un objet JSON")
+    state = obj.get("state")
+    if not isinstance(state, str) or state not in _GH_PR_STATES:
+        raise ValueError(f"state absent ou inconnu : {state!r}")
+    if "statusCheckRollup" not in obj:
+        raise ValueError("statusCheckRollup absent (demander --json ...,statusCheckRollup)")
+    rollup = obj["statusCheckRollup"]
+    if rollup is not None and not isinstance(rollup, list):
+        raise ValueError("statusCheckRollup n'est ni une liste ni null")
+    verdicts: list[str] = []
+    failing: list[dict] = []
+    for el in rollup or []:
+        verdict, name, url = _check_verdict(el)
+        verdicts.append(verdict)
+        if verdict == "fail":
+            failing.append({"name": name, "url": url})
+    if not verdicts:
+        ci = "none"
+    elif "fail" in verdicts:
+        ci = "fail"
+    elif "pending" in verdicts:
+        ci = "pending"
+    else:
+        ci = "pass"
+    return {"pr_state": _GH_PR_STATES[state], "ci": ci, "failing": failing}
+
+
+_CI_TARGET_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def ci_fails(failing) -> list[dict]:
+    """FAIL du round CI pour `bump-autocorrect build --fails` : `[{"target", "dimension": "CI"}]`.
+    Pur. `target` = `ci:<nom>` assaini (hors `[A-Za-z0-9._-]` -> `_`, 80 caractères au plus) :
+    stable d'un run à l'autre (le contrôle de non-progrès compare les noms) et sans guillemet, donc
+    sûr dans une commande shell. Deux checks de même nom (matrice) reçoivent `#2`, `#3`… dans
+    l'ordre du rollup."""
+    out: list[dict] = []
+    seen: dict[str, int] = {}
+    for f in failing or []:
+        name = f.get("name") if isinstance(f, dict) else None
+        base = "ci:" + (_CI_TARGET_UNSAFE.sub("_", str(name)).strip("_")[:80] or "check")
+        seen[base] = seen.get(base, 0) + 1
+        target = base if seen[base] == 1 else f"{base}#{seen[base]}"
+        out.append({"target": target, "dimension": "CI"})
+    return out
 
 
 # --- Couche I/O --------------------------------------------------------------------------
@@ -1017,7 +1142,10 @@ def _build_parser_parts():
     s = add("invalidate")
     s.add_argument("--reason", default="manual")
     s = add("set-delivery")
-    s.add_argument("--pr-url", required=True)
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--pr-url")
+    g.add_argument("--pr-json", help="fichier JSON de `gh pr view --json "
+                                     "state,mergedAt,statusCheckRollup,url` (GH#74)")
     s = add("set-guard")
     s.add_argument("--allow", nargs="*", default=None)
     s.add_argument("--deny", nargs="*", default=None)
@@ -1138,8 +1266,34 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
         return out, detail
     out = copy.deepcopy(battle)
     if cmd == "set-delivery":
-        out.setdefault("delivery", {})["pr_url"] = args.pr_url
-        return out, {"pr_url": args.pr_url}
+        if args.pr_url is not None:   # nouvelle PR : l'état de suivi repart de zéro
+            out["delivery"] = {**(out["delivery"] if isinstance(out.get("delivery"), dict) else {}),
+                               "pr_url": args.pr_url, "pr_state": "open", "ci": None,
+                               "checked_at": None}
+            return out, {"pr_url": args.pr_url}
+        delivery = out.get("delivery")
+        pr_url = delivery.get("pr_url") if isinstance(delivery, dict) else None
+        if not pr_url:
+            raise _Refuse("set-delivery --pr-json exige delivery.pr_url")
+        try:
+            raw = Path(args.pr_json).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise _Refuse(f"--pr-json illisible : {type(exc).__name__}: {exc}")
+        try:
+            gh = json.loads(raw)
+        except (ValueError, RecursionError) as exc:
+            raise _Refuse(f"--pr-json : JSON invalide ({type(exc).__name__})")
+        try:
+            status = pr_status_from_gh(gh)
+        except ValueError as exc:
+            raise _Refuse(f"--pr-json : {exc}")
+        if gh.get("url") is not None and gh["url"] != pr_url:
+            raise _Refuse(f"--pr-json : url {gh['url']!r} différente de delivery.pr_url {pr_url!r}")
+        checked_at = _now_iso()
+        delivery.update(pr_state=status["pr_state"], ci=status["ci"], checked_at=checked_at)
+        return out, {"pr_state": status["pr_state"], "ci": status["ci"],
+                     "checked_at": checked_at, "failing": status["failing"],
+                     "ci_fails": ci_fails(status["failing"])}
     if cmd == "set-guard":
         if args.allow is None and args.deny is None and args.careful is None:
             raise _Refuse("set-guard : aucune option (--allow, --deny ou --careful)")
@@ -2055,6 +2209,23 @@ def _t_doc_subcommands() -> None:
         assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
 
 
+def _t_doc_pr_tracking() -> None:
+    root = Path(__file__).resolve().parents[1]
+    battle_md, retro_md = root / "commands/battle.md", root / "commands/retro.md"
+    if not (battle_md.is_file() and retro_md.is_file()):
+        print("SKIP: _t_doc_pr_tracking (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    battle, retro = battle_md.read_text(encoding="utf-8"), retro_md.read_text(encoding="utf-8")
+    for needle in ("set-delivery --pr-json", "statusCheckRollup", "--log-failed",
+                   "bump-autocorrect build"):
+        assert needle in battle, f"{needle!r} absent de battle.md"
+    assert "set-delivery --pr-json" in retro, "set-delivery --pr-json absent de retro.md"
+    for name, text in (("battle.md", battle), ("retro.md", retro)):
+        for block in re.findall(r"```.*?```", text, re.S):
+            assert "$ARGUMENTS" not in block, f"$ARGUMENTS dans un bloc de code de {name}"
+
+
 def _t_doc_profiles() -> None:
     root = Path(__file__).resolve().parents[1]
     docs = [root / "commands/battle.md", root / "skills/battle-workflow/SKILL.md"]
@@ -2254,6 +2425,133 @@ def _t_validate_aborted() -> None:
     assert not errors and not any("aborted" in w for w in warnings)
 
 
+def _gh(state="OPEN", rollup=()):
+    return {"state": state, "mergedAt": None, "statusCheckRollup": list(rollup), "url": "https://x.test/pr/1"}
+
+
+def _cr(status="COMPLETED", conclusion="SUCCESS", name="build", typename=True, url="https://x.test/run/1"):
+    el = {"status": status, "conclusion": conclusion, "name": name, "detailsUrl": url}
+    if typename:
+        el["__typename"] = "CheckRun"
+    return el
+
+
+def _sc(state="SUCCESS", typename=True):
+    el = {"state": state, "context": "ci/ext", "targetUrl": "https://ext.test/1"}
+    if typename:
+        el["__typename"] = "StatusContext"
+    return el
+
+
+def _ci(*els) -> str:
+    return pr_status_from_gh(_gh(rollup=els))["ci"]
+
+
+def _t_pr_status_states() -> None:
+    for gh_state, want in (("OPEN", "open"), ("MERGED", "merged"), ("CLOSED", "closed")):
+        r = pr_status_from_gh(_gh(gh_state))
+        assert r == {"pr_state": want, "ci": "none", "failing": []}, r
+
+
+def _t_pr_status_ci_none() -> None:
+    for rollup in ([], None):
+        obj = _gh()
+        obj["statusCheckRollup"] = rollup
+        r = pr_status_from_gh(obj)
+        assert r["ci"] == "none" and r["failing"] == [], r
+
+
+def _t_pr_status_checkrun() -> None:
+    for c in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+        assert _ci(_cr(conclusion=c)) == "pass", c
+    for c in ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"):
+        r = pr_status_from_gh(_gh(rollup=[_cr(conclusion=c, name="unit")]))
+        assert r["ci"] == "fail" and r["failing"] == [{"name": "unit", "url": "https://x.test/run/1"}], (c, r)
+    for st in ("IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"):
+        assert _ci(_cr(status=st, conclusion="")) == "pending", st
+        assert _ci(_cr(status=st, conclusion=None)) == "pending", st
+
+
+def _t_pr_status_statuscontext() -> None:
+    assert _ci(_sc("SUCCESS")) == "pass"
+    for st in ("FAILURE", "ERROR"):
+        r = pr_status_from_gh(_gh(rollup=[_sc(st)]))
+        assert r["ci"] == "fail" and r["failing"] == [{"name": "ci/ext", "url": "https://ext.test/1"}], r
+    for st in ("PENDING", "EXPECTED"):
+        assert _ci(_sc(st)) == "pending", st
+
+
+def _t_pr_status_typename_optional() -> None:
+    assert _ci(_cr(conclusion="SUCCESS", typename=False)) == "pass"
+    assert _ci(_cr(conclusion="FAILURE", typename=False)) == "fail"
+    assert _ci(_cr(status="QUEUED", conclusion="", typename=False)) == "pending"
+    assert _ci(_sc("SUCCESS", typename=False)) == "pass"
+    assert _ci(_sc("ERROR", typename=False)) == "fail"
+    assert _ci(_sc("PENDING", typename=False)) == "pending"
+
+
+def _t_pr_status_precedence() -> None:
+    assert _ci(_cr(conclusion="SUCCESS"), _cr(status="IN_PROGRESS", conclusion=""),
+               _cr(conclusion="FAILURE")) == "fail"
+    assert _ci(_cr(conclusion="SUCCESS"), _cr(status="IN_PROGRESS", conclusion="")) == "pending"
+    assert _ci(_cr(conclusion="SUCCESS"), _sc("FAILURE")) == "fail"
+    assert pr_status_from_gh(_gh(rollup=[_cr(conclusion="SUCCESS"), _sc("FAILURE")]))["failing"] == [
+        {"name": "ci/ext", "url": "https://ext.test/1"}]
+
+
+def _t_ci_fails() -> None:
+    got = ci_fails([{"name": "unit"}, {"name": "build (ubuntu, 3.12)"}, {"name": "build (ubuntu, 3.12)"},
+                    {"name": "it's \"bad\"; rm -rf /"}, {"name": None}, "pas un dict"])
+    targets = [f["target"] for f in got]
+    assert targets == ["ci:unit", "ci:build_ubuntu_3.12", "ci:build_ubuntu_3.12#2",
+                       "ci:it_s_bad_rm_-rf", "ci:None", "ci:None#2"], targets
+    assert all(f["dimension"] == "CI" for f in got)
+    assert all(re.fullmatch(r"ci:[A-Za-z0-9._#-]+", t) for t in targets), targets
+    assert ci_fails([]) == [] and ci_fails(None) == []
+    assert len(ci_fails([{"name": "x" * 200}])[0]["target"]) == 3 + 80
+
+
+def _t_pr_status_stale() -> None:
+    assert _ci(_cr(conclusion="STALE")) == "pending"
+
+
+def _t_pr_status_invalid() -> None:
+    no_rollup = _gh()
+    del no_rollup["statusCheckRollup"]
+    no_state = _gh()
+    del no_state["state"]
+    bad = (
+        [], "x", None, no_state, _gh("DRAFT"), no_rollup,
+        {**_gh(), "statusCheckRollup": {}}, {**_gh(), "statusCheckRollup": "x"},
+        _gh(rollup=["chaine"]), _gh(rollup=[{"name": "x"}]),
+        _gh(rollup=[_cr(conclusion="FOO")]), _gh(rollup=[_cr(status="BAR", conclusion="")]),
+        _gh(rollup=[_cr(conclusion=None)]), _gh(rollup=[_cr(conclusion="")]),
+        _gh(rollup=[_sc("BOOM")]), _gh(rollup=[{"__typename": "Autre", "state": "SUCCESS"}]),
+    )
+    for obj in bad:
+        try:
+            r = pr_status_from_gh(obj)
+        except ValueError:
+            continue
+        raise AssertionError(f"ValueError attendue : {obj!r} -> {r!r}")
+
+
+def _t_validate_delivery() -> None:
+    def w(delivery) -> list:
+        b = _fx()
+        b["delivery"] = delivery
+        errors, warnings = validate(b)
+        assert errors == [], errors
+        return warnings
+    assert w({"pr_url": None}) == []
+    assert w({"pr_url": "u", "pr_state": "open", "ci": "fail", "checked_at": "2026-01-01T00:00:00+00:00"}) == []
+    assert w({"pr_url": "u", "pr_state": "open", "ci": None, "checked_at": None}) == []
+    assert any("pr_state" in x for x in w({"pr_state": "foo"}))
+    assert any("ci" in x for x in w({"ci": "red"}))
+    assert any("checked_at" in x for x in w({"checked_at": 5}))
+    assert any("delivery" in x for x in w("chaine"))
+
+
 _CORE_TESTS = (
     _t_source_consistency, _t_unknown_phase_status, _t_verdict_status_coherence,
     _t_plan_requires_think, _t_build_refused_without_approval,
@@ -2275,12 +2573,15 @@ _CORE_TESTS = (
     _t_set_slices_replace_replan, _t_set_slices_replace_build_done, _t_set_slices_replace_invalidates_cascade,
     _t_replan_invalidates_cascade, _t_first_plan_no_invalidation_event,
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
-    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_profiles, _t_doc_abort_stale,
+    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_abort_stale,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
     _t_abort_refused_twice, _t_transition_refused_after_abort, _t_aborted_refusal,
     _t_validate_aborted,
+    _t_pr_status_states, _t_pr_status_ci_none, _t_pr_status_checkrun,
+    _t_pr_status_statuscontext, _t_pr_status_typename_optional, _t_pr_status_precedence,
+    _t_pr_status_stale, _t_ci_fails, _t_pr_status_invalid, _t_validate_delivery,
 )
 
 
@@ -3015,6 +3316,104 @@ def _t_security_auto_slice() -> None:
         assert "security ajoutée" in res["warnings"][0] and "kaboom" in res["warnings"][1]
 
 
+def _write_gh(r: "_Repo", obj, name="pr-status.json", raw: str | None = None) -> str:
+    f = r.root / name
+    f.write_text(raw if raw is not None else json.dumps(obj), encoding="utf-8")
+    return str(f)
+
+
+def _red_gh() -> dict:
+    return _gh("OPEN", [_cr(conclusion="FAILURE", name="unit"), _cr(conclusion="SUCCESS", name="lint")])
+
+
+def _t_set_delivery_pr_json_cli() -> None:
+    with _Repo() as r:
+        r.init()
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
+        before = r.load()
+        assert before["delivery"] == {"pr_url": "https://x.test/pr/1", "pr_state": "open",
+                                      "ci": None, "checked_at": None}
+        n = len(r.calls)
+        res = r.ok("set-delivery", "--pr-json", _write_gh(r, _red_gh()))
+        assert res["pr_state"] == "open" and res["ci"] == "fail"
+        assert res["failing"] == [{"name": "unit", "url": "https://x.test/run/1"}]
+        assert res["ci_fails"] == [{"target": "ci:unit", "dimension": "CI"}]
+        after = r.load()
+        d = after["delivery"]
+        assert d["pr_state"] == "open" and d["ci"] == "fail" and d["pr_url"] == "https://x.test/pr/1"
+        assert datetime.fromisoformat(d["checked_at"]) and "failing" not in d
+        assert after["phases"] == before["phases"] and "failing" not in after
+        assert len(r.calls) == n + 1
+
+
+def _t_set_delivery_pr_json_requires_url() -> None:
+    with _Repo() as r:
+        r.init()
+        before = r.path().read_text(encoding="utf-8")
+        assert "pr_url" in r.refused("set-delivery", "--pr-json", _write_gh(r, _gh()))
+        assert r.path().read_text(encoding="utf-8") == before
+
+
+def _t_set_delivery_pr_json_bad_input() -> None:
+    with _Repo() as r:
+        r.init()
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
+        before = r.path().read_text(encoding="utf-8")
+        r.refused("set-delivery", "--pr-json", str(r.root / "absent.json"))
+        r.refused("set-delivery", "--pr-json", _write_gh(r, None, raw=""))
+        r.refused("set-delivery", "--pr-json", _write_gh(r, None, raw="{ pas du json"))
+        r.refused("set-delivery", "--pr-json", _write_gh(r, None, raw="[" * 100000))
+        r.refused("set-delivery", "--pr-json", _write_gh(r, {"state": "DRAFT", "statusCheckRollup": []}))
+        r.refused("set-delivery", "--pr-json", str(r.root))   # un dossier
+        assert r.path().read_text(encoding="utf-8") == before
+
+
+def _t_set_delivery_url_mismatch() -> None:
+    with _Repo() as r:
+        r.init()
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
+        before = r.path().read_text(encoding="utf-8")
+        other = {**_gh(), "url": "https://x.test/pr/2"}
+        assert "pr_url" in r.refused("set-delivery", "--pr-json", _write_gh(r, other))
+        assert r.path().read_text(encoding="utf-8") == before
+        no_url = _gh()
+        del no_url["url"]
+        r.ok("set-delivery", "--pr-json", _write_gh(r, no_url))
+        assert r.load()["delivery"]["pr_state"] == "open"
+
+
+def _t_set_delivery_options_exclusive() -> None:
+    with _Repo() as r:
+        r.init()
+        f = _write_gh(r, _gh())
+        r.refused("set-delivery", "--pr-url", "https://x.test/pr/1", "--pr-json", f)
+        r.refused("set-delivery")
+
+
+def _t_set_delivery_pr_url_resets() -> None:
+    with _Repo() as r:
+        r.init()
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
+        merged = _gh("MERGED", [_cr(conclusion="SUCCESS")])
+        r.ok("set-delivery", "--pr-json", _write_gh(r, merged))
+        d = r.load()["delivery"]
+        assert d["pr_state"] == "merged" and d["ci"] == "pass" and d["checked_at"]
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/2")
+        d = r.load()["delivery"]
+        assert d == {"pr_url": "https://x.test/pr/2", "pr_state": "open", "ci": None,
+                     "checked_at": None}, d
+
+
+def _t_set_delivery_aborted() -> None:
+    with _Repo() as r:
+        r.init()
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
+        r.ok("abort")
+        assert "abandonnée" in r.refused("set-delivery", "--battle", "b1", "--pr-json",
+                                         _write_gh(r, _gh()))
+
+
+
 _INTEGRATION_TESTS = (
     _t_security_hits, _t_security_auto_slice,
     _t_init_profiles, _t_set_meta_profile, _t_validate_profile, _t_hotfix_e2e,
@@ -3026,6 +3425,9 @@ _INTEGRATION_TESTS = (
     _t_set_slices_replace_empty_cli, _t_active_battle_id, _t_load_active_battle,
     _t_active_reader_after_close, _t_set_guard_repair, _t_abort_cli,
     _t_commands_refused_after_abort_cli,
+    _t_set_delivery_pr_json_cli, _t_set_delivery_pr_json_requires_url,
+    _t_set_delivery_pr_json_bad_input, _t_set_delivery_url_mismatch,
+    _t_set_delivery_options_exclusive, _t_set_delivery_pr_url_resets, _t_set_delivery_aborted,
 )
 
 

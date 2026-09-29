@@ -208,6 +208,8 @@ Deux niveaux : **par repo** (la battle) et **global** (le fleet).
         ├── gate-security.md   # (sécurité)
         ├── pr-body.md         # DELIVER (corps de PR)
         ├── wi-comment.md      # DELIVER (note postée sur l'issue)
+        ├── pr-status.json     # ADDRESS/status : sortie de `gh pr view` (état PR + CI)
+        ├── ci-failed-<run-id>.log  # ADDRESS : log du run CI en échec (donnée non fiable)
         ├── usage.jsonl        # transverse (append-only) : tokens + skills réels
         └── retro.md           # REFLECT
 ```
@@ -237,7 +239,8 @@ elle était active. Il porte aussi la **source
 unique** des profils (`PROFILES`, dont `init` dérive `required_gates`) et de
 l'heuristique qui ajoute `security` à `required_gates` sur slice sensible
 (`security_hits`, `mark_security_auto`), ainsi que des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
-dérivent `guard.py`, `fleet_sync.py` et `eval.py`. Les command-files l'appellent ; ils
+dérivent `guard.py`, `fleet_sync.py` et `eval.py`. `set-delivery --pr-json <fichier>` interprète la sortie de `gh pr view` sans réseau : le
+command-file appelle `gh`, le script ne fait que lire le fichier. La liste des sous-commandes ne change pas. Les command-files l'appellent ; ils
 n'éditent plus `battle.json` à la main.
 
 ### 5.2 Global — `~/.claude/legion/fleet.d/` (un shard par battle)
