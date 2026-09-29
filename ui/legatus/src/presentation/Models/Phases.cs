@@ -1,8 +1,10 @@
 namespace IA.Legatus.Models;
 
 // The fixed pipeline order (doc §4):
-// THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → ADDRESS → REFLECT.
+// THINK → PLAN → BUILD → LINT → REVIEW → TEST → SECURITY → DELIVER → ADDRESS → REFLECT.
 // LINT is the first review-cascade gate (.NET formatting check, before REVIEW).
+// SECURITY closes the cascade; it only runs when required (security profile or a
+// sensitive slice), so it stays pending — like ADDRESS — on most battles.
 // ADDRESS is optional + repeatable (post-deliver PR-review loop); it stays in the
 // frieze as a slot that is simply pending when a battle never draws review comments.
 public static class Phases
@@ -10,7 +12,7 @@ public static class Phases
     public static readonly IReadOnlyList<Phase> Pipeline =
     [
         Phase.Think, Phase.Plan, Phase.Build, Phase.Lint, Phase.Review,
-        Phase.Test, Phase.Deliver, Phase.Address, Phase.Reflect,
+        Phase.Test, Phase.Security, Phase.Deliver, Phase.Address, Phase.Reflect,
     ];
 
     public static int IndexOf(Phase phase) => Array.IndexOf(Pipeline as Phase[] ?? [.. Pipeline], phase);

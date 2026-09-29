@@ -14,7 +14,7 @@ public static class Artifacts
         new("build-report.md", "Rapport de build", Phase.Build),
         new("gate-lint.md", "Gate — lint", Phase.Lint),
         new("gate-review.md", "Gate — revue", Phase.Review),
-        new("gate-security.md", "Gate — sécurité", Phase.Review),
+        new("gate-security.md", "Gate — sécurité", Phase.Security),
         new("gate-test.md", "Gate — tests", Phase.Test),
         new("pr-body.md", "Corps de PR", Phase.Deliver),
         new("wi-comment.md", "Note issue", Phase.Deliver),

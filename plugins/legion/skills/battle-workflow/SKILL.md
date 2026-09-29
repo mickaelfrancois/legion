@@ -221,6 +221,7 @@ run time**):
     "lint":    { "status": "pending" },     // .NET-only — self-retires (neutral accept) on non-.NET
     "review":  { "status": "pending" },
     "test":    { "status": "pending" },
+    // "security": { "status": "pending" } — present only when `security` is in required_gates
     "deliver": { "status": "pending" },
     "reflect": { "status": "pending" }
     // "address" is NOT in the default set — `/battle address` adds it on demand
