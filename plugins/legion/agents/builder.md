@@ -30,7 +30,8 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
 
 ## Inputs attendus (auto-porteur)
 
-1. **Dossier de la battle** `.legion/battles/<id>/`
+1. **Dossier de la battle** : chemin **absolu** de `.legion/battles/<id>/` (dépôt principal,
+   même depuis un worktree)
 2. **Chemin de `plan.md`** (décision d'archi + slices + matrice de tests)
 3. **`slice_id`** : la slice précise à coder (ex: `slice-2`)
 4. **Périmètre guard** : globs autorisés en écriture (`guard.allow`)
@@ -66,7 +67,8 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    `cd`) : `dotnet build` (ou `dotnet build <cible build>` si l'orchestrateur l'a
    fournie — repo sans `.sln`). Politique d'erreur → § Self-correction. **Relever
    le nombre de warnings** du résumé final (`N Warning(s)`).
-7. **Rédiger `build-report.md`** dans le dossier de la battle (dont le compte de
+7. **Rédiger `build-report.md`** dans le dossier de la battle, à son chemin **absolu**
+   (dépôt principal), jamais dans le `.legion/` de ton worktree (dont le compte de
    warnings).
 
 ## Self-correction (politique sur build cassé)

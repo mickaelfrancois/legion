@@ -51,7 +51,16 @@ Regles :
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
 
-Les globs sont relatifs a la racine du repo (cwd du hook). `**` matche tout
+**Deux racines** (GH#68) : dans un worktree git lie, le cwd du hook est le worktree mais la
+battle vit dans le depot principal. `_decide(data, repo_root, state_root)` separe donc la racine
+d'**edition** (`repo_root` = cwd du hook : globs `allow`/`deny` et `.gitignore`) de la racine
+d'**etat** (`state_root`, `battle_state.resolve_state_root` : pointeur, `battle.json`, confinement
+des gates, regle `.legion/` du builder, `.legion/**` toujours autorise, logs de gate). Hors worktree
+les deux racines sont confondues : comportement inchange. Depuis un worktree, le builder ecrit son
+`build-report.md` dans `<principal>/.legion/battles/<id>/` (chemin absolu) ; le `.legion/` du
+worktree n'est pas de l'etat et reste bloque.
+
+Les globs sont relatifs a la racine d'edition (cwd du hook). `**` matche tout
 (slash inclus), `*` matche hors-slash, `?` un caractere hors-slash.
 
 Tests CLI hors Claude Code :
@@ -95,6 +104,8 @@ try:
     # Lecteurs partages de la battle active (GH#85) : le hook ne lit plus le pointeur lui-meme.
     # `guard_of` : forme valide du bloc `guard` (GH#104), source unique partagee avec `validate`.
     from battle_state import active_battle_id, battles_dir, guard_of, load_active_battle
+    # Racine d'etat (GH#68) : depot principal depuis un worktree lie, sinon le cwd.
+    from battle_state import resolve_state_root
     # Matcher de globs partage avec `artifact_check.py tree-verify --guard` (GH#66, C6).
     from battle_state import glob_match as _glob_match
     GATE_ARTIFACT = {PLUGIN_PREFIX + g: a for g, a in _GATE_ARTIFACT_SRC.items()}
@@ -105,6 +116,9 @@ except Exception as _exc:  # ImportError, SyntaxError du module... jamais plante
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
     GATE_ARTIFACT = {}
     PRODUCER_ARTIFACT = {}
+
+    def resolve_state_root(cwd):  # repli : pas de resolution (les decisions ferment de toute facon)
+        return cwd
 
     def _glob_match(rel_path, patterns):  # jamais appele hors repli ; ferme si c'etait le cas
         raise RuntimeError("battle_state.glob_match indisponible")
@@ -154,6 +168,14 @@ def _relative(repo_root: Path, file_path: str) -> str | None:
     if rel.startswith(".."):
         return None  # hors du repo
     return rel
+
+
+def _always_allowed(rel_edit: str | None, rel_state: str | None) -> bool:
+    """Toujours autorises (`ALWAYS_ALLOW`) : `.legion/**` relatif a la racine d'**etat**, `.gitignore`
+    relatif a la racine d'**edition** (GH#68, C5-A). Racines confondues : `_matches(rel, ALWAYS_ALLOW)`."""
+    if rel_state is not None and _matches(rel_state, (ALWAYS_ALLOW[0],)):
+        return True
+    return rel_edit is not None and _matches(rel_edit, (ALWAYS_ALLOW[1],))
 
 
 def _is_claude_memory(file_path: str) -> bool:
@@ -261,14 +283,16 @@ def _is_blank_content(content) -> bool:
 
 
 def _invalid_guard_decision(
-    data: dict, repo_root: Path, battle_id: str, file_path: str, unreadable: bool = False
+    data: dict, repo_root: Path, battle_id: str, file_path: str, unreadable: bool = False,
+    state_root: Path | None = None,
 ) -> tuple[int, str]:
     """Etat de guard invalide ou illisible : perimetre inconnu -> ferme hors toujours-autorises (GH#104)."""
     if not file_path or _is_claude_memory(file_path):
         return 0, ""
     rel = _relative(repo_root, file_path)
-    if rel is not None and _matches(rel, ALWAYS_ALLOW):
-        return 0, ""  # `.legion/**` + `.gitignore` : la reparation reste possible
+    rel_state = _relative(state_root or repo_root, file_path)
+    if _always_allowed(rel, rel_state):
+        return 0, ""  # `.legion/**` (racine d'etat) + `.gitignore` : la reparation reste possible
     target = f"`{rel}`" if rel is not None else "un chemin hors du repo"
     if unreadable:
         # `set-guard`/`close` lisent `battle.json` : ils refusent un fichier illisible.
@@ -677,11 +701,17 @@ def _tmp_roots() -> list[Path]:
     return roots
 
 
-def _allowed_target(target: str, root: Path, battle_id: str | None, ps: bool = False) -> bool:
+def _allowed_target(
+    target: str, root: Path, battle_id: str | None, ps: bool = False, state_root: Path | None = None
+) -> bool:
     """True si une gate peut ecrire ici (C2-B) : `/dev/null` (`$null` en PowerShell), un
     `*.log` directement dans `.legion/battles/<active>/` (hors `ci-failed-*`), ou un chemin
     absolu sous le dossier temporaire du systeme, hors du depot. Cible non resolue
-    (`$`, backtick, glob, `~`) -> False."""
+    (`$`, backtick, glob, `~`) -> False.
+
+    `root` = racine d'edition (cwd du hook) ; `state_root` = racine d'etat (depot principal depuis
+    un worktree, GH#68), par defaut `root` : les `*.log` autorises vivent sous
+    `state_root/.legion/battles/<id>/`, et une cible absolue sous l'une OU l'autre racine est interdite."""
     if target == "/dev/null" or (ps and target.casefold() == "$null"):
         return True
     if not target or any(ch in target for ch in "$`*?{") or target.startswith("~"):
@@ -690,10 +720,11 @@ def _allowed_target(target: str, root: Path, battle_id: str | None, ps: bool = F
         raw = Path(target)
         resolved = (raw if raw.is_absolute() else root / raw).resolve()
         root_res = root.resolve()
+        state_res = (state_root if state_root is not None else root).resolve()
     except (OSError, ValueError):
         return False
     if battle_id:
-        battle_dir = root_res / ".legion" / "battles" / battle_id
+        battle_dir = state_res / ".legion" / "battles" / battle_id
         name = resolved.name.casefold()
         if (
             resolved.parent == battle_dir
@@ -702,11 +733,12 @@ def _allowed_target(target: str, root: Path, battle_id: str | None, ps: bool = F
         ):
             return True
     if Path(target).is_absolute():
-        try:
-            resolved.relative_to(root_res)
-            return False  # sous le depot
-        except ValueError:
-            pass
+        for base in (root_res, state_res):
+            try:
+                resolved.relative_to(base)
+                return False  # sous le depot (edition ou etat)
+            except ValueError:
+                pass
         for tmp in _tmp_roots():
             try:
                 rel = resolved.relative_to(tmp)
@@ -792,7 +824,9 @@ def _tar_extracts(args: list[str]) -> bool:
 _SED_WRITE = re.compile(r"(?:/[gpIiMmeE0-9]*w[ \t]*\S)|(?:(?:^|[;{}\n])[ \t]*(?:\d+|\$|/[^/\n]*/)?[ \t]*w[ \t]+\S)")
 
 
-def _argv_hits(words: list[str], ps: bool, root: Path, battle_id: str | None) -> list[str]:
+def _argv_hits(
+    words: list[str], ps: bool, root: Path, battle_id: str | None, state_root: Path | None = None
+) -> list[str]:
     """Motifs d'ecriture d'une commande simple (mots deja decoupes)."""
     hits: list[str] = []
     i, via_xargs = 0, False
@@ -817,7 +851,7 @@ def _argv_hits(words: list[str], ps: bool, root: Path, battle_id: str | None) ->
     args = words[i + 1 :]
 
     def all_allowed(items: list[str]) -> bool:
-        return all(_allowed_target(a, root, battle_id, ps) for a in items)
+        return all(_allowed_target(a, root, battle_id, ps, state_root) for a in items)
 
     if name in _FILE_CMDS:
         nonopt = _non_options(args)
@@ -833,7 +867,7 @@ def _argv_hits(words: list[str], ps: bool, root: Path, battle_id: str | None) ->
         elif any(_SED_WRITE.search(a) for a in _non_options(args)):
             hits.append("sed w")
     elif name == "dd":
-        if any(a.startswith("of=") and not _allowed_target(a[3:], root, battle_id, ps)
+        if any(a.startswith("of=") and not _allowed_target(a[3:], root, battle_id, ps, state_root)
                for a in args):
             hits.append("dd of=")
     elif name in ("install", "rsync", "patch"):
@@ -854,7 +888,7 @@ def _argv_hits(words: list[str], ps: bool, root: Path, battle_id: str | None) ->
                 tgt = a[9:]
             elif a in ("-O", "--remote-name", "--remote-name-all", "-J"):
                 tgt = ""
-            if tgt is not None and not _allowed_target(tgt, root, battle_id, ps):
+            if tgt is not None and not _allowed_target(tgt, root, battle_id, ps, state_root):
                 hits.append("curl -o")
                 break
     elif name == "wget":
@@ -865,7 +899,7 @@ def _argv_hits(words: list[str], ps: bool, root: Path, battle_id: str | None) ->
             elif a.startswith("--output-document="):
                 tgt = a[len("--output-document="):]
         if "--spider" not in args and (tgt is None or (
-                tgt != "-" and not _allowed_target(tgt, root, battle_id, ps))):
+                tgt != "-" and not _allowed_target(tgt, root, battle_id, ps, state_root))):
             hits.append("wget")
     elif name == "perl":
         if any(_flag_block_has(a, "i", "eEMmIxdDCVF") for a in args):
@@ -920,7 +954,7 @@ def _argv_hits(words: list[str], ps: bool, root: Path, battle_id: str | None) ->
                     if b in (";", "+"):
                         break
                     sub_words.append(b)
-                hits.extend(_argv_hits(sub_words, ps, root, battle_id))
+                hits.extend(_argv_hits(sub_words, ps, root, battle_id, state_root))
     if ps and name in _PS_CMDLETS:
         hits.append(words[i])
     if ps and any(a.casefold() in ("-outfile", "-filepath", "-literalpath") for a in args) \
@@ -931,7 +965,8 @@ def _argv_hits(words: list[str], ps: bool, root: Path, battle_id: str | None) ->
 
 
 def _command_hits(
-    command: str, ps: bool, root: Path, battle_id: str | None, depth: int = 0
+    command: str, ps: bool, root: Path, battle_id: str | None, depth: int = 0,
+    state_root: Path | None = None,
 ) -> list[str]:
     """Libelles des motifs d'ecriture trouves dans `command` (liste vide = rien a signaler).
 
@@ -943,31 +978,32 @@ def _command_hits(
     commands, subs = _split_simple_commands(command, ps)
     for words, redirs in commands:
         for op, target in redirs:
-            if not _allowed_target(target, root, battle_id, ps):
+            if not _allowed_target(target, root, battle_id, ps, state_root):
                 hits.append(f"redirection `{op} {target}`")
-        hits.extend(_argv_hits(words, ps, root, battle_id))
+        hits.extend(_argv_hits(words, ps, root, battle_id, state_root))
     for sub in subs:
-        hits.extend(_command_hits(sub, ps, root, battle_id, depth + 1))
+        hits.extend(_command_hits(sub, ps, root, battle_id, depth + 1, state_root))
     return hits
 
 
 def _shell_write_hits(
-    command: str, shell: str, root: Path, battle_id: str | None
+    command: str, shell: str, root: Path, battle_id: str | None, state_root: Path | None = None
 ) -> list[str]:
     """Motifs d'ecriture (dedoublonnes, ordre stable) d'une commande `Bash` / `PowerShell`."""
     ps = shell == "PowerShell"
-    hits = _command_hits(command, ps, root, battle_id)
+    hits = _command_hits(command, ps, root, battle_id, 0, state_root)
     if ps and _PS_IO_FILE.search(command):
         hits.append("[IO.File]::Write*")
     return list(dict.fromkeys(hits))
 
 
-def _shell_decision(data: dict, repo_root: Path) -> tuple[int, str]:
+def _shell_decision(data: dict, repo_root: Path, state_root: Path | None = None) -> tuple[int, str]:
     """Decision pour un appel `Bash` / `PowerShell` (routee AVANT toute lecture du guard).
 
     Seules les gates sont filtrees : la session principale et le builder ne passent jamais
     par `_load_active_guard` (un bloc `guard` invalide ne doit pas bloquer leur shell, cf.
     la reparation `set-guard`) ; leur perimetre d'ecriture est controle par l'empreinte de l'arbre.
+    `state_root` : racine de l'etat `.legion/` (defaut `repo_root`), cf. `_decide`.
     """
     if _IMPORT_ERROR is not None:
         fallback = _fallback_decision(data, repo_root)
@@ -982,9 +1018,10 @@ def _shell_decision(data: dict, repo_root: Path) -> tuple[int, str]:
             f"BLOQUE : la gate `{agent_type}` a lance un appel shell sans commande lisible "
             f"(fail-closed)."
         )
-    battle_id = active_battle_id(repo_root)
+    state = state_root or repo_root
+    battle_id = active_battle_id(state)
     try:
-        hits = _shell_write_hits(command, str(data.get("tool_name")), repo_root, battle_id)
+        hits = _shell_write_hits(command, str(data.get("tool_name")), repo_root, battle_id, state)
     except ValueError as exc:
         return 2, (
             f"BLOQUE : la gate `{agent_type}` a lance une commande non analysable ({exc}). "
@@ -1002,12 +1039,19 @@ def _shell_decision(data: dict, repo_root: Path) -> tuple[int, str]:
     )
 
 
-def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
-    """Retourne (exit_code, message). exit 2 = blocage."""
+def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tuple[int, str]:
+    """Retourne (exit_code, message). exit 2 = blocage.
+
+    Deux racines (GH#68) : `repo_root` = racine d'**edition** (cwd du hook, le worktree),
+    qui sert aux globs `allow`/`deny` et a `.gitignore` ; `state_root` = racine d'**etat**
+    (depot principal depuis un worktree lie, defaut `repo_root`), qui sert au pointeur, a
+    `battle.json`, au confinement des gates et a la regle `.legion/` du builder.
+    """
+    state = state_root or repo_root
     tool_name = data.get("tool_name")
     if tool_name in SHELL_TOOLS:
         # Route AVANT `_load_active_guard` et la logique d'ecriture (cf. `_shell_decision`).
-        return _shell_decision(data, repo_root)
+        return _shell_decision(data, repo_root, state)
     if tool_name not in WRITE_TOOLS:
         return 0, ""
 
@@ -1026,8 +1070,8 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     # Prioritaire sur tout le reste, et actif meme guard non arme.
     agent_type = data.get("agent_type")
     if agent_type in GATE_ARTIFACT:
-        battle_id = active_battle_id(repo_root)
-        rel = _relative(repo_root, file_path) if file_path else None
+        battle_id = active_battle_id(state)
+        rel = _relative(state, file_path) if file_path else None
         if _gate_decision(agent_type, rel, battle_id):
             # Confinement OK (bon artefact). Refuser EN PLUS un artefact vide : un `Write`
             # a contenu blanc produit un 0 octet qui passe le confinement mais echouerait
@@ -1052,13 +1096,15 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
 
     # Producteur sous `.legion/` : seul son rapport (pas d'auto-elargissement du guard).
     if agent_type in PRODUCER_ARTIFACT and file_path:
-        battle_id = active_battle_id(repo_root)
-        rel = _relative(repo_root, file_path)
+        battle_id = active_battle_id(state)
+        rel = _relative(state, file_path)
         decision = _producer_state_decision(
             agent_type, rel, battle_id, _resolved_parts(repo_root, file_path.replace("\\", "/"))
         )
         if decision is False:
             expected = f".legion/battles/{battle_id or '<aucune battle active>'}/{PRODUCER_ARTIFACT[agent_type]}"
+            if state != repo_root:  # worktree : le rapport vit dans le depot principal
+                expected = (state / expected).as_posix()
             return 2, (
                 f"BLOQUE : le `{agent_type}` n'ecrit sous `.legion/` QUE son rapport "
                 f"`{expected}`.\nTentative : `{rel}`.\n"
@@ -1068,12 +1114,14 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
         if decision is True:
             return 0, ""
 
-    active = _load_active_guard(repo_root)
+    active = _load_active_guard(state)
     if active is None:
         return 0, ""
     battle_id, allow, deny, valid, unreadable = active
     if not valid:
-        return _invalid_guard_decision(data, repo_root, battle_id, file_path, unreadable=unreadable)
+        return _invalid_guard_decision(
+            data, repo_root, battle_id, file_path, unreadable=unreadable, state_root=state
+        )
     if not allow:
         return 0, ""  # guard non arme
 
@@ -1084,6 +1132,10 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
         return 0, ""  # memoire de Claude : hors perimetre repo, jamais bloquee
 
     rel = _relative(repo_root, file_path)
+    # `.legion/**` (racine d'etat) et `.gitignore` (racine d'edition) : AVANT le blocage « hors du
+    # repo », pour que la session principale ecrive `<principal>/.legion/**` depuis un worktree.
+    if _always_allowed(rel, _relative(state, file_path)):
+        return 0, ""
     if rel is None:
         return 2, (
             f"BLOQUE par le guard de la battle {battle_id} : ecriture hors du repo "
@@ -1091,8 +1143,6 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
             f"Bypass delibere : LEGION_GUARD_OFF=1"
         )
 
-    if _matches(rel, ALWAYS_ALLOW):
-        return 0, ""
     if deny and _matches(rel, deny):
         return 2, (
             f"BLOQUE par le guard de la battle {battle_id} : `{rel}` est dans `deny`.\n"
@@ -1110,10 +1160,14 @@ def _decide(data: dict, repo_root: Path) -> tuple[int, str]:
     )
 
 
-def _safe_decide(data, repo_root: Path) -> tuple[int, str]:
-    """`_decide` avec filet final : toute exception imprevue -> exit 2 (jamais exit 1, non bloquant)."""
+def _safe_decide(data, repo_root: Path, state_root: Path | None = None) -> tuple[int, str]:
+    """`_decide` avec filet final : toute exception imprevue -> exit 2 (jamais exit 1, non bloquant).
+
+    `state_root` n'est transmis que s'il differe de `repo_root` (appel a deux arguments sinon)."""
     try:
-        return _decide(data, repo_root)
+        if state_root is None or state_root == repo_root:
+            return _decide(data, repo_root)
+        return _decide(data, repo_root, state_root)
     except BaseException as exc:  # noqa: BLE001 - fail-closed, y compris RecursionError
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
@@ -1174,7 +1228,9 @@ def main() -> int:
             _emit(message)  # rejet de parsing : pas de bypass LEGION_GUARD_OFF
             return code
 
-        code, message = _safe_decide(data, Path.cwd())
+        edit_root = Path.cwd()
+        state_root = resolve_state_root(edit_root)   # depot principal depuis un worktree (GH#68)
+        code, message = _safe_decide(data, edit_root, state_root)
 
         if code == 2 and os.environ.get("LEGION_GUARD_OFF") == "1":
             _emit(f"[guard bypass] {message}")
@@ -1332,10 +1388,10 @@ def _t_guard_safety_net() -> None:
     real, real_stdin, real_stderr, real_argv = _decide, sys.stdin, sys.stderr, sys.argv
     sys.argv = [real_argv[0]]   # main() ne doit pas relancer --self-test
 
-    def boom(data, root):
+    def boom(data, root, *_):
         raise RuntimeError("injecte")
 
-    def deep(data, root):
+    def deep(data, root, *_):
         raise RecursionError("injecte")
 
     try:
@@ -1427,7 +1483,7 @@ def _t_guard_main_no_exit_1() -> None:
         def flush(self):
             raise OSError("pipe casse")
 
-    code, _ = _run_main('{"tool_name":"Edit"}', stderr=_BrokenErr(), _decide=lambda d, r: (2, "x"))
+    code, _ = _run_main('{"tool_name":"Edit"}', stderr=_BrokenErr(), _decide=lambda d, r, *_: (2, "x"))
     assert code == 2, code
     code, err = _run_main('{"tool_name":"Bash"}')
     assert code == 0 and err.getvalue() == "", (code, err.getvalue())
@@ -1729,7 +1785,7 @@ def _t_shell_routing(bs) -> None:
         global _shell_decision
         real = _shell_decision
         try:
-            def boom(data, r):
+            def boom(data, r, *_):
                 raise RuntimeError("injecte")
             _shell_decision = boom
             code, msg = _safe_decide({"tool_name": "Bash", "agent_type": "legion:lint"}, root)
@@ -1762,6 +1818,147 @@ def _t_shell_routing(bs) -> None:
     assert len(entry) == 1, entry
     cmds = [h["command"] for h in entry[0]["hooks"]]
     assert any("hooks/guard.py" in c for c in cmds) and any("hooks/careful.py" in c for c in cmds), cmds
+
+
+# --- Deux racines (GH#68) : guard lance depuis un worktree git lie ----------------------
+
+def _wt_guard_json(main: Path, guard_json: str | None = None, raw: str | None = None) -> None:
+    """(Re)ecrit `battle.json` de la battle `B` du depot principal de la fixture."""
+    bdir = main / ".legion" / "battles" / "B"
+    bdir.mkdir(parents=True, exist_ok=True)
+    body = raw if raw is not None else '{"guard":' + (guard_json or '{"allow":["src/**"]}') + "}"
+    (bdir / "battle.json").write_text(body, encoding="utf-8")
+
+
+def _with_wt(bs, name: str, body) -> None:
+    """Fixture worktree reelle (`battle_state._git_worktree_fixture`) ; SKIP si git est inutilisable.
+    `main` a la battle `B` active avec `allow=["src/**"]`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fx = bs._git_worktree_fixture(Path(tmp))
+        if fx is None:
+            print(f"SKIP: {name} (git absent ou inutilisable)", file=sys.stderr)
+            return
+        main, wt, wt_out = (Path(os.path.realpath(p)) for p in fx)
+        _wt_guard_json(main)
+        body(main, wt, wt_out)
+
+
+def _run_hook(payload: dict, cwd: Path, **env_extra) -> tuple[int, str]:
+    """Lance `guard.py` en sous-processus avec `cwd` (l'appel reel du hook) : (code, stderr)."""
+    import subprocess
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "LEGION_GUARD_OFF")}
+    env.update(env_extra)
+    proc = subprocess.run([sys.executable, str(Path(__file__).resolve())], input=json.dumps(payload),
+                          capture_output=True, text=True, cwd=str(cwd), env=env, timeout=60)
+    return proc.returncode, proc.stderr
+
+
+def _t_guard_wt_subprocess(bs) -> None:
+    """G1 (reproduction), G2, G4, G13 : le hook reel, lance avec `cwd=<worktree>`."""
+    def body(main, wt, wt_out):
+        code, err = _run_hook(_ev("Edit", "claude", str(wt / "docs" / "x.md")), wt)          # G1
+        assert code == 2 and "hors du perimetre" in err, (code, err)
+        for path in (str(wt / "src" / "a.py"), "src/a.py"):                                   # G2
+            code, err = _run_hook(_ev("Edit", "claude", path), wt)
+            assert code == 0, (path, code, err)
+        report = str(main / ".legion" / "battles" / "B" / "build-report.md")                 # G4
+        code, err = _run_hook(_ev("Write", "legion:builder", report, content="# B"), wt)
+        assert code == 0, (code, err)
+        code, err = _run_hook(_ev("Edit", "claude", str(wt / "docs" / "x.md")), wt, LEGION_GUARD_OFF="1")
+        assert code == 0 and "[guard bypass]" in err, (code, err)                            # G13
+    _with_wt(bs, "_t_guard_wt_subprocess", body)
+
+
+def _t_guard_wt_standard(bs) -> None:
+    """G3 : `deny` evalue sur la racine d'edition (le worktree)."""
+    def body(main, wt, wt_out):
+        _wt_guard_json(main, '{"allow":["src/**"],"deny":["src/secret/**"]}')
+        assert _decide(_ev("Edit", "claude", str(wt / "src/secret/k.py")), wt, main)[0] == 2
+        assert _decide(_ev("Edit", "claude", str(wt / "src/ok.py")), wt, main)[0] == 0
+        assert _decide(_ev("Edit", "claude", str(wt_out / "src/ok.py")), wt_out, main)[0] == 0
+    _with_wt(bs, "_t_guard_wt_standard", body)
+
+
+def _t_guard_wt_builder(bs) -> None:
+    """G4 (unit), G5, G6 : le builder n'ecrit que `<principal>/.legion/battles/B/build-report.md`."""
+    def body(main, wt, wt_out):
+        for edit_root in (wt, wt_out):
+            ok = _ev("Write", "legion:builder", str(main / ".legion/battles/B/build-report.md"), content="# B")
+            assert _decide(ok, edit_root, main)[0] == 0, edit_root
+            bad = _ev("Write", "legion:builder", str(edit_root / ".legion/battles/B/build-report.md"), content="# B")
+            code, msg = _decide(bad, edit_root, main)                                           # G5
+            expected = (main / ".legion/battles/B/build-report.md").as_posix()
+            assert code == 2 and expected in msg, (edit_root, code, msg)
+            for target in (".legion/battles/B/battle.json", ".legion/active-battle"):         # G6
+                assert _decide(_ev("Edit", "legion:builder", str(main / target)), edit_root, main)[0] == 2, target
+        _wt_guard_json(main, "{}")   # guard non arme : memes refus
+        assert _decide(_ev("Edit", "legion:builder", str(main / ".legion/battles/B/battle.json")), wt, main)[0] == 2
+        bad = _ev("Write", "legion:builder", str(wt / ".legion/battles/B/build-report.md"), content="# B")
+        assert _decide(bad, wt, main)[0] == 2
+        assert _decide(_ev("Edit", "legion:builder", str(wt / "src/a.py")), wt, main)[0] == 0
+    _with_wt(bs, "_t_guard_wt_builder", body)
+
+
+def _t_guard_wt_gate(bs) -> None:
+    """G7 : une gate ecrit son artefact dans le depot principal, rien d'autre."""
+    def body(main, wt, wt_out):
+        art = str(main / ".legion/battles/B/gate-review.md")
+        assert _decide(_ev("Write", "legion:reviewer", art, content="# R"), wt, main)[0] == 0
+        assert _decide(_ev("Write", "legion:reviewer", art, content=""), wt, main)[0] == 2
+        for bad in (wt / "src/x.py", wt / ".legion/battles/B/gate-review.md", main / ".legion/battles/B/plan.md"):
+            assert _decide(_ev("Write", "legion:reviewer", str(bad), content="# R"), wt, main)[0] == 2, bad
+    _with_wt(bs, "_t_guard_wt_gate", body)
+
+
+def _t_guard_wt_always_allowed(bs) -> None:
+    """G8 (C5-A) : `.legion/**` sur la racine d'etat, `.gitignore` sur la racine d'edition."""
+    def body(main, wt, wt_out):
+        assert _decide(_ev("Edit", "claude", str(main / ".legion/battles/B/battle.json")), wt, main)[0] == 0
+        assert _decide(_ev("Edit", "claude", str(wt / ".gitignore")), wt, main)[0] == 0
+        assert _decide(_ev("Edit", "claude", str(wt / ".legion/x")), wt, main)[0] == 2
+        assert _decide(_ev("Edit", "claude", str(wt_out / ".legion/x")), wt_out, main)[0] == 2
+    _with_wt(bs, "_t_guard_wt_always_allowed", body)
+
+
+def _t_guard_wt_invalid(bs) -> None:
+    """G9 : bloc `guard` invalide / `battle.json` illisible dans le principal -> fail-closed en worktree."""
+    def body(main, wt, wt_out):
+        for raw in ('{"guard":["x"]}', "{oops"):
+            _wt_guard_json(main, raw=raw)
+            assert _decide(_ev("Edit", "claude", str(wt / "src/a.py")), wt, main)[0] == 2, raw
+            assert _decide(_ev("Edit", "claude", str(main / ".legion/battles/B/battle.json")), wt, main)[0] == 0, raw
+            assert _decide(_ev("Edit", "claude", str(wt / ".gitignore")), wt, main)[0] == 0, raw
+    _with_wt(bs, "_t_guard_wt_invalid", body)
+
+
+def _t_guard_wt_shell(bs) -> None:
+    """G10 : filtre shell des gates, logs autorises dans le dossier de la battle du principal."""
+    def body(main, wt, wt_out):
+        for cmd, want in ((f"echo x > {main}/.legion/battles/B/x.log", 0),
+                          (f"echo x > {wt}/src/a", 2), (f"echo x > {main}/src/a", 2)):
+            ev = {"tool_name": "Bash", "agent_type": "legion:lint", "tool_input": {"command": cmd}}
+            assert _decide(ev, wt, main)[0] == want, (cmd, want)
+    _with_wt(bs, "_t_guard_wt_shell", body)
+
+
+def _t_guard_wt_compat(bs) -> None:
+    """G11 : sans `state_root` (ou confondu) la decision est celle d'avant ; G12 : `main()` hors git."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        _shell_repo(bs, root, '{"allow":["src/**"]}')
+        for ev in (_ev("Edit", "claude", "src/x.cs"), _ev("Edit", "claude", "docs/x.md"),
+                   _ev("Write", "legion:builder", ".legion/battles/B/build-report.md", content="#"),
+                   _ev("Edit", "legion:builder", ".legion/battles/B/battle.json")):
+            assert _decide(ev, root) == _decide(ev, root, root) == _safe_decide(ev, root, root), ev
+        real_cwd = os.getcwd()
+        os.chdir(root)   # G12 : dossier non git, `main()` via stdin
+        try:
+            for path, want in (("src/x.cs", 0), ("docs/x.md", 2)):
+                code, _ = _run_main(json.dumps(_ev("Edit", "claude", path)))
+                assert code == want, (path, code)
+        finally:
+            os.chdir(real_cwd)
 
 
 def _self_test() -> int:
@@ -1907,6 +2104,14 @@ def _self_test() -> int:
     _t_shell_blocked(battle_state)
     _t_shell_allowed(battle_state)
     _t_shell_routing(battle_state)
+    _t_guard_wt_subprocess(battle_state)
+    _t_guard_wt_standard(battle_state)
+    _t_guard_wt_builder(battle_state)
+    _t_guard_wt_gate(battle_state)
+    _t_guard_wt_always_allowed(battle_state)
+    _t_guard_wt_invalid(battle_state)
+    _t_guard_wt_shell(battle_state)
+    _t_guard_wt_compat(battle_state)
 
     print("OK: guard self-test passed", file=sys.stderr)
     return 0

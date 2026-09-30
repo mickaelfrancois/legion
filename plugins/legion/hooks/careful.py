@@ -27,7 +27,7 @@ _IMPORT_ERROR: str | None = None
 try:
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))
-    from battle_state import guard_of, load_active_battle
+    from battle_state import guard_of, load_active_battle, resolve_state_root
 except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
@@ -152,6 +152,47 @@ def _t_careful_import_fallback() -> None:
         _IMPORT_ERROR = saved
 
 
+def _run_hook(cwd: Path, payload: dict):
+    import subprocess
+    return subprocess.run([sys.executable, str(Path(__file__).resolve())], input=json.dumps(payload),
+                          cwd=str(cwd), capture_output=True, text=True, timeout=30)
+
+
+def _careful_worktree(careful: bool):
+    import battle_state
+    rm = {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}}
+    with tempfile.TemporaryDirectory() as tmp:
+        fx = battle_state._git_worktree_fixture(Path(tmp))
+        if fx is None:
+            print("SKIP: careful worktree (git absent ou inutilisable)", file=sys.stderr)
+            return
+        main, wt, _ = fx
+        bdir = main / ".legion" / "battles" / "B"
+        bdir.mkdir(parents=True)
+        (bdir / "battle.json").write_text(json.dumps({"guard": {"careful": careful}}), encoding="utf-8")
+        proc = _run_hook(wt, rm)
+        assert proc.returncode == 0, proc
+        if careful:
+            assert "[careful]" in proc.stderr, proc.stderr  # C1
+        else:
+            assert proc.stderr == "", proc.stderr  # C2
+
+
+def _t_careful_worktree_on() -> None:  # C1
+    _careful_worktree(True)
+
+
+def _t_careful_worktree_off() -> None:  # C2
+    _careful_worktree(False)
+
+
+def _t_careful_not_git() -> None:  # C3
+    rm = {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}}
+    with tempfile.TemporaryDirectory() as d:
+        assert _handle(rm, Path(d)) == (0, "")
+        assert _run_hook(Path(d), rm).returncode == 0
+
+
 def _self_test() -> int:
     if _IMPORT_ERROR is not None:
         print(f"FAIL: import de scripts/battle_state.py impossible ({_IMPORT_ERROR})", file=sys.stderr)
@@ -162,6 +203,9 @@ def _self_test() -> int:
     _t_careful_nominal()
     _t_careful_invalid_guard()
     _t_careful_import_fallback()
+    _t_careful_worktree_on()
+    _t_careful_worktree_off()
+    _t_careful_not_git()
     print("OK: careful self-test passed", file=sys.stderr)
     return 0
 
@@ -175,7 +219,10 @@ def main() -> int:
     except (json.JSONDecodeError, EOFError):
         return 0
 
-    code, message = _handle(data, Path.cwd())
+    # GH#68 : depuis un worktree lie, la battle vit dans le depot principal (racine d'etat).
+    cwd = Path.cwd()
+    root = cwd if _IMPORT_ERROR is not None else resolve_state_root(cwd)
+    code, message = _handle(data, root)
     if message:
         print(message, file=sys.stderr)
     return code  # ne bloque jamais

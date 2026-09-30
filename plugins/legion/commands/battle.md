@@ -476,7 +476,12 @@ as above. Write `build-report.md`: one file, one `## <slice-id>` section appende
 **Mode — `--auto`.** Delegate to the `builder` agent via the `Agent` tool
 (`subagent_type: builder`). Pass a self-contained prompt: battle dir, `plan.md`
 path, `slice_id`, the `guard.allow` globs from `battle.json`, and — when set —
-`stack.build_target` (the explicit build target for a repo without a `.sln`). For `all`,
+`stack.build_target` (the explicit build target for a repo without a `.sln`). Pass the battle
+dir and the `plan.md` path as **absolute paths in the main repo** (`<main>/.legion/battles/<id>/`,
+`<main>` = the main checkout). An isolated builder writes `build-report.md` at that absolute
+path, never into the `.legion/` of its own worktree; the hooks resolve the battle from the main
+repo (`git rev-parse --git-common-dir`). After a parallel batch, check that `build-report.md`
+holds one `## <slice_id>` section per slice. For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep
 dependent slices sequential. **Sequential builders** are wrapped in the tree integrity
 check with `--guard` (above). **Parallel builders** write in their own worktree, so before the
