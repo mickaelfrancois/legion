@@ -55,7 +55,8 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    rapport (`build_ok: false`, raison « hors guard.allow »).
 4. **Coder la slice** : modifications chirurgicales, une responsabilité par
    classe, noms explicites. Écrire aussi les tests de la matrice couvrant cette
-   slice.
+   slice. **Ne commite pas dans ton worktree** : l'orchestrateur réintègre ton delta
+   dans l'arbre principal (fan-in) ; laisse tes changements non commités.
 5. **Cohérence des valeurs récurrentes** : quand une constante, une borne ou une phrase
    de doctrine apparaît dans **plusieurs** fichiers (une borne de boucle, un seuil, une
    énumération de gates/phases…), **grep tout l'arbre** (`Grep` sur le repo entier) et

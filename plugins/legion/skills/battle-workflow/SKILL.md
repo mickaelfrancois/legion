@@ -79,6 +79,7 @@ L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants :
 | **4. Filets DELIVER** | Base en retard sur `origin`, remote vide, fichier hors whitelist, `.gitignore` auto-induit. | Escalade : résoudre le filet d'abord. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
 | **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (contrôle d'intégrité, `battle.md` §E). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. |
+| **7. Fusion du lot parallèle** | Le fan-in d'un lot `--auto` échoue : conflit (`overlap`, `dirty`, `apply`) ou vérification du projet rouge après la fusion (`battle.md` §D). Un refus hors périmètre reste en cas 3. | Escalade : slices du lot `blocked`, worktrees conservés ; relayer la slice, le type de conflit et les fichiers. |
 
 Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiquement.
 
@@ -100,7 +101,9 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   `build-report-<slice_id>.md` (one file per slice, so parallel builders never share a
   file); the orchestrator consolidates them into `build-report.md` with
   `battle_state.py merge-reports`. Not read-only, emits no verdict: its output is what the
-  gates review.
+  gates review. A parallel builder works in its own worktree and does not commit there: the
+  orchestrator merges its delta back into the main tree (fan-in, `scripts/fan_in.py apply`,
+  then `cleanup` once the project verification is green); a slice is `done` only after that.
 - **Gates** — `architect`, `lint`, `reviewer`, `test-engineer`, `security`
   (+ `pr-triage`). They *judge* a deliverable. **Read-only on the code**, but each **writes its own
   single artifact** (`plan.md` / `gate-*.md` / `pr-feedback.md`) and returns only its

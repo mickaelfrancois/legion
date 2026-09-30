@@ -2647,10 +2647,31 @@ def _t_doc_tree_integrity() -> None:
     for d in docs:
         text = d.read_text(encoding="utf-8")
         assert "**6. Faute d'écriture d'une gate**" in text, f"cas 6 absent de {d.name}"
+        assert "**7. Fusion du lot parallèle**" in text, f"cas 7 absent de {d.name}"
     battle = docs[0].read_text(encoding="utf-8")
     for needle in ("tree-snapshot", "tree-verify", "--fingerprint", "--guard", "--base"):
         assert needle in battle, f"{needle!r} absent de battle.md"
     assert "Bash non couvert" not in docs[2].read_text(encoding="utf-8")
+
+
+def _t_doc_fan_in() -> None:
+    battle_md = Path(__file__).resolve().parents[1] / "commands/battle.md"
+    if not battle_md.is_file():
+        print("SKIP: _t_doc_fan_in (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    text = battle_md.read_text(encoding="utf-8")
+    start = text.index("**Mode — `--auto`.**")
+    sec = text[start:text.index("After build (either mode)", start)]
+    # `fan_in.py` peut être suivi d'un guillemet fermant (`"$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" apply`)
+    pos: dict[str, int] = {}
+    for sub in ("apply", "cleanup"):
+        m = re.search(rf'fan_in\.py"? {sub}\b', sec)
+        assert m, f"fan_in.py {sub} absent du §D --auto de battle.md"
+        pos[sub] = m.start()
+    i_batch = sec.index("--batch-worktrees")
+    i_merge = sec.index("merge-reports", pos["cleanup"])
+    assert i_batch < pos["apply"] < pos["cleanup"] < i_merge, "ordre du fan-in (§D --auto)"
 
 
 def _t_doc_worktree_state_root() -> None:
@@ -3018,7 +3039,7 @@ _CORE_TESTS = (
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
     _t_slice_report_names, _t_merge_nominal, _t_merge_missing_blank, _t_merge_out_of_scope,
-    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_worktree_state_root, _t_doc_abort_stale,
+    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_abort_stale,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,

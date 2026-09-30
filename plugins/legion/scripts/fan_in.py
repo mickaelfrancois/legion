@@ -1,0 +1,960 @@
+"""Fan-in d'un lot parallèle legion (`/battle build --auto`, GH#72), version exécutable.
+
+En mode parallèle, chaque builder travaille dans un worktree git isolé. Une fois le lot
+vérifié, l'orchestrateur doit **réintégrer** les deltas dans l'arbre principal. Ce script est le
+**seul** qui écrit dans l'arbre de code (`battle_state.py` écrit `battle.json`, `artifact_check.py`
+vérifie) ; il n'écrit jamais `battle.json` ni rien sous `.legion/`.
+
+Sous-commande `apply` (fail-closed, tout-ou-rien) :
+
+1. **Contexte** : le cwd est la racine du dépôt principal ; la battle active existe ; son guard est
+   valide et **armé** (`allow` non vide) ; `--base` est un commit existant ; chaque `--slice` est
+   déclarée, au statut `in_progress`, sans doublon ; chaque worktree est enregistré, sous
+   `<principal>/.claude/worktrees/`, sans lien symbolique, non `prunable`, non partagé, et son
+   HEAD descend de `--base`. Le traitement suit l'ordre de `battle.json.slices`.
+2. **Delta** par slice : index temporaire (`read-tree HEAD`, `add -A`, `write-tree`) qui donne
+   l'arbre `T`, sans toucher ni l'index réel ni le worktree. Commits du builder et fichiers non
+   suivis inclus, fichiers ignorés exclus.
+3. **Contrôle de chemin** sur tout le lot : gitlink (dépôt imbriqué), `.legion/`, hors `allow` ou
+   dans `deny` -> `refused` + `out_of_scope`.
+4. **Contrôle de conflit** sur tout le lot : `overlap` (chemin touché par deux slices), `dirty`
+   (le principal diffère de `<base>` sur un chemin du delta), `apply` (`git apply --check`).
+5. **Écriture unique** : les patches sont concaténés puis appliqués par un seul `git apply
+   --binary` (sans `--index` ni `--3way`) : seul l'arbre de travail change, HEAD et index du
+   principal restent intacts. Un conflit ou un refus laisse le principal inchangé.
+
+Sous-commande `cleanup` (après la vérification verte du projet) : mêmes validations d'entrée,
+mais statut attendu `done`. Pour chaque slice, le delta est recalculé et **prouvé** présent dans
+le principal (chaque fichier a le hash de l'arbre `T`, un fichier supprimé est absent) ; sinon le
+worktree est conservé (`kept`). Si la preuve tient : `git worktree remove --force` (jamais deux
+`--force` : un worktree verrouillé est conservé), puis `git branch -D` seulement pour la branche
+extraite par ce worktree, si aucun autre worktree ne l'a extraite et si ce n'est pas la branche
+courante du principal. Un refus est non bloquant pour l'orchestrateur (warning).
+
+Usage :
+    python fan_in.py apply --base <sha> --slice <id> <worktree> [--slice <id> <worktree> ...]
+    python fan_in.py cleanup --base <sha> --slice <id> <worktree> [--slice <id> <worktree> ...]
+    python fan_in.py --self-test
+
+Sortie : un objet JSON sur stdout
+    succès  -> { ok:true, applied:[{slice, worktree, committed, files:[{status, path}]}] }
+    refus   -> { ok:false, refused:true, reason, out_of_scope:[{slice, path, why}<=50],
+                 out_of_scope_count, applied:[] }
+    conflit -> { ok:false, conflict:{slice, kind, files<=50}, reason, applied:[] }
+    faute   -> { ok:false, fault:true, reason, applied:[] }
+cleanup -> { ok:bool, removed:[{slice, worktree, branch, branch_kept?}], kept:[{slice, worktree,
+                 reason}] } ; `ok` = `kept` vide ; refus d'entrée -> { ok:false, refused:true, reason,
+                 removed:[], kept:[] }
+`applied[].files` n'est jamais tronqué : c'est la source fiable de `slice done --files`.
+Codes de sortie : 0 = ok ; 2 = conflit, refus ou faute (`ok:false`) ; 1 = erreur d'usage.
+Limite assumée : `git apply` valide tout avant d'écrire ; seule une erreur d'E/S pendant
+l'écriture pourrait laisser un état partiel.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+import artifact_check as ac  # noqa: E402  (source unique des options git imposées)
+import battle_state as bs  # noqa: E402
+
+_Refuse = ac._Refuse
+_MAX_LIST = ac._MAX_LIST
+_WT_RE = re.compile(r"^[A-Za-z0-9._/:\\ -]+$")          # battle.md §D
+_DIFF_OPTS = ("--binary", "--full-index", "--no-renames", "--no-color", "--no-ext-diff",
+              "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/")
+_APPLY_OPTS = ("apply", "--binary", "--whitespace=nowarn")
+_GITLINK = "160000"
+
+
+class _Conflict(Exception):
+    """Conflit de fan-in : le principal reste inchangé."""
+
+    def __init__(self, slice_id: str, kind: str, files: list[str], reason: str) -> None:
+        super().__init__(reason)
+        self.slice_id, self.kind, self.files, self.reason = slice_id, kind, files, reason
+
+
+class _OutOfScope(Exception):
+    """Chemins refusés (périmètre, `.legion/`, gitlink)."""
+
+    def __init__(self, items: list[dict]) -> None:
+        super().__init__("chemin hors périmètre")
+        self.items = items
+
+
+# --- git -----------------------------------------------------------------------------------
+
+def _run(root: str, *args: str, data: bytes | None = None) -> tuple[int, bytes, str]:
+    """Comme `artifact_check._git` (mêmes options imposées, même environnement) mais rend
+    `(code, stdout, stderr)` au lieu de lever : nécessaire pour lire le stderr de `git apply`."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_NO_REPLACE_OBJECTS="1")
+    env.pop("GIT_INDEX_FILE", None)
+    try:
+        p = subprocess.run(["git", "--no-optional-locks", *ac._GIT_FORCED, "-C", root, *args],
+                           capture_output=True, env=env,
+                           **({"input": data} if data is not None else {"stdin": subprocess.DEVNULL}))
+    except (OSError, ValueError) as exc:
+        raise _Refuse(f"git indisponible ({type(exc).__name__}: {exc})") from exc
+    return p.returncode, p.stdout, p.stderr.decode("utf-8", "replace")
+
+
+def _wt_entries(main: str) -> list[dict]:
+    """Worktrees enregistrés (`git worktree list --porcelain`), chemins réels."""
+    out = ac._git(main, "worktree", "list", "--porcelain")
+    entries: list[dict] = []
+    cur: dict | None = None
+    for line in out.split(b"\n"):
+        if line.startswith(b"worktree "):
+            cur = {"path": os.path.realpath(os.fsdecode(line[len(b"worktree "):])),
+                   "branch": None, "detached": False, "prunable": False, "locked": False}
+            entries.append(cur)
+        elif cur is None:
+            continue
+        elif line.startswith(b"branch "):
+            cur["branch"] = os.fsdecode(line[len(b"branch "):])
+        elif line == b"detached":
+            cur["detached"] = True
+        elif line.startswith(b"prunable"):
+            cur["prunable"] = True
+        elif line.startswith(b"locked"):
+            cur["locked"] = True
+    return entries
+
+
+# --- contexte et entrées -------------------------------------------------------------------
+
+def _context(cwd: str) -> tuple[str, list[dict], dict]:
+    """`(main, slices, guard)` ; `_Refuse` si le contexte n'est pas sûr (fail-closed)."""
+    top = ac._toplevel(cwd)
+    main_root = os.path.realpath(str(bs.main_repo_root(Path(cwd))))
+    if top != main_root or os.path.realpath(cwd) != top:
+        raise _Refuse("à lancer depuis la racine du dépôt principal (pas un worktree ni un sous-dossier)")
+    active = bs.load_active_battle(bs.resolve_state_root(Path(cwd)))
+    if active is None:
+        raise _Refuse("aucune battle active lisible (fail-closed)")
+    battle = active[1]
+    guard, valid = bs.guard_of(battle)
+    if not valid:
+        raise _Refuse("bloc `guard` invalide (fail-closed)")
+    allow = guard.get("allow") or []
+    if not allow:
+        raise _Refuse("guard non armé (`guard.allow` vide) : le fan-in exige un périmètre")
+    slices = battle.get("slices")
+    if not isinstance(slices, list) or not all(isinstance(s, dict) for s in slices):
+        raise _Refuse("`battle.json.slices` absent ou invalide")
+    return top, slices, {"allow": allow, "deny": guard.get("deny") or []}
+
+
+def _validate_inputs(main: str, base: str, pairs: list[tuple[str, str]], slices: list[dict],
+                     expected_status: str) -> list[tuple[str, str]]:
+    """Valide `--base` et les paires `(slice, worktree)` ; rend `[(slice, wt_réel)]` dans l'ordre
+    de `battle.json.slices`."""
+    if not ac._COMMIT_RE.fullmatch(base):
+        raise _Refuse("--base n'est pas un sha hexadécimal complet")
+    rc, _, _ = _run(main, "cat-file", "-e", f"{base}^{{commit}}")
+    if rc != 0:
+        raise _Refuse(f"--base {base[:12]} ne désigne aucun commit existant")
+    status = {s.get("id"): s.get("status") for s in slices}
+    seen_ids: set[str] = set()
+    seen_wt: set[str] = set()
+    entries = {e["path"]: e for e in _wt_entries(main)}
+    wt_root = os.path.join(main, ".claude", "worktrees") + os.sep
+    by_id: dict[str, str] = {}
+    for sid, wt in pairs:
+        if not bs._ID_RE.fullmatch(sid):
+            raise _Refuse(f"identifiant de slice invalide : {sid!r}")
+        if sid in seen_ids:
+            raise _Refuse(f"slice {sid} donnée deux fois")
+        seen_ids.add(sid)
+        if sid not in status:
+            raise _Refuse(f"slice {sid} non déclarée dans battle.json")
+        if status[sid] != expected_status:
+            raise _Refuse(f"slice {sid} au statut {status[sid]!r} (attendu {expected_status!r})")
+        if not _WT_RE.fullmatch(wt):
+            raise _Refuse(f"chemin de worktree refusé pour {sid} (caractères hors liste)")
+        absolute = os.path.abspath(wt)
+        real = os.path.realpath(wt)
+        if os.path.normcase(absolute) != os.path.normcase(real) or ac._has_symlink_between(main, absolute):
+            raise _Refuse(f"worktree de {sid} : lien symbolique dans le chemin")
+        if real == main:
+            raise _Refuse(f"worktree de {sid} = dépôt principal")
+        if not real.startswith(wt_root):
+            raise _Refuse(f"worktree de {sid} hors de .claude/worktrees/")
+        entry = entries.get(real)
+        if entry is None:
+            raise _Refuse(f"worktree de {sid} non enregistré par git")
+        if entry["prunable"]:
+            raise _Refuse(f"worktree de {sid} prunable (répertoire disparu)")
+        if real in seen_wt:
+            raise _Refuse(f"worktree partagé par deux slices ({sid})")
+        seen_wt.add(real)
+        rc, _, _ = _run(real, "merge-base", "--is-ancestor", base, "HEAD")
+        if rc != 0:
+            raise _Refuse(f"le HEAD du worktree de {sid} ne descend pas de --base")
+        by_id[sid] = real
+    return [(s.get("id"), by_id[s.get("id")]) for s in slices if s.get("id") in by_id]
+
+
+# --- delta ---------------------------------------------------------------------------------
+
+def _delta(main: str, wt: str, base: str) -> dict:
+    """Delta d'un worktree par rapport à `base` : `{tree, committed, entries, patch}`.
+
+    `entries` = `[{status, path, oldmode, newmode}]`. Index temporaire : ni l'index réel ni le
+    worktree ne sont touchés."""
+    head = ac._git(wt, "rev-parse", "HEAD").decode().strip()
+    with tempfile.TemporaryDirectory() as td:
+        idx = os.path.join(td, "index")
+        ac._git(wt, "read-tree", "HEAD", index=idx)   # HEAD (pas base) : garde un fichier ignoré commité de force
+        ac._git(wt, "add", "-A", index=idx)
+        tree = ac._git(wt, "write-tree", index=idx).decode().strip()
+    raw = ac._git(main, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff", base, tree)
+    toks = raw.split(b"\0")
+    entries: list[dict] = []
+    i = 0
+    while i < len(toks) - 1:
+        meta = toks[i]
+        if not meta.startswith(b":"):
+            i += 1
+            continue
+        fields = meta[1:].decode("ascii", "replace").split()
+        entries.append({"status": fields[4][:1], "path": os.fsdecode(toks[i + 1]),
+                        "oldmode": fields[0], "newmode": fields[1]})
+        i += 2
+    patch = ac._git(main, "diff", *_DIFF_OPTS, base, tree)
+    return {"tree": tree, "committed": head != base, "entries": entries, "patch": patch}
+
+
+def _scope_check(deltas: list[tuple[str, str, dict]], guard: dict) -> None:
+    """Contrôle de chemin sur tout le lot ; `_OutOfScope` si au moins un chemin est refusé."""
+    bad: list[dict] = []
+    for sid, _, d in deltas:
+        for e in d["entries"]:
+            path = e["path"]
+            why = None
+            if _GITLINK in (e["oldmode"], e["newmode"]):
+                why = "gitlink (dépôt imbriqué)"
+            elif ac._is_legion(path):
+                why = "état .legion/"
+            elif not bs.glob_match(path, ac._ROOT_ALWAYS_ALLOW):
+                if guard["deny"] and bs.glob_match(path, guard["deny"]):
+                    why = "dans guard.deny"
+                elif not bs.glob_match(path, guard["allow"]):
+                    why = "hors guard.allow"
+            if why:
+                bad.append({"slice": sid, "path": path, "why": why})
+    if bad:
+        raise _OutOfScope(bad)
+
+
+# --- conflits ------------------------------------------------------------------------------
+
+def _main_hash(main: str, rel: str) -> str | None:
+    """Hash git du contenu actuel de `rel` dans le principal (filtres et eol comme `git add`) ;
+    `None` si absent ; `"<dir>"` pour un dossier."""
+    p = os.path.join(main, *rel.split("/"))
+    if os.path.islink(p):
+        return ac._git(main, "hash-object", "--stdin", data=os.fsencode(os.readlink(p))).decode().strip()
+    if os.path.isdir(p):
+        return "<dir>"
+    if not os.path.lexists(p):
+        return None
+    return ac._git(main, "hash-object", f"--path={rel}", "--", p).decode().strip()
+
+
+def _base_hash(main: str, base: str, rel: str) -> str | None:
+    rc, out, _ = _run(main, "rev-parse", "--verify", "-q", f"{base}:{rel}")
+    return out.decode().strip() if rc == 0 else None
+
+
+_APPLY_ERR = (re.compile(r"^error: patch failed: (.+?):\d+$"),
+              re.compile(r"^error: (.+?): (?:already exists in working directory|does not exist in "
+                         r"index|patch does not apply|No such file or directory)$"))
+
+
+def _apply_files(stderr: str, candidates: list[str]) -> list[str]:
+    """Fichiers cités par le stderr de `git apply` ; à défaut, tous les `candidates`."""
+    found: list[str] = []
+    for line in stderr.splitlines():
+        for rx in _APPLY_ERR:
+            m = rx.match(line.strip())
+            if m and m.group(1) in candidates and m.group(1) not in found:
+                found.append(m.group(1))
+    return found or list(candidates)
+
+
+def _conflict_check(main: str, base: str, deltas: list[tuple[str, str, dict]]) -> None:
+    """`_Conflict` au premier conflit dans l'ordre des slices, avant toute écriture."""
+    touched: dict[str, str] = {}
+    for sid, _, d in deltas:
+        paths = [e["path"] for e in d["entries"]]
+        over = [p for p in paths if p in touched]
+        if over:
+            raise _Conflict(sid, "overlap", over,
+                            f"chemins déjà touchés par {touched[over[0]]} : {', '.join(over[:3])}")
+        dirty = [p for p in paths if _main_hash(main, p) != _base_hash(main, base, p)]
+        if dirty:
+            raise _Conflict(sid, "dirty", dirty,
+                            f"le principal diffère de la base sur : {', '.join(dirty[:3])}")
+        if paths:
+            rc, _, err = _run(main, *_APPLY_OPTS, "--check", "-", data=d["patch"])
+            if rc != 0:
+                raise _Conflict(sid, "apply", _apply_files(err, paths),
+                                "git apply --check refuse le patch")
+        for p in paths:
+            touched[p] = sid
+
+
+def _write_batch(main: str, deltas: list[tuple[str, str, dict]]) -> None:
+    """Écriture unique : un seul `git apply` du lot concaténé (vérifié d'abord en entier)."""
+    patch = b"".join(d["patch"] for _, _, d in deltas)
+    if not patch:
+        return
+    rc, _, err = _run(main, *_APPLY_OPTS, "--check", "-", data=patch)
+    if rc != 0:
+        sid = next((s for s, _, d in reversed(deltas) if d["entries"]), deltas[-1][0])
+        allp = [e["path"] for _, _, d in deltas for e in d["entries"]]
+        raise _Conflict(sid, "apply", _apply_files(err, allp), "git apply --check du lot refusé")
+    rc, _, err = _run(main, *_APPLY_OPTS, "-", data=patch)
+    if rc != 0:
+        raise _Refuse(f"git apply a échoué : {err.strip().splitlines()[0] if err.strip() else rc}")
+
+
+# --- commande apply ------------------------------------------------------------------------
+
+def _fail(**kw) -> dict:
+    return {"ok": False, "applied": [], **kw}
+
+
+def apply_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
+    """Cœur de `apply` ; ne lève jamais : toute faute devient un objet `ok:false`."""
+    try:
+        main, slices, guard = _context(cwd)
+        ordered = _validate_inputs(main, base, pairs, slices, "in_progress")
+        deltas = [(sid, wt, _delta(main, wt, base)) for sid, wt in ordered]
+        _scope_check(deltas, guard)
+        _conflict_check(main, base, deltas)
+        _write_batch(main, deltas)
+    except _OutOfScope as exc:
+        return _fail(refused=True, reason="chemins hors périmètre ou interdits",
+                     out_of_scope=exc.items[:_MAX_LIST], out_of_scope_count=len(exc.items))
+    except _Conflict as exc:
+        return _fail(conflict={"slice": exc.slice_id, "kind": exc.kind, "files": exc.files[:_MAX_LIST]},
+                     reason=exc.reason)
+    except _Refuse as exc:
+        return _fail(refused=True, reason=str(exc))
+    except Exception as exc:  # noqa: BLE001 - contrat : jamais d'exception non rattrapée
+        return _fail(fault=True, reason=f"{type(exc).__name__}: {exc}")
+    applied = [{"slice": sid, "worktree": wt, "committed": d["committed"],
+                "files": [{"status": e["status"], "path": e["path"]} for e in d["entries"]]}
+               for sid, wt, d in deltas]
+    return {"ok": True, "applied": applied}
+
+
+# --- commande cleanup ----------------------------------------------------------------------
+
+def _prove_in_main(main: str, d: dict) -> list[str]:
+    """Chemins du delta `d` que le principal ne contient pas (liste vide = preuve faite)."""
+    missing: list[str] = []
+    for e in d["entries"]:
+        path, here = e["path"], _main_hash(main, e["path"])
+        if _GITLINK in (e["oldmode"], e["newmode"]):
+            missing.append(path)                      # dépôt imbriqué : jamais prouvable
+        elif e["status"] == "D":
+            if here is not None:
+                missing.append(path)
+        else:
+            rc, out, _ = _run(main, "rev-parse", "--verify", "-q", f"{d['tree']}:{path}")
+            if rc != 0 or here != out.decode().strip():
+                missing.append(path)
+    return missing
+
+
+def _remove_one(main: str, sid: str, wt: str, entries: list[dict]) -> tuple[dict | None, str | None]:
+    """Retire le worktree et, sous conditions, sa branche. `(removed, None)` ou `(None, raison)`."""
+    me = next((e for e in entries if e["path"] == wt), None)
+    if me is None:
+        return None, "worktree introuvable dans git worktree list"
+    if me["locked"]:
+        return None, "worktree verrouillé"
+    branch = None if me["detached"] else me["branch"]
+    rc, _, err = _run(main, "worktree", "remove", "--force", wt)
+    if rc != 0:
+        return None, f"git worktree remove a échoué : {err.strip().splitlines()[0] if err.strip() else rc}"
+    out: dict = {"slice": sid, "worktree": wt, "branch": None}
+    if not branch:
+        return out, None
+    short = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
+    main_branch = next((e["branch"] for e in entries if e["path"] == main), None)
+    if branch == main_branch:
+        out["branch_kept"] = "branche courante du principal"
+    elif any(e["path"] != wt and e["branch"] == branch for e in entries):
+        out["branch_kept"] = "branche extraite dans un autre worktree"
+    else:
+        rc, _, err = _run(main, "branch", "-D", short)
+        if rc == 0:
+            out["branch"] = short
+        else:
+            out["branch_kept"] = f"git branch -D a échoué : {err.strip().splitlines()[0] if err.strip() else rc}"
+    return out, None
+
+
+def cleanup_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
+    """Cœur de `cleanup` ; ne lève jamais. `ok` vaut vrai si aucun worktree n'est conservé."""
+    removed: list[dict] = []
+    kept: list[dict] = []
+    try:
+        main, slices, _guard = _context(cwd)
+        ordered = _validate_inputs(main, base, pairs, slices, "done")
+        entries = _wt_entries(main)                   # instantané : les branches se jugent avant tout retrait
+        for sid, wt in ordered:
+            try:
+                missing = _prove_in_main(main, _delta(main, wt, base))
+            except _Refuse as exc:
+                kept.append({"slice": sid, "worktree": wt, "reason": f"preuve impossible : {exc}"})
+                continue
+            if missing:
+                kept.append({"slice": sid, "worktree": wt,
+                             "reason": f"delta absent du principal : {', '.join(missing[:3])}"})
+                continue
+            done, why = _remove_one(main, sid, wt, entries)
+            if done is None:
+                kept.append({"slice": sid, "worktree": wt, "reason": why})
+            else:
+                removed.append(done)
+    except _Refuse as exc:
+        return {"ok": False, "refused": True, "reason": str(exc), "removed": [], "kept": []}
+    except Exception as exc:  # noqa: BLE001 - contrat : jamais d'exception non rattrapée
+        return {"ok": False, "fault": True, "reason": f"{type(exc).__name__}: {exc}",
+                "removed": removed[:_MAX_LIST], "kept": kept[:_MAX_LIST]}
+    return {"ok": not kept, "removed": removed[:_MAX_LIST], "kept": kept[:_MAX_LIST]}
+
+
+# --- CLI -----------------------------------------------------------------------------------
+
+def _usage(msg: str) -> int:
+    print(f"usage invalide : {msg}", file=sys.stderr)
+    return 1
+
+
+def _parse_batch(rest: list[str]) -> tuple[str, list[tuple[str, str]]] | str:
+    """`(base, [(slice, worktree)])` ou un message d'usage."""
+    base: str | None = None
+    pairs: list[tuple[str, str]] = []
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--base":
+            if i + 1 >= len(rest):
+                return "--base attend une valeur"
+            base = rest[i + 1]
+            i += 2
+        elif a == "--slice":
+            if i + 2 >= len(rest) or rest[i + 1].startswith("--") or rest[i + 2].startswith("--"):
+                return "--slice attend <id> <worktree>"
+            pairs.append((rest[i + 1], rest[i + 2]))
+            i += 3
+        else:
+            return f"argument inattendu : {a}"
+    if base is None or not ac._COMMIT_RE.fullmatch(base):
+        return "--base <sha hexadécimal complet> obligatoire"
+    if not pairs:
+        return "au moins un --slice <id> <worktree> est obligatoire"
+    return base, pairs
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--self-test" in args:
+        return _self_test()
+    if not args or args[0] not in ("apply", "cleanup"):
+        return _usage("sous-commande attendue : apply | cleanup | --self-test")
+    parsed = _parse_batch(args[1:])
+    if isinstance(parsed, str):
+        return _usage(f"{args[0]} --base <sha> --slice <id> <worktree> [...] : " + parsed)
+    res = (apply_batch if args[0] == "apply" else cleanup_batch)(os.getcwd(), *parsed)
+    print(json.dumps(res, ensure_ascii=False))
+    return 0 if res["ok"] else 2
+
+
+# --- Self-test : vrais dépôts et worktrees git jetables ------------------------------------
+
+def _sha256_of(path: str) -> str:
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+class _Fx:
+    """Dépôt principal (battle `B` active, slices 1 et 2 `in_progress`) + worktrees `w1`, `w2`
+    sous `.claude/worktrees/` et `wt_out` hors arbre, tous détachés sur `base`."""
+
+    def __init__(self, base_dir: str, fx: tuple) -> None:
+        main, w1, wt_out = (os.path.realpath(str(p)) for p in fx)
+        self.main, self.w1, self.wt_out = main, w1, wt_out
+        self.w2 = os.path.join(os.path.dirname(w1), "w2")
+        self.env = {k: v for k, v in os.environ.items() if k not in bs._GIT_ENV_DROP}
+        self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+        self.write(main, ".gitignore", ".legion/\n.claude/\nbin/\n")
+        self.write(main, "src/a.txt", "a\n")
+        self.write(main, "docs/b.txt", "b\n")
+        self.git(main, "add", "-A")
+        self.git(main, "commit", "-q", "-m", "base")
+        self.base = self.git(main, "rev-parse", "HEAD").strip()
+        for wt in (self.w1, self.wt_out):
+            self.git(wt, "checkout", "-q", "--detach", self.base)
+        self.git(main, "worktree", "add", "-q", "--detach", self.w2, self.base)
+        self.w2 = os.path.realpath(self.w2)
+        self.battle_path = os.path.join(main, ".legion", "battles", "B", "battle.json")
+        self.set_battle()
+
+    def set_battle(self, allow=("src/**", "docs/**"), deny=("src/secret/**",),
+                   statuses=("in_progress", "in_progress"), guard="default") -> None:
+        if guard == "default":
+            guard = {"allow": list(allow), "deny": list(deny)}
+        body = {"id": "B", "guard": guard,
+                "slices": [{"id": "slice-1", "status": statuses[0]},
+                           {"id": "slice-2", "status": statuses[1]}]}
+        os.makedirs(os.path.dirname(self.battle_path), exist_ok=True)
+        with open(self.battle_path, "w", encoding="utf-8") as fh:
+            json.dump(body, fh)
+
+    def git(self, cwd: str, *a: str) -> str:
+        p = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                            "-c", "commit.gpgsign=false", *a], cwd=cwd, env=self.env,
+                           capture_output=True, text=True, encoding="utf-8",
+                           stdin=subprocess.DEVNULL, timeout=60)
+        assert p.returncode == 0, (a, p.stderr)
+        return p.stdout
+
+    @staticmethod
+    def write(root: str, rel: str, data: str | bytes) -> None:
+        p = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(data.encode() if isinstance(data, str) else data)
+
+    def read(self, root: str, rel: str) -> bytes | None:
+        p = os.path.join(root, *rel.split("/"))
+        if not os.path.isfile(p):
+            return None
+        with open(p, "rb") as fh:
+            return fh.read()
+
+    def run(self, *a: str, cwd: str | None = None) -> tuple[int, dict, str]:
+        p = subprocess.run([sys.executable, os.path.abspath(__file__), *a], cwd=cwd or self.main,
+                           env=self.env, capture_output=True, text=True, encoding="utf-8")
+        try:
+            out = json.loads(p.stdout) if p.stdout.strip() else {}
+        except ValueError:
+            out = {"raw": p.stdout}
+        return p.returncode, out, p.stderr
+
+    def apply(self, *pairs: tuple[str, str], base: str | None = None,
+              cwd: str | None = None) -> tuple[int, dict, str]:
+        args = ["apply", "--base", base or self.base]
+        for sid, wt in pairs:
+            args += ["--slice", sid, wt]
+        return self.run(*args, cwd=cwd)
+
+    def cleanup(self, *pairs: tuple[str, str]) -> tuple[int, dict, str]:
+        args = ["cleanup", "--base", self.base]
+        for sid, wt in pairs:
+            args += ["--slice", sid, wt]
+        return self.run(*args)
+
+    def worktrees(self) -> list[str]:
+        return [os.path.realpath(l[len("worktree "):]) for l in
+                self.git(self.main, "worktree", "list", "--porcelain").splitlines()
+                if l.startswith("worktree ")]
+
+    def branches(self) -> list[str]:
+        return self.git(self.main, "branch", "--format=%(refname:short)").split()
+
+    def both(self) -> tuple[tuple[str, str], tuple[str, str]]:
+        return ("slice-1", self.w1), ("slice-2", self.w2)
+
+    def ac(self, *a: str) -> tuple[int, dict]:
+        p = subprocess.run([sys.executable, os.path.join(_SCRIPTS_DIR, "artifact_check.py"), *a],
+                           cwd=self.main, env=self.env, capture_output=True, text=True, encoding="utf-8")
+        try:
+            return p.returncode, json.loads(p.stdout)
+        except ValueError:
+            return p.returncode, {"raw": p.stdout}
+
+    def fingerprint(self, tmp: str) -> str:
+        rc, out = self.ac("tree-snapshot", "--out", os.path.join(tmp, "fp.json"))
+        assert rc == 0 and out["ok"], out
+        return out["fingerprint"]
+
+    def stable(self) -> tuple:
+        """Ce qui ne doit jamais bouger : battle.json, index et HEAD du principal et des worktrees."""
+        return (_sha256_of(self.battle_path),
+                *(self.git(r, "ls-files", "-s") + self.git(r, "rev-parse", "HEAD")
+                  for r in (self.main, self.w1, self.w2)))
+
+
+def _with_fx(name: str, body) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fx = None
+        try:
+            raw = bs._git_worktree_fixture(Path(os.path.realpath(tmp)))
+            fx = _Fx(tmp, raw) if raw is not None else None
+        except (OSError, subprocess.SubprocessError, AssertionError):
+            fx = None
+        if fx is None:
+            print(f"SKIP: {name} (git absent ou inutilisable)", file=sys.stderr)
+            return
+        body(fx, tmp)
+
+
+def _f1_edits(fx: _Fx) -> None:
+    fx.write(fx.w1, "src/a.txt", "a1\n")
+    fx.write(fx.w1, "src/n.txt", "new\n")
+    os.remove(os.path.join(fx.w2, "docs", "b.txt"))
+    fx.write(fx.w2, "docs/c.bin", bytes(range(256)))
+
+
+def _t_import_smoke() -> None:                               # R2
+    for n in ("_git", "_Refuse", "_toplevel", "_is_legion", "_has_symlink_between", "_GIT_FORCED",
+              "_ROOT_ALWAYS_ALLOW", "_COMMIT_RE", "_MAX_LIST"):
+        assert hasattr(ac, n), n
+    for n in ("resolve_state_root", "main_repo_root", "load_active_battle", "glob_match", "_ID_RE",
+              "guard_of"):
+        assert hasattr(bs, n), n
+
+
+def _t_f1_nominal() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        _f1_edits(fx)
+        head, idx = fx.git(fx.main, "rev-parse", "HEAD"), fx.git(fx.main, "ls-files", "-s")
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 0 and out["ok"] is True, (rc, out)
+        assert fx.read(fx.main, "src/a.txt") == b"a1\n" and fx.read(fx.main, "src/n.txt") == b"new\n"
+        assert fx.read(fx.main, "docs/b.txt") is None
+        assert fx.read(fx.main, "docs/c.bin") == bytes(range(256))
+        by = {a["slice"]: {(f["status"], f["path"]) for f in a["files"]} for a in out["applied"]}
+        assert by["slice-1"] == {("M", "src/a.txt"), ("A", "src/n.txt")}, by
+        assert by["slice-2"] == {("D", "docs/b.txt"), ("A", "docs/c.bin")}, by
+        assert all(a["committed"] is False for a in out["applied"])
+        assert fx.git(fx.main, "rev-parse", "HEAD") == head          # HEAD intact
+        assert fx.git(fx.main, "ls-files", "-s") == idx              # index intact
+    _with_fx("F1", body)
+
+
+def _t_f2_order() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        _f1_edits(fx)
+        rc, out, _ = fx.apply(("slice-2", fx.w2), ("slice-1", fx.w1))
+        assert rc == 0, out
+        assert [a["slice"] for a in out["applied"]] == ["slice-1", "slice-2"], out
+    _with_fx("F2", body)
+
+
+def _t_f3_overlap() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.w1, "src/a.txt", "one\n")
+        fx.write(fx.w2, "src/a.txt", "two\n")
+        before = fx.fingerprint(tmp)
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 2 and out["ok"] is False and out["applied"] == [], (rc, out)
+        assert out["conflict"] == {"slice": "slice-2", "kind": "overlap", "files": ["src/a.txt"]}, out
+        assert fx.fingerprint(tmp) == before
+        assert fx.read(fx.main, "src/a.txt") == b"a\n"
+    _with_fx("F3", body)
+
+
+def _t_f4_dirty_main() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.main, "src/a.txt", "dirty\n")
+        fx.write(fx.w1, "src/a.txt", "one\n")
+        fx.write(fx.w2, "docs/c.bin", b"\x00\x01")
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 2 and out["conflict"]["kind"] == "dirty", out
+        assert out["conflict"]["slice"] == "slice-1" and out["conflict"]["files"] == ["src/a.txt"], out
+        assert fx.read(fx.main, "docs/c.bin") is None                # lot atomique
+        assert fx.read(fx.main, "src/a.txt") == b"dirty\n"
+    _with_fx("F4", body)
+
+
+def _t_f5_untracked_present() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.main, "src/n.txt", "mine\n")
+        fx.write(fx.w1, "src/n.txt", "theirs\n")
+        before = fx.fingerprint(tmp)
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 2 and out["conflict"]["kind"] in ("dirty", "apply"), out
+        assert "src/n.txt" in out["conflict"]["files"], out
+        assert fx.fingerprint(tmp) == before and fx.read(fx.main, "src/n.txt") == b"mine\n"
+    _with_fx("F5", body)
+
+
+def _t_f6_out_of_scope_and_deny() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        before = fx.fingerprint(tmp)
+        fx.write(fx.w1, "other/x.txt", "x\n")
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 2 and out["refused"] is True and out["applied"] == [], out
+        assert [(o["slice"], o["path"]) for o in out["out_of_scope"]] == [("slice-1", "other/x.txt")]
+        os.remove(os.path.join(fx.w1, "other", "x.txt"))
+        fx.write(fx.w2, "src/secret/k.txt", "k\n")
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 2 and out["refused"] is True, out
+        assert [(o["slice"], o["path"]) for o in out["out_of_scope"]] == [("slice-2", "src/secret/k.txt")]
+        assert fx.fingerprint(tmp) == before
+    _with_fx("F6", body)
+
+
+def _t_f7_legion_forced() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.set_battle(allow=("src/**", "docs/**", ".legion/**", "**"))   # seul `.legion/` doit bloquer
+        fx.write(fx.w1, ".legion/x", "state\n")
+        fx.git(fx.w1, "add", "-f", ".legion/x")
+        fx.git(fx.w1, "commit", "-q", "-m", "legion")
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 2 and out["refused"] is True, out
+        assert out["out_of_scope"][0]["path"] == ".legion/x", out
+        assert not os.path.exists(os.path.join(fx.main, ".legion", "x"))
+    _with_fx("F7", body)
+
+
+def _t_f8_committed_and_dirty() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.w1, "src/a.txt", "committed\n")
+        fx.git(fx.w1, "commit", "-q", "-am", "builder commit")
+        fx.write(fx.w1, "src/n.txt", "uncommitted\n")
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 0, out
+        assert out["applied"][0]["committed"] is True, out
+        assert fx.read(fx.main, "src/a.txt") == b"committed\n"
+        assert fx.read(fx.main, "src/n.txt") == b"uncommitted\n"
+    _with_fx("F8", body)
+
+
+def _t_f9_head_not_descendant() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.git(fx.w1, "checkout", "-q", "--orphan", "other")
+        fx.git(fx.w1, "commit", "-q", "-m", "unrelated")
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 2 and out["refused"] is True and "descend" in out["reason"], out
+    _with_fx("F9", body)
+
+
+def _t_f10_invalid_worktrees() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        ghost = os.path.join(fx.main, ".claude", "worktrees", "ghost")
+        os.makedirs(ghost)
+        cases = [(("slice-1", ghost),), (("slice-1", fx.wt_out),), (("slice-1", fx.main),),
+                 (("slice-1", fx.w1), ("slice-2", fx.w1)),
+                 (("slice-1", os.path.join(fx.w1, "src")),), (("slice-1", fx.w1 + ";rm"),)]
+        for pairs in cases:
+            rc, out, _ = fx.apply(*pairs)
+            assert rc == 2 and out["refused"] is True and out["applied"] == [], (pairs, out)
+    _with_fx("F10", body)
+
+
+def _t_f11_slice_problems() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        for pairs in ((("slice-9", fx.w1),), (("slice-1", fx.w1), ("slice-1", fx.w2)),
+                      (("bad id!", fx.w1),)):
+            rc, out, _ = fx.apply(*pairs)
+            assert rc == 2 and out["refused"] is True, (pairs, out)
+        fx.set_battle(statuses=("done", "in_progress"))
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 2 and out["refused"] is True and "statut" in out["reason"], out
+    _with_fx("F11", body)
+
+
+def _t_f12_fail_closed() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.w1, "src/n.txt", "n\n")
+        fx.set_battle(allow=())                                   # guard non armé
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 2 and out["refused"] is True and "armé" in out["reason"], out
+        fx.set_battle(guard="oops")                               # bloc invalide
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 2 and out["refused"] is True, out
+        fx.set_battle(guard=None)                                 # guard absent = non armé
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 2 and out["refused"] is True, out
+        fx.set_battle()
+        ptr = os.path.join(fx.main, ".legion", "active-battle")
+        os.remove(ptr)                                            # plus de battle active
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 2 and out["refused"] is True, out
+        assert fx.read(fx.main, "src/n.txt") is None
+    _with_fx("F12", body)
+
+
+def _t_f13_nested_repo() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        nested = os.path.join(fx.w1, "src", "nested")
+        os.makedirs(nested)
+        fx.git(nested, "init", "-q")
+        fx.write(nested, "f.txt", "f\n")
+        fx.git(nested, "add", "-A")
+        fx.git(nested, "commit", "-q", "-m", "n")
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 2 and out["refused"] is True and out["applied"] == [], out
+        assert not os.path.exists(os.path.join(fx.main, "src", "nested"))
+    _with_fx("F13", body)
+
+
+def _t_f14_state_untouched() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.w1, "src/a.txt", "one\n")
+        fx.write(fx.w2, "src/a.txt", "two\n")
+        before = fx.stable()
+        rc, _, _ = fx.apply(*fx.both())                           # échec : overlap
+        assert rc == 2 and fx.stable() == before
+        fx.write(fx.w2, "src/a.txt", "a\n")                       # slice-2 redevient neutre
+        fx.write(fx.w2, "docs/c.txt", "c\n")
+        rc, out, _ = fx.apply(*fx.both())                         # succès
+        assert rc == 0, out
+        assert fx.stable() == before
+    _with_fx("F14", body)
+
+
+def _t_f15_integrity_envelope() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        _f1_edits(fx)
+        snap = os.path.join(tmp, "before.json")
+        rc, out = fx.ac("tree-snapshot", "--out", snap)
+        assert rc == 0, out
+        rc, res, _ = fx.apply(*fx.both())
+        assert rc == 0, res
+        rc, ver = fx.ac("tree-verify", "--before", snap, "--fingerprint", out["fingerprint"], "--guard")
+        assert rc == 0 and ver["ok"] is True, ver
+        assert not ver.get("out_of_scope") and not ver.get("fault"), ver
+    _with_fx("F15", body)
+
+
+def _t_f16_cleanup_nominal() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        _f1_edits(fx)
+        fx.git(fx.main, "worktree", "remove", "--force", fx.wt_out)
+        fx.git(fx.w1, "checkout", "-q", "-b", "harness/x")
+        rc, out, _ = fx.apply(*fx.both())
+        assert rc == 0, out
+        fx.set_battle(statuses=("done", "done"))
+        rc, out, _ = fx.cleanup(*fx.both())
+        assert rc == 0 and out["ok"] is True and out["kept"] == [], (rc, out)
+        assert {r["slice"]: r["branch"] for r in out["removed"]} == {"slice-1": "harness/x", "slice-2": None}, out
+        assert fx.worktrees() == [fx.main], fx.worktrees()
+        assert "harness/x" not in fx.branches()
+        assert fx.read(fx.main, "src/n.txt") == b"new\n"              # le code reste dans le principal
+    _with_fx("F16", body)
+
+
+def _t_f17_cleanup_before_apply() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        _f1_edits(fx)
+        fx.git(fx.w1, "checkout", "-q", "-b", "harness/x")
+        fx.set_battle(statuses=("done", "done"))
+        before = fx.worktrees()
+        rc, out, _ = fx.cleanup(*fx.both())
+        assert rc == 2 and out["ok"] is False and out["removed"] == [], (rc, out)
+        assert [k["slice"] for k in out["kept"]] == ["slice-1", "slice-2"], out
+        assert fx.worktrees() == before and "harness/x" in fx.branches()
+        assert fx.read(fx.w1, "src/n.txt") == b"new\n"                # rien n'est perdu
+        fx.set_battle()                                               # statut in_progress : refus d'entrée
+        rc, out, _ = fx.cleanup(*fx.both())
+        assert rc == 2 and out["refused"] is True and fx.worktrees() == before, out
+    _with_fx("F17", body)
+
+
+def _t_f18_cleanup_branch_kept() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        main_branch = fx.git(fx.main, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        fx.git(fx.w1, "checkout", "-q", "--ignore-other-worktrees", main_branch)   # branche courante du principal
+        fx.git(fx.w2, "checkout", "-q", "-b", "harness/y")
+        fx.git(fx.wt_out, "checkout", "-q", "--ignore-other-worktrees", "harness/y")  # extraite ailleurs
+        fx.set_battle(statuses=("done", "done"))
+        rc, out, _ = fx.cleanup(*fx.both())
+        assert rc == 0 and out["ok"] is True, (rc, out)
+        assert all(r["branch"] is None and r.get("branch_kept") for r in out["removed"]), out
+        assert main_branch in fx.branches() and "harness/y" in fx.branches()
+        assert fx.worktrees() == sorted([fx.main, fx.wt_out], key=fx.worktrees().index), fx.worktrees()
+    _with_fx("F18", body)
+
+
+def _t_f19_usage() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        bad = (["bogus"], [], ["apply"], ["apply", "--base", "zz", "--slice", "s", "w"],
+               ["apply", "--base", fx.base, "--slice", "slice-1"],
+               ["apply", "--base", fx.base], ["apply", "--base", fx.base, "--slice", "a", "b", "--x"],
+               ["cleanup"], ["cleanup", "--base", fx.base])
+        for a in bad:
+            rc, out, err = fx.run(*a)
+            assert rc == 1 and err.strip() and out == {}, (a, rc, err)
+    _with_fx("F19", body)
+
+
+def _t_f20_bounded_output() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        for i in range(60):
+            fx.write(fx.w1, f"other/f{i}.txt", "x\n")
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 2 and out["refused"] is True, out
+        assert len(out["out_of_scope"]) <= _MAX_LIST and out["out_of_scope_count"] == 60, out
+    _with_fx("F20", body)
+
+
+def _t_f21_mode_and_symlink() -> None:
+    if os.name == "nt":
+        print("SKIP: F21 (modes POSIX et liens symboliques)", file=sys.stderr)
+        return
+
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.w1, "src/run.sh", "#!/bin/sh\n")
+        os.chmod(os.path.join(fx.w1, "src", "run.sh"), 0o755)
+        os.symlink("a.txt", os.path.join(fx.w1, "src", "link"))
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 0, out
+        assert os.stat(os.path.join(fx.main, "src", "run.sh")).st_mode & 0o111
+        assert os.path.islink(os.path.join(fx.main, "src", "link"))
+        assert os.readlink(os.path.join(fx.main, "src", "link")) == "a.txt"
+    _with_fx("F21", body)
+
+
+_TESTS = (_t_import_smoke, _t_f1_nominal, _t_f2_order, _t_f3_overlap, _t_f4_dirty_main,
+          _t_f5_untracked_present, _t_f6_out_of_scope_and_deny, _t_f7_legion_forced,
+          _t_f8_committed_and_dirty, _t_f9_head_not_descendant, _t_f10_invalid_worktrees,
+          _t_f11_slice_problems, _t_f12_fail_closed, _t_f13_nested_repo, _t_f14_state_untouched,
+          _t_f15_integrity_envelope, _t_f16_cleanup_nominal, _t_f17_cleanup_before_apply,
+          _t_f18_cleanup_branch_kept, _t_f19_usage, _t_f20_bounded_output, _t_f21_mode_and_symlink)
+
+
+def _self_test() -> int:
+    failed = 0
+    for fn in _TESTS:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 - on rapporte puis on continue
+            failed += 1
+            print(f"FAIL: {fn.__name__}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    if failed:
+        print(f"FAIL: fan_in self-test ({failed}/{len(_TESTS)} en échec)", file=sys.stderr)
+        return 1
+    print("OK: fan_in self-test passed", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")  # accents FR sur une console cp1252
+        except (AttributeError, ValueError):
+            pass
+    sys.exit(main())

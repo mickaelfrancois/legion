@@ -333,7 +333,10 @@ sur une commande non analysable.
   `git checkout` d'une branche extraite ailleurs échoue, ce qui ferme le chemin en doctrine.
   Le sha de l'entrée d'index fait partie de l'empreinte de chaque chemin de `status` : un blob
   indexé changé sous « MM » est vu. Le worktree `--batch-worktrees` suppose que les worktrees du
-  harness restent en place jusqu'au `tree-verify` du tronc.
+  harness restent en place jusqu'au `tree-verify` du tronc, puis le fan-in (`fan_in.py apply`,
+  sous un nouveau `tree-snapshot` / `tree-verify --guard`), puis `fan_in.py cleanup` après la
+  vérification verte du projet. Limite du fan-in : `git apply` valide tout le lot avant d'écrire ;
+  seule une erreur d'E/S pendant l'écriture pourrait laisser un état partiel.
 - La couche 1 ne voit ni un dossier vide créé, ni un fichier git-ignoré, ni un déplacement de branche
   dans un worktree enregistré (`git branch -f` sur une branche de builder). Le filtre bloque `git push`. Exception : un `.gitignore`
   qui s'ignore lui-même (`*`) est empreinté ; seul celui au sommet d'un dossier neuf replié

@@ -487,28 +487,69 @@ repo (`git rev-parse --git-common-dir`). Each builder owns a distinct report fil
 missing-report check is done by `merge-reports` (below). Tell each builder it must not write another slice's report. For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep
 dependent slices sequential. **Sequential builders** are wrapped in the tree integrity
-check with `--guard` (above). **Parallel builders** write in their own worktree, so before the
-batch note `<base>` = `git rev-parse HEAD` (validate `^[0-9a-f]{40}$`) and take a
-`tree-snapshot` of the main tree (after **all** the `slice <id> in_progress` calls of the
-batch, and with no `battle_state.py` write until the verify below); for each builder take
-its worktree path from `git worktree list --porcelain` (never from the builder's returned
-text), check it matches `^[A-Za-z0-9._/:\\ -]+$` (no `$`, backtick or `"`), then run
-`artifact_check.py tree-verify --base <base> --root "<worktree>" --guard` (the script also
-checks the path against `git worktree list`); after the batch run `tree-verify` on the
-main tree **without a filter** and with `--batch-worktrees`: no isolated builder may touch
-it, and a fault is charged to the whole batch. The fingerprint includes the list of registered
-worktrees and every branch except those checked out in a registered worktree, so a worktree
-that appeared or disappeared is a `[git-state]` fault. `--batch-worktrees` is the single,
-fixed exception: it accepts only worktrees that **appeared since the snapshot**, sit under
-`<root>/.claude/worktrees/`, are not `prunable`, and whose admin entry and `.git` file point at
-each other. Leave the harness worktrees in place until this verify (never remove them earlier:
-their branches would then read as new branches); never pass the flag for a gate or a sequential
-builder. Only after these checks record each `slice <id> done|blocked`.
-Collect each
-`{ slice_id, build_ok, warnings, files_touched }`. Before delegating, call
-`slice <id> in_progress`; on the builder's return, call
-`slice <id> done|blocked --warnings N --files …` with that result. A red build of a slice
-→ `slice <id> blocked`, then `transition build blocked`. The builder writes its own
+check with `--guard` (above). **Parallel builders** write in their own worktree, so their
+deltas must be merged back into the main tree (the **fan-in**, `scripts/fan_in.py`, the only
+script that writes code into the main tree). Run a parallel batch in this fixed order:
+
+1. Call `slice <id> in_progress` for **every** slice of the batch. Then note `<base>` =
+   `git rev-parse HEAD` (validate `^[0-9a-f]{40}$`) and take the snapshot S1 of the main tree:
+   `tree-snapshot --out .legion/battles/<id>/_tree-before.json`. No `battle_state.py` write
+   between this snapshot and step 4.
+2. Launch the builders in parallel (`isolation: worktree`).
+3. For each builder take its worktree path from `git worktree list --porcelain` (never from
+   the builder's returned text), check it matches `^[A-Za-z0-9._/:\\ -]+$` (no `$`, backtick
+   or `"`), then run `artifact_check.py tree-verify --base <base> --root "<worktree>" --guard`
+   (the script also checks the path against `git worktree list`).
+4. On the main tree run `tree-verify --before S1 --fingerprint F1 --batch-worktrees`
+   **without a filter**: no isolated builder may touch the main tree, and a fault is charged to
+   the whole batch. The fingerprint includes the list of registered worktrees and every branch
+   except those checked out in a registered worktree, so a worktree that appeared or disappeared
+   is a `[git-state]` fault. `--batch-worktrees` is the single, fixed exception: it accepts only
+   worktrees that **appeared since the snapshot**, sit under `<root>/.claude/worktrees/`, are not
+   `prunable`, and whose admin entry and `.git` file point at each other. Never weaken this
+   verify; it precedes any fan-in write. Leave the harness worktrees in place until the fan-in
+   (never remove them earlier: their branches would then read as new branches); never pass the
+   flag for a gate or a sequential builder.
+5. A fault in step 3 or 4, or any red builder (`build_ok == false`): **no fan-in**. Record
+   `slice <id> blocked` for **every** slice of the batch, then `transition build blocked`; apply
+   escalation case 3 for a fault, otherwise the auto-correction loop (see below). The worktrees
+   are kept.
+6. Take a new snapshot S2 (same `_tree-before.json`, overwritten). **No `battle_state.py` write
+   between S2 and step 8.**
+7. Run `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" apply --base <base> --slice <id> "<worktree>" …`
+   (one `--slice <id> "<worktree>"` pair per slice, paths taken from
+   `git worktree list --porcelain` and validated as in step 3). It computes each worktree's delta
+   against `<base>` (builder commits and untracked files included, ignored files excluded),
+   checks every path against `guard.allow` and `.legion/`, checks the whole batch for conflicts
+   (`overlap`, `dirty`, `apply`), then writes everything with one `git apply` (working tree only;
+   HEAD and index untouched). It is all-or-nothing and writes neither `battle.json` nor anything
+   under `.legion/`. It processes slices in `battle.json.slices` order. Exit 0: JSON
+   `{ ok, applied:[{ slice, worktree, committed, files:[{ status, path }] }] }`. Exit 2: JSON with
+   `refused` + `out_of_scope`, or `conflict:{ slice, kind, files }`, or `fault`; the main tree is
+   unchanged. Exit 1: usage error.
+8. Run `tree-verify --before S2 --fingerprint F2 --guard` on the main tree (no
+   `--batch-worktrees`: the worktrees did not move). A fault is escalation case 3.
+9. On a conflict or a refusal in step 7: `slice <id> blocked` for every slice of the batch, then
+   `transition build blocked`. A conflict is escalation **case 7** (relay the slice, the `kind`
+   and the files); an out-of-scope refusal is **case 3**. The worktrees are kept.
+10. On success: `slice <id> done --warnings N --files <files from the apply JSON>` for each
+    slice. The `--files` list comes from the tool, not from the builder's return. Invariant:
+    a slice is `done` only when its code is in the main tree. A slice whose worktree the harness
+    removed (no change) skips `apply`: record it `done` with no files; `merge-reports` still
+    requires its report.
+11. Verify the project **once** for the whole batch: the stack's build and tests (.NET:
+    `dotnet build` + `dotnet test`; other stack: the repo's commands). If red:
+    `transition build blocked`, escalation **case 7**, worktrees kept.
+12. If green: `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" cleanup --base <base> --slice <id> "<worktree>" …`
+    (same pairs). It removes each worktree and its harness branch only after proving the main
+    tree already holds the delta; otherwise it keeps them (`kept`, exit 2). A refusal is
+    **non-blocking**: relay it as a warning and flag it for the REFLECT.
+13. Continue with the classification below: `merge-reports`, then `transition build done`.
+
+Collect each `{ slice_id, build_ok, warnings, files_touched }` from the builders. For a
+sequential builder, call `slice <id> in_progress` before delegating, and on its return
+`slice <id> done|blocked --warnings N --files …` with that result; a red build →
+`slice <id> blocked`, then `transition build blocked`. Each builder writes its own
 `build-report-<slice_id>.md`.
 
 After build (either mode), **classify the result and record it immediately** with
@@ -529,7 +570,7 @@ After build (either mode), **classify the result and record it immediately** wit
   `in_progress` and announce the next slice (`next-slice`): in `autonomous` mode chain
   straight into it, in `step` mode hand back.
   Consolidation: once every targeted slice is `done` (and only then, before `transition build done`,
-  in every mode), run
+  in every mode; for a parallel batch, after the fan-in `cleanup` of step 12), run
   `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" merge-reports`. It assembles `build-report.md`
   from the `build-report-<id>.md` files in the `battle.json.slices` order (plan order), with one
   final grouped `## Hors périmètre — candidats issue` section; it never writes `battle.json` and is
@@ -810,6 +851,7 @@ Toute correction déterministe se fait sans lui.
 | **4. Filets DELIVER déclenchés** | Base en retard sur `origin` **avec delta d'arbre intersectant** les fichiers touchés (un delta vide ou disjoint est waivé sans escalade — §G.0.a), remote vide, fichier hors whitelist, `.gitignore` auto-induit à arbitrer (§G.0). | Escalade : résoudre le filet d'abord, puis DELIVER peut reprendre. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë (§A.preflight). | Escalade : résoudre l'environnement avant toute battle. |
 | **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (§E, contrôle d'intégrité de l'arbre). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. Relayer `changed` / `out_of_scope` ; l'humain diagnostique l'agent (ou son propre éditeur). |
+| **7. Fusion du lot parallèle** | Le fan-in d'un lot `--auto` échoue : conflit (`overlap`, `dirty`, `apply`) rapporté par `fan_in.py apply`, ou vérification du projet rouge après la fusion (§D). Un refus hors périmètre reste en cas 3. | Escalade : slices du lot `blocked`, worktrees **conservés**. Relayer la slice, le type de conflit et les fichiers ; le lot est à re-découper (slices en réalité dépendantes), pas le périmètre à élargir. |
 
 > **Hors liste = pas d'escalade.** Toute autre situation (warning de build,
 > `accept_with_opportunity`, opportunité de découpe) est résolue automatiquement.
