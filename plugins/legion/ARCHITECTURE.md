@@ -188,7 +188,8 @@ une slice trop complexe se **découpe** au PLAN. Mandat : coder **une** slice du
 
 Deux modes : *inline* (la session principale code, défaut) ; *autonome*
 (`/battle build --auto` délègue chaque slice à un `builder`, parallélisable en
-worktrees).
+worktrees). Depuis un worktree, le builder reçoit le dossier de la battle en chemin
+absolu du dépôt principal et y écrit son `build-report.md`.
 
 ---
 
@@ -292,9 +293,11 @@ PreToolUse(Edit|Write|MultiEdit) :   (+ Bash|PowerShell, voir « Filtre Bash » 
      legion:builder et file_path ∈ .legion/** : seul
      .legion/battles/<active>/build-report.md → exit 0 ; tout autre chemin
      (battle.json, active-battle, artefact de gate) → exit 2. Empêche le builder
-     d'élargir son propre `guard.allow`. Comparaison insensible à la casse, et tout
-     `.legion/` visé hors de la racine du hook (checkout principal vu d'un worktree)
-     est aussi bloqué. L'outil `Bash` est traité à part (filtre Bash ci-dessous).
+     d'élargir son propre `guard.allow`. Comparaison insensible à la casse. `.legion/`
+     est résolu depuis la racine d'état (`git rev-parse --git-common-dir`, dépôt
+     principal même depuis un worktree) : le `build-report.md` du dépôt principal est
+     autorisé depuis un worktree, tout autre `.legion/` (y compris celui du worktree)
+     est bloqué. L'outil `Bash` est traité à part (filtre Bash ci-dessous).
   1. Lire la battle active (.legion/active-battle → battle.json → guard.allow/deny).
   2. Le file_path visé est-il dans `allow` et hors `deny` ?
      - oui  → exit 0 (autorisé)

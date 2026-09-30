@@ -185,7 +185,7 @@ sécurité, et elle est ajoutée d'office dès qu'une slice touche un fichier se
 Un `spike` ne garde que l'`architect` et ouvre une PR brouillon.
 
 **Où est l'état d'une battle ?**
-Dans `.legion/battles/<id>/` à la racine du repo. Lisible, **git-ignoré** (la trace
+Dans `.legion/battles/<id>/` à la racine du dépôt principal (même depuis un worktree). Lisible, **git-ignoré** (la trace
 pérenne vit dans la PR + l'issue), et suffisant pour reprendre la battle dans une
 autre session.
 

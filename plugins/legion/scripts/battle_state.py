@@ -23,7 +23,9 @@ Lecteurs partagés (hooks, GH#85), en lecture seule, sans exception : `active_ba
 -> str | None` (pointeur + liste blanche d'id, ne lit pas `battle.json`),
 `load_active_battle(repo_root) -> (id, dict) | None` (dict brut de `battle.json`),
 `battles_dir(root)` et `guard_of(battle) -> (dict | None, bool)` (GH#104 : bloc `guard` et sa
-validité ; pur, ne lève jamais ; source unique de la forme valide, partagée avec `validate`).
+validité ; pur, ne lève jamais ; source unique de la forme valide, partagée avec `validate`),
+`resolve_state_root(cwd) -> Path` (GH#68 : racine de l'état `.legion/` ; dans un worktree lié, le
+dépôt principal si une battle y est active, sinon le cwd ; ne lève jamais).
 
 Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
@@ -100,6 +102,7 @@ import fnmatch
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -1048,6 +1051,58 @@ def load_active_battle(repo_root: Path) -> tuple[str, dict] | None:
     if not isinstance(data, dict):
         return None
     return battle_id, data
+
+
+_GIT_ENV_DROP = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")
+
+
+def _pick_state_root(cwd: Path, git_dir: str, common_dir: str, main_has_battle: bool) -> Path:
+    """Cœur pur de `resolve_state_root` (GH#68) : choisit la racine d'état.
+
+    `git_dir` / `common_dir` sont les deux lignes de `git rev-parse --git-dir --git-common-dir`
+    (éventuellement relatives au `cwd`). Renvoie `cwd` sauf dans un worktree lié dont le dépôt
+    principal porte une battle active (`main_has_battle`) : alors `common_dir.parent`.
+    `git_dir == common_dir` (dépôt principal, sous-dossier, sous-module) et un `common_dir` qui
+    n'est pas nommé `.git` (worktree d'un dépôt bare) donnent `cwd`.
+    """
+    def _abs(raw: str) -> Path:
+        p = Path(raw)
+        return Path(os.path.realpath(p if p.is_absolute() else cwd / p))
+
+    gd, cd = _abs(git_dir), _abs(common_dir)
+    if gd == cd or cd.name != ".git":
+        return cwd
+    return cd.parent if main_has_battle else cwd
+
+
+def resolve_state_root(cwd: Path) -> Path:
+    """Racine de l'état `.legion/` pour un `cwd` (GH#68). Lecture seule, ne lève jamais.
+
+    Dans un worktree lié (`git rev-parse --git-dir --git-common-dir` : deux dossiers distincts),
+    renvoie le dépôt principal s'il a une battle active, sinon le `cwd`. Chemin rapide sans
+    sous-processus quand `cwd/.git` est un dossier. Toute erreur (git absent, délai, code != 0,
+    sortie incomplète) renvoie `cwd` tel quel. L'environnement git hérité est nettoyé.
+    """
+    try:
+        cwd = Path(cwd)
+        if (cwd / ".git").is_dir():
+            return cwd
+        env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--git-dir", "--git-common-dir"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2, env=env)
+        if proc.returncode != 0:
+            return cwd
+        lines = proc.stdout.splitlines()
+        if len(lines) < 2:
+            return cwd
+        git_dir, common_dir = lines[0].strip(), lines[1].strip()
+        cd = Path(common_dir)
+        cd = Path(os.path.realpath(cd if cd.is_absolute() else cwd / cd))
+        has_battle = active_battle_id(cd.parent) is not None
+        return _pick_state_root(cwd, git_dir, common_dir, has_battle)
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return Path(cwd) if isinstance(cwd, (str, os.PathLike)) else cwd
 
 
 def _write_pointer(root: Path, value: str) -> None:
@@ -2301,6 +2356,23 @@ def _t_doc_tree_integrity() -> None:
     assert "Bash non couvert" not in docs[2].read_text(encoding="utf-8")
 
 
+def _t_doc_worktree_state_root() -> None:
+    root = Path(__file__).resolve().parents[1]
+    docs = {n: root / p for n, p in (
+        ("battle", "commands/battle.md"), ("builder", "agents/builder.md"),
+        ("arch", "ARCHITECTURE.md"), ("skill", "skills/battle-workflow/SKILL.md"))}
+    if not all(d.is_file() for d in docs.values()):
+        print("SKIP: _t_doc_worktree_state_root (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    txt = {n: d.read_text(encoding="utf-8") for n, d in docs.items()}
+    assert "--git-common-dir" in txt["battle"] and "absolute" in txt["battle"], "battle.md"
+    assert "absolu" in txt["builder"], "builder.md"
+    assert "--git-common-dir" in txt["arch"], "ARCHITECTURE.md"
+    m = re.search(r"^## Guardrails\n(.*?)(?=^## )", txt["skill"], re.M | re.S)
+    assert m and "worktree" in m.group(1), "SKILL.md Guardrails"
+
+
 def _t_doc_abort_stale() -> None:
     root = Path(__file__).resolve().parents[1]
     battle_md, fleet_md = root / "commands/battle.md", root / "commands/fleet.md"
@@ -2647,7 +2719,7 @@ _CORE_TESTS = (
     _t_set_slices_replace_replan, _t_set_slices_replace_build_done, _t_set_slices_replace_invalidates_cascade,
     _t_replan_invalidates_cascade, _t_first_plan_no_invalidation_event,
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
-    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_abort_stale,
+    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_worktree_state_root, _t_doc_abort_stale,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
@@ -3505,9 +3577,149 @@ _INTEGRATION_TESTS = (
 )
 
 
+# --- resolve_state_root (GH#68) -----------------------------------------------------------
+
+def _git_worktree_fixture(base: Path):
+    """`(main, wt, wt_out)` : dépôt principal (battle `B` active), worktree dans l'arbre
+    (`.claude/worktrees/w1`) et worktree hors arbre ; `None` si git est absent ou échoue.
+    Environnement git isolé (pas de config globale/système)."""
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    main, wt, wt_out = base / "main", base / "main" / ".claude" / "worktrees" / "w1", base / "wt-out"
+    ident = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+
+    def git(*args, cwd):
+        subprocess.run(["git", *ident, *args], cwd=str(cwd), env=env, check=True,
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    try:
+        main.mkdir(parents=True)
+        git("-c", "init.defaultBranch=main", "init", cwd=main)
+        (main / ".gitignore").write_text(".legion/\n.claude/\n", encoding="utf-8")
+        git("add", ".gitignore", cwd=main)
+        git("commit", "-m", "init", cwd=main)
+        git("worktree", "add", "--detach", str(wt), cwd=main)
+        git("worktree", "add", "--detach", str(wt_out), cwd=main)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    _write_pointer(main, "B")
+    return main, wt, wt_out
+
+
+def _rp(p) -> Path:
+    return Path(os.path.realpath(p))
+
+
+def _with_fixture(name: str, body) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fx = _git_worktree_fixture(Path(tmp))
+        if fx is None:
+            print(f"SKIP: {name} (git absent ou inutilisable)", file=sys.stderr)
+            return
+        body(*fx)
+
+
+def _t_resolve_root_fast_path() -> None:          # R1
+    def body(main, wt, wt_out):
+        assert resolve_state_root(main) == main
+    _with_fixture("_t_resolve_root_fast_path", body)
+
+
+def _t_resolve_root_subdir() -> None:             # R2
+    def body(main, wt, wt_out):
+        (main / "sub").mkdir()
+        assert resolve_state_root(main / "sub") == main / "sub"
+    _with_fixture("_t_resolve_root_subdir", body)
+
+
+def _t_resolve_root_worktree() -> None:           # R3, R4
+    def body(main, wt, wt_out):
+        for w in (wt, wt_out):
+            got = resolve_state_root(w)
+            assert _rp(got) == _rp(main), (w, got)
+        res = load_active_battle(resolve_state_root(wt))
+        assert active_battle_id(resolve_state_root(wt)) == "B"
+        assert res is None or res[0] == "B"
+    _with_fixture("_t_resolve_root_worktree", body)
+
+
+def _t_resolve_root_no_main_battle() -> None:     # R5
+    def body(main, wt, wt_out):
+        (main / ".legion" / "active-battle").write_text("", encoding="utf-8")
+        assert resolve_state_root(wt) == wt
+        (main / ".legion" / "active-battle").unlink()
+        assert resolve_state_root(wt) == wt
+    _with_fixture("_t_resolve_root_no_main_battle", body)
+
+
+def _t_resolve_root_not_git() -> None:            # R6
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        assert resolve_state_root(d) == d
+        ghost = d / "absent"
+        assert resolve_state_root(ghost) == ghost
+
+
+def _t_resolve_root_git_failures() -> None:       # R7
+    import subprocess as _sp
+    real = _sp.run
+
+    def boom(exc):
+        def fake(*a, **k):
+            raise exc
+        return fake
+
+    def bad_code(*a, **k):
+        return _sp.CompletedProcess(a, 128, "", "fatal")
+
+    def short(*a, **k):
+        return _sp.CompletedProcess(a, 0, "only-one\n", "")
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        try:
+            for fake in (boom(FileNotFoundError("git")),
+                         boom(_sp.TimeoutExpired("git", 2)), bad_code, short):
+                _sp.run = fake
+                assert resolve_state_root(d) == d
+        finally:
+            _sp.run = real
+
+
+def _t_pick_state_root_pure() -> None:            # R8
+    nominal = _pick_state_root(Path("/r/wt"), "/r/main/.git/worktrees/wt", "/r/main/.git", True)
+    assert nominal == Path(os.path.realpath("/r/main"))
+    rel = _pick_state_root(Path("/r/main/.claude/worktrees/w1"),
+                           "/r/main/.git/worktrees/w1", "../../../.git", True)
+    assert rel == Path(os.path.realpath("/r/main")), rel
+    wt = Path("/r/wt")
+    assert _pick_state_root(wt, "/r/main/.git", "/r/main/.git", True) == wt      # sous-module / principal
+    assert _pick_state_root(wt, "/r/x.git/worktrees/w", "/r/x.git", True) == wt  # bare
+    assert _pick_state_root(wt, "/r/main/.git/worktrees/wt", "/r/main/.git", False) == wt
+
+
+def _t_resolve_root_ignores_git_dir_env() -> None:  # R9
+    def body(main, wt, wt_out):
+        old = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = str(main / "nope")
+        try:
+            assert _rp(resolve_state_root(wt)) == _rp(main)
+        finally:
+            if old is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = old
+    _with_fixture("_t_resolve_root_ignores_git_dir_env", body)
+
+
+_RESOLVE_ROOT_TESTS = (
+    _t_resolve_root_fast_path, _t_resolve_root_subdir, _t_resolve_root_worktree,
+    _t_resolve_root_no_main_battle, _t_resolve_root_not_git, _t_resolve_root_git_failures,
+    _t_pick_state_root_pure, _t_resolve_root_ignores_git_dir_env,
+)
+
+
 def _self_test() -> int:
     failed = 0
-    tests = _CORE_TESTS + _INTEGRATION_TESTS
+    tests = _CORE_TESTS + _INTEGRATION_TESTS + _RESOLVE_ROOT_TESTS
     for fn in tests:
         try:
             fn()

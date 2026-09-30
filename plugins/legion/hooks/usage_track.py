@@ -15,7 +15,7 @@ JSONL (chaque tour assistant porte un bloc `message.usage`, chaque skill un
 
 Sortie = append-only `.legion/battles/<active>/usage.jsonl` (pas de
 read-modify-write partage => sur en concurrence). `active` lu via
-`battle_state.active_battle_id` (pointeur de la battle active sous `<cwd>/.legion/`). Sans battle active => no-op immediat (le hook tourne
+`battle_state.active_battle_id` (pointeur sous `.legion/` de la racine d'etat : depot principal depuis un worktree lie, sinon le cwd, GH#68). Sans battle active => no-op immediat (le hook tourne
 dans toutes les sessions, il doit etre quasi gratuit hors battle).
 
 Tests : py usage_track.py --self-test
@@ -38,7 +38,7 @@ _IMPORT_ERROR: str | None = None
 try:
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))
-    from battle_state import active_battle_id, battles_dir
+    from battle_state import active_battle_id, battles_dir, resolve_state_root
 except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
@@ -117,7 +117,7 @@ def _active_battle_dir(cwd: str) -> Path | None:
     dossier absent). Un pointeur vide ne doit jamais viser `.legion/battles/` lui-meme."""
     if _IMPORT_ERROR is not None:
         return None
-    root = Path(cwd)
+    root = resolve_state_root(Path(cwd))
     battle_id = active_battle_id(root)
     if battle_id is None:
         return None
@@ -204,6 +204,32 @@ def main() -> int:
     return 0
 
 
+def _t_worktree() -> None:  # U1, U2
+    import battle_state
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        fx = battle_state._git_worktree_fixture(Path(tmp))
+        if fx is None:
+            print("SKIP: usage_track worktree (git absent ou inutilisable)", file=sys.stderr)
+            return
+        main, wt, _ = fx
+        bdir = main / ".legion" / "battles" / "B"
+        bdir.mkdir(parents=True)
+        got = _active_battle_dir(str(wt))
+        assert got is not None and os.path.realpath(got) == os.path.realpath(bdir), got  # U1
+        tp = Path(tmp) / "t.jsonl"
+        tp.write_text(json.dumps({"type": "assistant", "message": {"usage": {
+            "input_tokens": 7, "output_tokens": 3}, "content": []}}) + "\n", encoding="utf-8")
+        payload = {"hook_event_name": "SubagentStop", "agent_type": "builder",
+                   "agent_transcript_path": str(tp), "cwd": str(wt)}
+        proc = subprocess.run([sys.executable, str(Path(__file__).resolve())], input=json.dumps(payload),
+                              cwd=str(wt), capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, proc
+        lines = (bdir / "usage.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1 and json.loads(lines[0])["tokens"]["input"] == 7, lines  # U2
+        assert not (wt / ".legion").exists()
+
+
 def _self_test() -> int:
     global _IMPORT_ERROR
     if _IMPORT_ERROR is not None:
@@ -245,6 +271,7 @@ def _self_test() -> int:
             assert _active_battle_dir(str(repo)) is None
         finally:
             _IMPORT_ERROR = saved
+    _t_worktree()
     print("OK: usage_track self-test passed", file=sys.stderr)
     return 0
 
