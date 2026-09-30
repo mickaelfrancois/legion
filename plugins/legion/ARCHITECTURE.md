@@ -189,7 +189,10 @@ une slice trop complexe se **découpe** au PLAN. Mandat : coder **une** slice du
 Deux modes : *inline* (la session principale code, défaut) ; *autonome*
 (`/battle build --auto` délègue chaque slice à un `builder`, parallélisable en
 worktrees). Depuis un worktree, le builder reçoit le dossier de la battle en chemin
-absolu du dépôt principal et y écrit son rapport de slice.
+absolu du dépôt principal et y écrit son rapport de slice. Le delta d'un worktree ne
+revient pas seul dans l'arbre principal : l'orchestrateur le réintègre (fan-in,
+`scripts/fan_in.py apply`, tout-ou-rien, sous `tree-verify --guard`), puis supprime les
+worktrees par `fan_in.py cleanup` une fois la vérification du projet verte.
 
 ---
 
@@ -407,6 +410,7 @@ plugins/legion/
 │   ├── artifact_check.py        # delivery check d'artefact de gate §E (snapshot/verify métadonnées-seules) + empreinte de l'arbre (tree-snapshot/tree-verify, --self-test)
 │   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
+│   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
 └── skills/
@@ -417,7 +421,7 @@ plugins/legion/
 > La couche tickets/PR passe par le CLI **`gh`** appelé directement depuis `battle.md`
 > (auth & JSON gérés par `gh`, zéro script réseau). Le dossier `scripts/` ne contient
 > que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness,
-> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates), chacun couvert par
+> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates, fan-in des worktrees d'un lot parallèle), chacun couvert par
 > `--self-test` ; aucun n'appelle le réseau (la couche `gh` — dont la création des issues
 > d'opportunité — reste dans les command-files). **Exception « lanceur local »** :
 > `legatus.py` lance un process (`dotnet run`, détaché) et ouvre un navigateur ; il ne
@@ -539,6 +543,7 @@ Toute correction déterministe se fait sans lui.
 | **4. Filets DELIVER** | Base locale en retard sur `origin`, remote vide, fichier hors whitelist de commit, `.gitignore` auto-induit. | Escalade : résoudre le filet, puis DELIVER reprend. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
 | **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (contrôle d'intégrité de l'arbre, `battle.md` §E). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. Relayer `changed` / `out_of_scope`. |
+| **7. Fusion du lot parallèle** | Le fan-in d'un lot `--auto` échoue : conflit (`overlap`, `dirty`, `apply`) rapporté par `fan_in.py apply`, ou vérification du projet rouge après la fusion (`battle.md` §D). Un refus hors périmètre reste en cas 3. | Escalade : slices du lot `blocked`, worktrees conservés ; relayer la slice, le type de conflit et les fichiers. Le lot est à re-découper. |
 
 Hors liste = pas d'escalade.
 
