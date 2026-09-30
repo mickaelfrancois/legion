@@ -25,7 +25,8 @@ Sous-commande `apply` (fail-closed, tout-ou-rien) :
 
 Sous-commande `cleanup` (après la vérification verte du projet) : mêmes validations d'entrée,
 mais statut attendu `done`. Pour chaque slice, le delta est recalculé et **prouvé** présent dans
-le principal (chaque fichier a le hash de l'arbre `T`, un fichier supprimé est absent) ; sinon le
+le principal (chaque fichier a le hash et le mode de l'arbre `T` — lien, exécutable ou normal ;
+le bit exécutable est ignoré sous `core.fileMode=false` —, un fichier supprimé est absent) ; sinon le
 worktree est conservé (`kept`). Si la preuve tient : `git worktree remove --force` (jamais deux
 `--force` : un worktree verrouillé est conservé), puis `git branch -D` seulement pour la branche
 extraite par ce worktree, si aucun autre worktree ne l'a extraite et si ce n'est pas la branche
@@ -365,9 +366,33 @@ def apply_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
 
 # --- commande cleanup ----------------------------------------------------------------------
 
+def _main_mode(main: str, rel: str) -> str | None:
+    """Mode git du fichier `rel` du principal (`120000`, `100755`, `100644`), `None` sinon."""
+    p = os.path.join(main, *rel.split("/"))
+    if os.path.islink(p):
+        return "120000"
+    if not os.path.isfile(p):
+        return None
+    return "100755" if os.stat(p).st_mode & 0o111 else "100644"
+
+
+def _file_mode_tracked(main: str) -> bool:
+    """`core.fileMode` du principal (vrai par défaut) : à faux, git ignore le bit exécutable."""
+    rc, out, _ = _run(main, "config", "--bool", "core.fileMode")
+    return rc != 0 or out.decode().strip() != "false"
+
+
+def _same_mode(want: str, here: str | None, exec_bit: bool) -> bool:
+    if exec_bit or "120000" in (want, here):
+        return want == here                           # lien / fichier : toujours distingués
+    return here in ("100644", "100755")
+
+
 def _prove_in_main(main: str, d: dict) -> list[str]:
-    """Chemins du delta `d` que le principal ne contient pas (liste vide = preuve faite)."""
+    """Chemins du delta `d` que le principal ne contient pas, contenu **et** mode (liste vide =
+    preuve faite). Sous `core.fileMode=false`, seul le bit exécutable est ignoré."""
     missing: list[str] = []
+    exec_bit = _file_mode_tracked(main)
     for e in d["entries"]:
         path, here = e["path"], _main_hash(main, e["path"])
         if _GITLINK in (e["oldmode"], e["newmode"]):
@@ -377,7 +402,8 @@ def _prove_in_main(main: str, d: dict) -> list[str]:
                 missing.append(path)
         else:
             rc, out, _ = _run(main, "rev-parse", "--verify", "-q", f"{d['tree']}:{path}")
-            if rc != 0 or here != out.decode().strip():
+            if (rc != 0 or here != out.decode().strip()
+                    or not _same_mode(e["newmode"], _main_mode(main, path), exec_bit)):
                 missing.append(path)
     return missing
 
@@ -928,12 +954,49 @@ def _t_f21_mode_and_symlink() -> None:
     _with_fx("F21", body)
 
 
+def _t_f22_cleanup_mode_lost() -> None:
+    """F22/F23 : `cleanup` garde le worktree si le mode du delta manque au principal."""
+    if os.name == "nt":
+        print("SKIP: F22 (modes POSIX et liens symboliques)", file=sys.stderr)
+        return
+
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.git(fx.main, "worktree", "remove", "--force", fx.wt_out)
+        fx.write(fx.w1, "src/run.sh", "#!/bin/sh\n")
+        os.chmod(os.path.join(fx.w1, "src", "run.sh"), 0o755)
+        os.symlink("a.txt", os.path.join(fx.w1, "src", "link"))
+        rc, out, _ = fx.apply(("slice-1", fx.w1))
+        assert rc == 0, out
+        fx.set_battle(statuses=("done", "done"))
+        run_sh, link = os.path.join(fx.main, "src", "run.sh"), os.path.join(fx.main, "src", "link")
+        os.chmod(run_sh, 0o644)                                                   # F22
+        os.remove(link)
+        with open(link, "w", encoding="utf-8", newline="") as fh:                # F23 : même contenu
+            fh.write("a.txt")
+        rc, out, _ = fx.cleanup(("slice-1", fx.w1))
+        assert rc == 2 and out["removed"] == [], out
+        reason = out["kept"][0]["reason"]
+        assert "src/run.sh" in reason and "src/link" in reason, reason
+        assert fx.w1 in fx.worktrees()
+        # core.fileMode=false : le bit exécutable est ignoré, le lien devenu fichier reste refusé.
+        fx.git(fx.main, "config", "core.fileMode", "false")
+        rc, out, _ = fx.cleanup(("slice-1", fx.w1))
+        reason = out["kept"][0]["reason"]
+        assert rc == 2 and "src/link" in reason and "src/run.sh" not in reason, out
+        os.remove(link)
+        os.symlink("a.txt", link)
+        rc, out, _ = fx.cleanup(("slice-1", fx.w1))
+        assert rc == 0 and out["kept"] == [] and fx.w1 not in fx.worktrees(), out
+    _with_fx("F22", body)
+
+
 _TESTS = (_t_import_smoke, _t_f1_nominal, _t_f2_order, _t_f3_overlap, _t_f4_dirty_main,
           _t_f5_untracked_present, _t_f6_out_of_scope_and_deny, _t_f7_legion_forced,
           _t_f8_committed_and_dirty, _t_f9_head_not_descendant, _t_f10_invalid_worktrees,
           _t_f11_slice_problems, _t_f12_fail_closed, _t_f13_nested_repo, _t_f14_state_untouched,
           _t_f15_integrity_envelope, _t_f16_cleanup_nominal, _t_f17_cleanup_before_apply,
-          _t_f18_cleanup_branch_kept, _t_f19_usage, _t_f20_bounded_output, _t_f21_mode_and_symlink)
+          _t_f18_cleanup_branch_kept, _t_f19_usage, _t_f20_bounded_output, _t_f21_mode_and_symlink,
+          _t_f22_cleanup_mode_lost)
 
 
 def _self_test() -> int:
