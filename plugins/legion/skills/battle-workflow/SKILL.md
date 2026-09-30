@@ -347,7 +347,7 @@ armed. The same hook filters a **gate's** Bash / PowerShell writes (redirections
 `sed -i`, `git add`/`commit`…); it is a best-effort first filter. The guarantee is the
 **tree integrity check** (`artifact_check.py tree-snapshot` / `tree-verify`, `battle.md` §E),
 which also catches what the filter cannot see (`python -c`, `bash -c`) and checks the
-builder against `guard.allow` (`--guard`). The hooks use **two roots**: the battle state
+builder against `guard.allow` (`--guard`). The hooks and the state CLIs use **two roots**: the battle state
 (`.legion/`) is read from the **main repo**, even from a worktree, while the `guard.allow` /
 `deny` globs stay relative to the **worktree** the agent works in.
 
