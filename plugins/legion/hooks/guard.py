@@ -170,6 +170,18 @@ def _relative(repo_root: Path, file_path: str) -> str | None:
     return rel
 
 
+def _rel_state(repo_root: Path, state_root: Path, file_path: str) -> str | None:
+    """Chemin relatif a la racine d'etat d'un `file_path` ancre sur la racine d'edition (GH#130).
+
+    Un chemin relatif designe un fichier sous le cwd du hook (le worktree) : l'ancrer sur
+    `state_root` ferait passer `<wt>/.legion/...` pour `<principal>/.legion/...`.
+    """
+    target = Path(file_path)
+    if not target.is_absolute():
+        target = repo_root / target
+    return _relative(state_root, str(target))
+
+
 def _always_allowed(rel_edit: str | None, rel_state: str | None) -> bool:
     """Toujours autorises (`ALWAYS_ALLOW`) : `.legion/**` relatif a la racine d'**etat**, `.gitignore`
     relatif a la racine d'**edition** (GH#68, C5-A). Racines confondues : `_matches(rel, ALWAYS_ALLOW)`."""
@@ -290,7 +302,7 @@ def _invalid_guard_decision(
     if not file_path or _is_claude_memory(file_path):
         return 0, ""
     rel = _relative(repo_root, file_path)
-    rel_state = _relative(state_root or repo_root, file_path)
+    rel_state = _rel_state(repo_root, state_root or repo_root, file_path)
     if _always_allowed(rel, rel_state):
         return 0, ""  # `.legion/**` (racine d'etat) + `.gitignore` : la reparation reste possible
     target = f"`{rel}`" if rel is not None else "un chemin hors du repo"
@@ -1071,7 +1083,7 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
     agent_type = data.get("agent_type")
     if agent_type in GATE_ARTIFACT:
         battle_id = active_battle_id(state)
-        rel = _relative(state, file_path) if file_path else None
+        rel = _rel_state(repo_root, state, file_path) if file_path else None
         if _gate_decision(agent_type, rel, battle_id):
             # Confinement OK (bon artefact). Refuser EN PLUS un artefact vide : un `Write`
             # a contenu blanc produit un 0 octet qui passe le confinement mais echouerait
@@ -1097,7 +1109,7 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
     # Producteur sous `.legion/` : seul son rapport (pas d'auto-elargissement du guard).
     if agent_type in PRODUCER_ARTIFACT and file_path:
         battle_id = active_battle_id(state)
-        rel = _relative(state, file_path)
+        rel = _rel_state(repo_root, state, file_path)
         decision = _producer_state_decision(
             agent_type, rel, battle_id, _resolved_parts(repo_root, file_path.replace("\\", "/"))
         )
@@ -1134,7 +1146,7 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
     rel = _relative(repo_root, file_path)
     # `.legion/**` (racine d'etat) et `.gitignore` (racine d'edition) : AVANT le blocage « hors du
     # repo », pour que la session principale ecrive `<principal>/.legion/**` depuis un worktree.
-    if _always_allowed(rel, _relative(state, file_path)):
+    if _always_allowed(rel, _rel_state(repo_root, state, file_path)):
         return 0, ""
     if rel is None:
         return 2, (
@@ -1921,6 +1933,23 @@ def _t_guard_wt_always_allowed(bs) -> None:
     _with_wt(bs, "_t_guard_wt_always_allowed", body)
 
 
+def _t_guard_wt_relative(bs) -> None:
+    """GH#130 : un `file_path` relatif s'ancre sur la racine d'edition (le worktree), pas l'etat."""
+    def body(main, wt, wt_out):
+        report, review = ".legion/battles/B/build-report.md", ".legion/battles/B/gate-review.md"
+        assert _decide(_ev("Write", "legion:builder", report, content="# B"), wt, main)[0] == 2
+        assert _decide(_ev("Write", "legion:reviewer", review, content="# R"), wt, main)[0] == 2
+        assert _decide(_ev("Write", "legion:builder", str(main / report), content="# B"), wt, main)[0] == 0
+        assert _decide(_ev("Write", "legion:reviewer", str(main / review), content="# R"), wt, main)[0] == 0
+        assert _decide(_ev("Edit", "claude", ".legion/battles/B/battle.json"), wt, main)[0] == 2
+        # Racines confondues (pas de worktree) : relatif et absolu decident pareil.
+        for agent, rel, content in (("legion:builder", report, "# B"), ("legion:reviewer", review, "# R")):
+            relative = _decide(_ev("Write", agent, rel, content=content), main)[0]
+            absolute = _decide(_ev("Write", agent, str(main / rel), content=content), main)[0]
+            assert relative == absolute == 0, (agent, relative, absolute)
+    _with_wt(bs, "_t_guard_wt_relative", body)
+
+
 def _t_guard_wt_invalid(bs) -> None:
     """G9 : bloc `guard` invalide / `battle.json` illisible dans le principal -> fail-closed en worktree."""
     def body(main, wt, wt_out):
@@ -2109,6 +2138,7 @@ def _self_test() -> int:
     _t_guard_wt_builder(battle_state)
     _t_guard_wt_gate(battle_state)
     _t_guard_wt_always_allowed(battle_state)
+    _t_guard_wt_relative(battle_state)
     _t_guard_wt_invalid(battle_state)
     _t_guard_wt_shell(battle_state)
     _t_guard_wt_compat(battle_state)
