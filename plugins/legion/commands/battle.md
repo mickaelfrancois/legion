@@ -528,10 +528,13 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
    `refused` + `out_of_scope`, or `conflict:{ slice, kind, files }`, or `fault`; the main tree is
    unchanged. Exit 1: usage error.
 8. Run `tree-verify --before S2 --fingerprint F2 --guard` on the main tree (no
-   `--batch-worktrees`: the worktrees did not move). A fault is escalation case 3.
-9. On a conflict or a refusal in step 7: `slice <id> blocked` for every slice of the batch, then
-   `transition build blocked`. A conflict is escalation **case 7** (relay the slice, the `kind`
-   and the files); an out-of-scope refusal is **case 3**. The worktrees are kept.
+   `--batch-worktrees`: the worktrees did not move). A fault: `slice <id> blocked` for every
+   slice of the batch, then `transition build blocked`, escalation **case 3**. The worktrees are
+   kept (no `cleanup`), and the changes `apply` wrote stay in the working tree for diagnosis.
+9. On any exit 2 of `apply` in step 7 (a conflict, a refusal or a fault): `slice <id> blocked`
+   for every slice of the batch, then `transition build blocked`. A conflict is escalation
+   **case 7** (relay the slice, the `kind` and the files); an out-of-scope refusal or a fault is
+   **case 3**. The main tree is unchanged and the worktrees are kept.
 10. On success: `slice <id> done --warnings N --files <files from the apply JSON>` for each
     slice. The `--files` list comes from the tool, not from the builder's return. Invariant:
     a slice is `done` only when its code is in the main tree. A slice whose worktree the harness
