@@ -97,7 +97,9 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
 ## Two natures of actor
 
 - **Producer** — `builder` only. It *writes* code from `plan.md` and reports in
-  `build-report.md`. Not read-only, emits no verdict: its output is what the
+  `build-report-<slice_id>.md` (one file per slice, so parallel builders never share a
+  file); the orchestrator consolidates them into `build-report.md` with
+  `battle_state.py merge-reports`. Not read-only, emits no verdict: its output is what the
   gates review.
 - **Gates** — `architect`, `lint`, `reviewer`, `test-engineer`, `security`
   (+ `pr-triage`). They *judge* a deliverable. **Read-only on the code**, but each **writes its own
@@ -136,7 +138,7 @@ never invokes another agent; the builder never invokes a gate.
 |---|---|---|---|
 | THINK | `/battle start` | `spec.md` | `gh issue view <n>` (numeric id), else inline |
 | PLAN | `architect` gate | `plan.md` (+ test matrix) | `dotnet-claude-kit:clean-architecture`, `:modern-csharp` |
-| BUILD | `builder` producer | code + `build-report.md` | `dotnet-claude-kit:scaffold`, `:build-fix`, `:modern-csharp`, `:testing` |
+| BUILD | `builder` producer | code + `build-report-<slice_id>.md` per slice, consolidated into `build-report.md` | `dotnet-claude-kit:scaffold`, `:build-fix`, `:modern-csharp`, `:testing` |
 | LINT | `lint` gate | `gate-lint.md` | `dotnet format --verify-no-changes` (.NET-only, verify; self-retires on non-.NET) |
 | REVIEW | `reviewer` gate | `gate-review.md` | `dotnet-claude-kit:code-review` (multi-dim: correctness, **plan conformance**, **performance**, conventions, dead code) + Roslyn MCP |
 | TEST | `test-engineer` gate | `gate-test.md` | `dotnet-claude-kit:testing`, `:tdd`, `:verify` |
@@ -214,14 +216,14 @@ Per repo — `.legion/battles/<battle-id>/`:
 
 ```
 battle.json   # metadata, profile, required_gates, per-phase status, guard, delivery.pr_url, pr_state, ci
-spec.md  plan.md  build-report.md  gate-lint.md  gate-review.md  gate-test.md
+spec.md  plan.md  build-report-<slice_id>.md (intermediate)  build-report.md (consolidated)  gate-lint.md  gate-review.md  gate-test.md
 gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
 pr-status.json  ci-failed-<run-id>.log   # ADDRESS/status : sortie `gh` (PR/CI) et log CI en échec
 ```
 
 `battle.json` schema (**no need to open `ARCHITECTURE.md` at run time**). It is written
 **only by `scripts/battle_state.py`** (subcommands `init`, `transition`, `approve-plan`,
-`set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`, `invalidate`, `set-delivery`,
+`set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
 `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`), which checks every phase transition, writes atomically and resyncs the fleet
 shard — never edit it by hand. On a re-plan, `set-slices --replace` swaps the slice list
 (before `approve-plan`; with no id it empties it — aggregated BUILD); `check-cascade` (read-only) gates the ADDRESS push. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
@@ -337,7 +339,7 @@ opportunities** → deduplicated GitHub issues on the target repo (from the
 `guard.py` **blocks** edits outside `guard.allow` (`exit 2`), `careful.py`
 **warns** (never blocks) on destructive shell commands. Bypass:
 `LEGION_GUARD_OFF=1`. The `builder` is subject to the same guard, and under `.legion/`
-it may write **only** its `build-report.md` (never `battle.json` — so it cannot widen
+it may write **only** its per-slice report `build-report-<slice_id>.md` (or `build-report.md` for an aggregated BUILD; never another slice's report by doctrine, and never `battle.json` — so it cannot widen
 its own perimeter). **Gate
 confinement**: `guard.py` also reads `agent_type` and restricts each gate
 (`architect`/`lint`/`reviewer`/`test-engineer`/`security`/`pr-triage`) to writing
@@ -354,7 +356,7 @@ builder against `guard.allow` (`--guard`). The hooks and the state CLIs use **tw
 ## Conventions
 
 - **Every markdown *battle artifact* is written in French** (`spec.md`, `plan.md`,
-  `build-report.md`, `gate-*.md`, `pr-body.md`, `wi-comment.md`, `retro.md`).
+  `build-report.md` and the per-slice `build-report-<slice_id>.md`, `gate-*.md`, `pr-body.md`, `wi-comment.md`, `retro.md`).
   English stays for identifiers, file names, commit messages **and PR titles**.
 - **Command-files are English, not French.** The plugin's own `commands/*.md` (prompt
   instructions to the orchestrator — e.g. `battle.md`, `retro.md`) are written in
@@ -376,7 +378,7 @@ builder against `guard.allow` (`--guard`). The hooks and the state CLIs use **tw
 ## Charte de style des documents
 
 **Single source** for the style of every document a battle produces for a human:
-`spec.md`, `plan.md`, `build-report.md`, `gate-*.md`, `pr-feedback.md`, `retro.md`,
+`spec.md`, `plan.md`, `build-report.md` (and the per-slice `build-report-<slice_id>.md`), `gate-*.md`, `pr-feedback.md`, `retro.md`,
 `pr-body.md`, `wi-comment.md`. Each producer **references** this charter — it never
 copies the rules. The charter does **not** cover machine state (`battle.json`,
 `usage.jsonl`, `fleet.d/*.json`, `active-battle`), commit subjects / PR titles

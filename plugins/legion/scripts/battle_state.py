@@ -17,6 +17,8 @@ Source unique des listes de phases / gates / artefacts (importée par `fleet_syn
 - `PROFILES`, `DEFAULT_PROFILE` (gates requises par profil ; `init` en dérive `required_gates`) ;
 - `CAP_PER_PHASE`, `CAP_TOTAL` ;
 - `PR_STATES`, `CI_STATES` (état de la PR et agrégat CI, GH#74 ; champs `delivery.pr_state` / `delivery.ci`) ;
+- `SLICE_REPORT_PREFIX`, `slice_report_name(id)` et `slice_report_id(nom)` (GH#129 : nom du rapport de
+  build d'une slice, `build-report-<id>.md`, partagé avec `guard.py`) ;
 - `SUBCOMMANDS` (sous-commandes du CLI, dans l'ordre du parser ; la doctrine est testée contre elle).
 
 Lecteurs partagés (hooks, GH#85), en lecture seule, sans exception : `active_battle_id(repo_root)
@@ -70,6 +72,12 @@ Cœur pur :
   slice non `done`). `build done` exige toutes les slices `done` ; un verdict de gate de cascade
   écrit `phases.<p>.covers` (ids des slices `done`), remis à `null` avec le verdict.
 
+Rapports de build (GH#129) : `merge_build_reports(battle_id, ids, reports, aggregated_exists) ->
+(ok, reason, texte, detail)` (pur ; `reports` : id -> texte | None) consolide les
+`build-report-<slice_id>.md` en `build-report.md` (sections dans l'ordre de `slices`, « Hors périmètre »
+regroupé en une section finale). Refus si un rapport manque ; sans slice déclarée, `build-report.md`
+existant (BUILD agrégé) est conservé tel quel.
+
 Usage (options globales `--battle <id>` défaut : pointeur `.legion/active-battle`, et
 `--repo <path>` défaut : dépôt principal depuis un worktree lié — battle active pour les
 lectures/mutations, toujours pour `init`/`activate` (GH#128) — sinon le cwd) :
@@ -87,6 +95,7 @@ lectures/mutations, toujours pour `init`/`activate` (GH#128) — sinon le cwd) :
     python battle_state.py slice <id> <in_progress|done|blocked> [--warnings N] [--files [f…]]
     python battle_state.py next-slice                  # lecture seule (ni écriture ni synchro)
     python battle_state.py check-cascade               # lecture seule ; exit 2 = cascade incomplète
+    python battle_state.py merge-reports               # écrit build-report.md ; exit 2 = rapport manquant
     python battle_state.py activate <id>
     python battle_state.py --self-test   # tests hermétiques, sort 0 offline
 
@@ -183,13 +192,35 @@ CAP_TOTAL = 6
 SUBCOMMANDS: tuple[str, ...] = ("init", "transition", "approve-plan", "bump-autocorrect",
                                 "invalidate", "set-delivery", "set-guard", "set-meta",
                                 "set-slices", "slice", "next-slice", "check-cascade",
-                                "activate", "close", "abort", "validate")
+                                "merge-reports", "activate", "close", "abort", "validate")
 
 # Commandes encore permises sur une battle abandonnée (GH#75) : lecture de diagnostic seule.
 ABORT_ALLOWED: tuple[str, ...] = ("validate",)
 
 # Motif des identifiants (battle et slice) : liste blanche, aucun séparateur de chemin.
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+
+# Rapport de build par slice (GH#129) : `build-report-<slice_id>.md`, écrit par le builder de la
+# slice ; `merge-reports` les consolide dans `build-report.md` (PRODUCER_ARTIFACT). Source unique du nom.
+SLICE_REPORT_PREFIX = "build-report-"
+_SLICE_REPORT_RE = re.compile(re.escape(SLICE_REPORT_PREFIX) + r"([A-Za-z0-9][A-Za-z0-9-]*)\.md",
+                              re.IGNORECASE)
+
+
+def slice_report_name(slice_id: str) -> str:
+    """Nom du rapport d'une slice. Lève `ValueError` si `slice_id` ne respecte pas `_ID_RE`."""
+    if not isinstance(slice_id, str) or not _ID_RE.fullmatch(slice_id):
+        raise ValueError(f"identifiant de slice invalide : {slice_id!r} (attendu : [A-Za-z0-9-])")
+    return f"{SLICE_REPORT_PREFIX}{slice_id}.md"
+
+
+def slice_report_id(name) -> "str | None":
+    """Id lu dans un nom de fichier `build-report-<id>.md` (casse ignorée, `fullmatch` : aucun
+    séparateur, aucun suffixe) ; `None` sinon. Pure, ne lève jamais."""
+    if not isinstance(name, str):
+        return None
+    m = _SLICE_REPORT_RE.fullmatch(name)
+    return m.group(1) if m else None
 
 
 # --- Helpers de lecture (tolerants au schema legacy) -------------------------------------
@@ -578,6 +609,99 @@ def next_slice(battle: dict) -> dict | None:
 
 
 # --- Invalidation de la cascade ----------------------------------------------------------
+
+# --- Consolidation des rapports de build (GH#129) ----------------------------------------
+
+_OOS_TITLE = "## Hors périmètre — candidats issue"
+_OOS_HEADER = ("> Agrégé depuis les rapports de slice, dans l'ordre des slices. "
+               "`/legion:retro` dédoublonne et matérialise en issues.")
+_OOS_RE = re.compile(r"##\s+Hors\s+p\S*rim\S*tre\b", re.IGNORECASE)
+
+
+def _split_report(text: str, slice_id: str) -> tuple[str, list[str], bool]:
+    """Découpe le rapport d'une slice : (corps sans titre H1 ni section « Hors périmètre »,
+    lignes des entrées « Hors périmètre » sans leur en-tête, titre `## <id>` injecté ?).
+    Les blocs de code (```) sont ignorés pour repérer les titres."""
+    body: list[str] = []
+    oos: list[str] = []
+    in_fence = False
+    in_oos = False
+    has_title = False
+    title_re = re.compile(r"##\s+" + re.escape(slice_id) + r"\s*", re.IGNORECASE)
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence:
+            if _OOS_RE.match(line):
+                in_oos = True
+                continue
+            if line.startswith("## "):
+                in_oos = False
+            elif re.match(r"#\s", line):   # titre H1 : retiré
+                continue
+        if in_oos:
+            oos.append(line)
+            continue
+        if not in_fence and title_re.fullmatch(line):
+            has_title = True
+        body.append(line)
+    entries: list[str] = []
+    started = False
+    for line in oos:   # l'en-tête (citations, blancs) précède la première entrée `###`
+        if not started and not line.startswith("###"):
+            continue
+        started = True
+        entries.append(line)
+    body_text = "\n".join(body).strip("\n")
+    injected = not has_title
+    if injected:
+        body_text = f"## {slice_id}\n\n{body_text}".rstrip("\n")
+    return body_text, entries, injected
+
+
+def merge_build_reports(battle_id: str, ids, reports: dict,
+                        aggregated_exists: bool) -> tuple[bool, str, "str | None", dict]:
+    """Consolide les rapports par slice en `build-report.md` (GH#129). Pure : `reports` est un
+    dict `id -> texte | None`, aucun accès disque. Retourne `(ok, reason, texte, detail)` ;
+    `texte` est `None` si rien n'est à écrire.
+    - aucune slice déclarée (`ids` vide) : ok sans réécriture si `aggregated_exists`
+      (`detail.aggregated`), sinon refus ;
+    - sinon : refus si un id est invalide ou si un rapport manque ou est blanc
+      (`detail.missing`) ; ordre des sections = ordre de `ids` ; les sections « Hors périmètre »
+      sont regroupées dans une seule section finale ; `detail.warnings` liste les titres injectés."""
+    ids = list(ids) if isinstance(ids, (list, tuple)) else []
+    if not ids:
+        if aggregated_exists:
+            return True, "", None, {"aggregated": True, "merged": [], "warnings": []}
+        return False, ("aucune slice déclarée et build-report.md absent ou blanc : écrire "
+                       "build-report.md (BUILD agrégé) avant merge-reports"), None, {}
+    bad = [i for i in ids if not isinstance(i, str) or not _ID_RE.fullmatch(i)]
+    if bad:
+        return False, f"id de slice invalide dans battle.json : {bad!r}", None, {"invalid": bad}
+    ordered = list(dict.fromkeys(ids))
+    missing = [i for i in ordered
+               if not isinstance(reports.get(i), str) or not reports[i].strip()]
+    if missing:
+        return False, (f"rapport de slice manquant ou blanc : {', '.join(missing)} — écrire "
+                       + ", ".join(slice_report_name(i) for i in missing)
+                       + " (battle ancienne : découper build-report.md en rapports de slice)"), \
+            None, {"missing": missing}
+    sections: list[str] = []
+    entries: list[str] = []
+    warnings: list[str] = []
+    for i in ordered:
+        body, oos, injected = _split_report(reports[i], i)
+        if injected:
+            warnings.append(f"{slice_report_name(i)} : titre `## {i}` absent, injecté")
+        sections.append(body)
+        if any(line.strip() for line in oos):
+            entries.append("\n".join(oos).strip("\n"))
+    parts = [f"# Build report ({battle_id})"] + sections
+    if entries:
+        parts += [_OOS_TITLE + "\n\n" + _OOS_HEADER + "\n\n" + "\n\n".join(entries)]
+    text = "\n\n".join(p.strip("\n") for p in parts) + "\n"
+    return True, "", text, {"merged": ordered, "warnings": warnings}
+
 
 def _invalidate_cascade(out: dict, reason: str, now_iso) -> list[str]:
     """Remet a `pending` chaque phase de cascade PRESENTE `done`/`blocked` (et `in_progress` si
@@ -1297,6 +1421,7 @@ def _build_parser_parts():
     s.add_argument("--files", nargs="*", default=None)
     add("next-slice")
     add("check-cascade")
+    add("merge-reports")
     s = add("activate")
     s.add_argument("id")
     add("close")
@@ -1480,6 +1605,47 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
     raise _Refuse(f"sous-commande inconnue : {cmd}")  # pragma: no cover
 
 
+def _read_report(path: Path) -> "str | None":
+    """Texte du fichier, `None` s'il n'existe pas ; refus s'il est illisible."""
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _Refuse(f"rapport illisible : {path.name} ({type(exc).__name__})")
+
+
+def _merge_reports_cmd(bdir: Path, bid: str, battle: dict) -> tuple[int, dict]:
+    """`merge-reports` : lit les rapports par slice, écrit `build-report.md` de façon atomique
+    (seulement si tous les contrôles passent). Ne modifie jamais `battle.json`, ne synchronise pas le fleet."""
+    ids = [s.get("id") for s in _slices(battle)]
+    reports = {i: _read_report(bdir / slice_report_name(i))
+               for i in ids if isinstance(i, str) and _ID_RE.fullmatch(i)}
+    target = bdir / "build-report.md"
+    current = _read_report(target)
+    ok, reason, text, detail = merge_build_reports(
+        bid, ids, reports, aggregated_exists=bool(current and current.strip()))
+    if not ok:
+        return 2, {"ok": False, "battle": bid, "reason": reason, **detail}
+    warnings = list(detail.get("warnings", []))
+    declared = {i.lower() for i in ids if isinstance(i, str)}
+    if bdir.is_dir():
+        for child in sorted(bdir.iterdir()):
+            extra_id = slice_report_id(child.name)
+            if extra_id is not None and extra_id.lower() not in declared:
+                warnings.append(f"extra : {child.name} (slice `{extra_id}` non déclarée), non fusionné")
+    if text is not None:
+        try:
+            _write_text_atomic(target, text)
+        except OSError as exc:
+            raise _Refuse(f"écriture de build-report.md impossible : {exc}")
+    result = {"ok": True, "battle": bid, "merged": detail.get("merged", []),
+              "path": str(target), "warnings": warnings}
+    if detail.get("aggregated"):
+        result["aggregated"] = True
+    return 0, result
+
+
 def run_command(argv: list[str], upsert=None, fleet_dir=None, cwd=None) -> tuple[int, dict]:
     """Exécute une sous-commande. Retourne (code, résultat JSON). Ne lève jamais.
     `upsert`/`fleet_dir` : injection pour les tests (sinon `fleet_sync` réel) ; `cwd` : répertoire
@@ -1538,6 +1704,8 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None, cwd=None) -> tuple
                                          + ", ".join(f"{m['phase']} ({m['status']})" for m in missing),
                                "missing": missing}
                 return 0, {"ok": True, "battle": bid, "required": derive_required_phases(battle)}
+            if args.cmd == "merge-reports":  # lit battle.json, écrit build-report.md, pas de synchro
+                return _merge_reports_cmd(bdir, bid, battle)
             new, extra = _mutation(args, battle)
             _save(bdir, new)
             mutation_warnings = extra.pop("_warnings", [])
@@ -2321,6 +2489,97 @@ def _t_set_slices_replace_empty_refused() -> None:
     assert not ok and "au moins un id" in reason and same is b
 
 
+# --- merge-reports (GH#129) : cœur pur -------------------------------------------------------
+
+def _rep(sid: str, oos: str = "", h1: bool = True, title: bool = True) -> str:
+    out = [f"# Build report — {sid} (b)", ""] if h1 else []
+    if title:
+        out += [f"## {sid}", ""]
+    out += [f"fait {sid}", ""]
+    if oos:
+        out += ["## Hors périmètre — candidats issue", "", "> en-tête de slice", "",
+                f"### {oos}", f"- Zone : {sid}", ""]
+    return "\n".join(out)
+
+
+def _t_slice_report_names() -> None:              # M1, M2
+    assert slice_report_name("slice-1") == "build-report-slice-1.md"
+    assert slice_report_id("build-report-slice-1.md") == "slice-1"
+    assert slice_report_id("Build-Report-Slice-1.md") == "Slice-1"
+    for bad in ("build-report.md", "build-report-.md", "build-report--x.md", "build-report-a_b.md",
+                "build-report-a.b.md", "build-report-s1.md.bak", "build-report-s1.txt",
+                "x/build-report-s1.md", "build-report-s1.md\n", None):
+        assert slice_report_id(bad) is None, bad
+    for bad in ("../x", "", "a/b", "-x", None):
+        try:
+            slice_report_name(bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+
+
+def _t_merge_nominal() -> None:                   # M3
+    ids = ["slice-2", "slice-10", "slice-1"]
+    ok, reason, text, detail = merge_build_reports(
+        "bx", ids, {i: _rep(i) for i in ids}, False)
+    assert ok and not reason and detail["merged"] == ids and detail["warnings"] == [], detail
+    pos = [text.index(f"## {i}\n") for i in ids]
+    assert pos == sorted(pos), pos
+    assert text.startswith("# Build report (bx)\n") and text.count("# Build report") == 1
+    assert "\n# Build report — " not in text and text.endswith("\n") and not text.endswith("\n\n")
+    assert "Hors périmètre" not in text
+    again = merge_build_reports("bx", ids, {i: _rep(i) for i in ids}, False)[2]
+    assert again == text
+
+
+def _t_merge_missing_blank() -> None:             # M4 (cœur), M5
+    reps = {"slice-1": _rep("slice-1"), "slice-2": None, "slice-3": "  \n\t\n", "slice-4": ""}
+    ok, reason, text, detail = merge_build_reports("b", list(reps), reps, True)
+    assert not ok and text is None and detail["missing"] == ["slice-2", "slice-3", "slice-4"]
+    for i in ("slice-2", "slice-3", "slice-4"):
+        assert i in reason and f"build-report-{i}.md" in reason
+
+
+def _t_merge_out_of_scope() -> None:              # M6, M7
+    reps = {"slice-1": _rep("slice-1", oos="Opp A"), "slice-2": _rep("slice-2"),
+            "slice-3": _rep("slice-3", oos="Opp C")}
+    ok, _, text, _ = merge_build_reports("b", list(reps), reps, False)
+    assert ok and text.count("## Hors périmètre") == 1 and text.count("> ") == 1
+    head = text.index("## Hors périmètre")
+    assert head > text.index("## slice-3\n") and "en-tête de slice" not in text
+    tail = text[head:]
+    assert tail.index("### Opp A") < tail.index("### Opp C") and "### Opp" not in text[:head]
+    assert tail.count("## Hors") == 1 and "## slice" not in tail
+    # section présente mais vide : pas de section finale
+    empty = {"slice-1": _rep("slice-1") + "\n## Hors périmètre — candidats issue\n\n> x\n"}
+    _, _, text2, _ = merge_build_reports("b", ["slice-1"], empty, False)
+    assert "Hors périmètre" not in text2
+    # section au milieu du rapport : le reste de la slice est conservé
+    mid = "## slice-1\n\nA\n\n## Hors périmètre — candidats issue\n\n### T\n- z\n\n## Suite\n\nB\n"
+    _, _, text3, _ = merge_build_reports("b", ["slice-1"], {"slice-1": mid}, False)
+    assert "## Suite" in text3 and text3.index("## Suite") < text3.index("### T")
+
+
+def _t_merge_titles() -> None:                    # M8
+    reps = {"slice-1": _rep("slice-1", title=False), "slice-2": _rep("slice-2", h1=False)}
+    ok, _, text, detail = merge_build_reports("b", list(reps), reps, False)
+    assert ok and "# Build report — " not in text
+    assert "## slice-1\n" in text and len(detail["warnings"]) == 1 and "slice-1" in detail["warnings"][0]
+    fenced = {"slice-1": "## slice-1\n\n```\n# commentaire\n## Hors périmètre — candidats issue\n```\n"}
+    _, _, text2, _ = merge_build_reports("b", ["slice-1"], fenced, False)
+    assert "# commentaire" in text2 and text2.count("## Hors périmètre") == 1  # dans le bloc de code
+
+
+def _t_merge_aggregated_and_invalid() -> None:   # M10, M11 (cœur)
+    ok, _, text, detail = merge_build_reports("b", [], {}, True)
+    assert ok and text is None and detail["aggregated"] is True
+    ok, reason, text, _ = merge_build_reports("b", [], {}, False)
+    assert not ok and text is None and reason
+    for bad in (["../x"], ["slice-1", 3], [None]):
+        ok, reason, text, _ = merge_build_reports("b", bad, {}, False)
+        assert not ok and text is None and "invalide" in reason, bad
+
+
 def _t_subcommands_constant() -> None:
     assert tuple(_build_parser_parts()[1].choices) == SUBCOMMANDS
     assert len(set(SUBCOMMANDS)) == len(SUBCOMMANDS)
@@ -2757,7 +3016,9 @@ _CORE_TESTS = (
     _t_set_slices_replace_replan, _t_set_slices_replace_build_done, _t_set_slices_replace_invalidates_cascade,
     _t_replan_invalidates_cascade, _t_first_plan_no_invalidation_event,
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
-    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_worktree_state_root, _t_doc_abort_stale,
+    _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
+    _t_slice_report_names, _t_merge_nominal, _t_merge_missing_blank, _t_merge_out_of_scope,
+    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_worktree_state_root, _t_doc_abort_stale,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
@@ -3599,6 +3860,91 @@ def _t_set_delivery_aborted() -> None:
 
 
 
+def _mr_setup(r: "_Repo", ids, reports=None) -> Path:
+    """Battle `b1` avec `slices` posées à la main (hors périmètre du test) + rapports par slice."""
+    r.init()
+    b = r.load()
+    b["slices"] = [{"id": i, "status": "done"} for i in ids]
+    r.path().write_text(json.dumps(b), encoding="utf-8")
+    bdir = r.path().parent
+    for i, text in (reports or {}).items():
+        (bdir / f"build-report-{i}.md").write_text(text, encoding="utf-8")
+    return bdir
+
+
+def _t_merge_reports_cli() -> None:               # M3 (CLI), M4, M9, M12, M13
+    with _Repo() as r:
+        ids = ["slice-2", "slice-1"]
+        bdir = _mr_setup(r, ids, {"slice-1": _rep("slice-1")})
+        (bdir / "build-report.md").write_text("ANCIEN", encoding="utf-8")
+        before = r.path().read_bytes()
+        n = len(r.calls)
+        code, res = r.run("merge-reports")
+        assert code == 2 and res["ok"] is False and res["missing"] == ["slice-2"], res
+        assert (bdir / "build-report.md").read_bytes() == b"ANCIEN"
+        (bdir / "build-report-slice-2.md").write_text(_rep("slice-2", oos="Opp"), encoding="utf-8")
+        (bdir / "build-report-old.md").write_text("OLD-CONTENT", encoding="utf-8")
+        res = r.ok("merge-reports")
+        assert res["merged"] == ids and res["path"] == str(bdir / "build-report.md"), res
+        assert len(res["warnings"]) == 1 and "extra" in res["warnings"][0] and "old" in res["warnings"][0]
+        out = (bdir / "build-report.md").read_text(encoding="utf-8")
+        assert out.index("## slice-2") < out.index("## slice-1") and "OLD-CONTENT" not in out
+        assert "### Opp" in out
+        first = (bdir / "build-report.md").read_bytes()
+        r.ok("merge-reports")
+        assert (bdir / "build-report.md").read_bytes() == first           # M12
+        assert r.path().read_bytes() == before and len(r.calls) == n      # M13
+        assert not list(bdir.glob("*.tmp"))
+
+
+def _t_merge_reports_aggregated_cli() -> None:    # M10, M11
+    with _Repo() as r:
+        bdir = _mr_setup(r, [])
+        assert "build-report" in r.refused("merge-reports")
+        (bdir / "build-report.md").write_text("  \n", encoding="utf-8")
+        r.refused("merge-reports")
+        (bdir / "build-report.md").write_text("# Build report\n## x\n", encoding="utf-8")
+        res = r.ok("merge-reports")
+        assert res["aggregated"] is True and res["merged"] == []
+        assert (bdir / "build-report.md").read_text(encoding="utf-8") == "# Build report\n## x\n"
+    with _Repo() as r:   # id invalide édité à la main
+        _mr_setup(r, ["../x"])
+        assert "invalide" in r.refused("merge-reports")
+        assert not (r.root / ".legion" / "x").exists()
+
+
+def _t_merge_reports_aborted_cli() -> None:       # M14
+    with _Repo() as r:
+        bdir = _mr_setup(r, ["slice-1"], {"slice-1": _rep("slice-1")})
+        r.ok("abort")
+        assert "abandonnée" in r.refused("merge-reports", "--battle", "b1")
+        assert not (bdir / "build-report.md").exists()
+
+
+def _t_merge_reports_worktree() -> None:          # M15
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        (main / ".legion" / "active-battle").unlink()
+        _seed_battle(tmp, main)
+        bj = main / ".legion" / "battles" / "B" / "battle.json"
+        b = json.loads(bj.read_text(encoding="utf-8"))
+        b["slices"] = [{"id": "slice-1", "status": "done"}]
+        bj.write_text(json.dumps(b), encoding="utf-8")
+        (bj.parent / "build-report-slice-1.md").write_text(_rep("slice-1"), encoding="utf-8")
+        code, res = _cli(tmp, "merge-reports", cwd=wt)
+        assert code == 0 and res["merged"] == ["slice-1"], res
+        assert (bj.parent / "build-report.md").is_file()
+        assert not (wt / ".legion").exists()
+    _with_fixture("_t_merge_reports_worktree", body)
+
+
+def _t_merge_reports_subcommand() -> None:        # M16
+    assert "merge-reports" in SUBCOMMANDS
+    parser = _build_parser()
+    assert "merge-reports" in parser.format_help()
+    assert parser.parse_args(["merge-reports"]).cmd == "merge-reports"
+
+
 _INTEGRATION_TESTS = (
     _t_security_hits, _t_security_auto_slice,
     _t_init_profiles, _t_set_meta_profile, _t_validate_profile, _t_hotfix_e2e,
@@ -3613,6 +3959,8 @@ _INTEGRATION_TESTS = (
     _t_set_delivery_pr_json_cli, _t_set_delivery_pr_json_requires_url,
     _t_set_delivery_pr_json_bad_input, _t_set_delivery_url_mismatch,
     _t_set_delivery_options_exclusive, _t_set_delivery_pr_url_resets, _t_set_delivery_aborted,
+    _t_merge_reports_cli, _t_merge_reports_aggregated_cli, _t_merge_reports_aborted_cli,
+    _t_merge_reports_subcommand,
 )
 
 
@@ -3913,6 +4261,7 @@ _CLI_ROOT_TESTS = (
     _t_cli_worktree_transition, _t_cli_worktree_set_guard, _t_cli_explicit_repo_wins,
     _t_cli_init_from_worktree, _t_cli_init_switches_pointer, _t_cli_activate_from_worktree,
     _t_cli_default_unchanged, _t_cli_root_unit, _t_cli_help_repo_default,
+    _t_merge_reports_worktree,
 )
 
 

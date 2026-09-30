@@ -22,8 +22,9 @@ Regles :
   garantie « une gate ne touche pas le code ». La session principale (`agent_type`
   "claude") et le `builder` (`<plugin>:builder`) ne sont **pas** confines : regles
   de perimetre standard ci-dessous. S'applique meme guard non arme.
-- **Builder sous `.legion/`** : le `builder` n'y ecrit QUE son `build-report.md`
-  (battle active). Sinon `.legion/**` (toujours autorise) lui permettrait de
+- **Builder sous `.legion/`** : le `builder` n'y ecrit QUE son rapport (battle active) :
+  `build-report.md` (BUILD agrege) ou `build-report-<slice_id>.md` (GH#129 : un fichier par
+  slice, id conforme a `battle_state._ID_RE`, nom lu par `battle_state.slice_report_id`). Sinon `.legion/**` (toujours autorise) lui permettrait de
   reecrire `battle.json` -- donc d'elargir son propre `guard.allow`. Hors `.legion/`,
   regles de perimetre standard. S'applique meme guard non arme.
 - **Bloc `guard` invalide** (GH#104 : non-dict, `allow`/`deny` non-listes ou contenant un
@@ -57,7 +58,7 @@ d'**edition** (`repo_root` = cwd du hook : globs `allow`/`deny` et `.gitignore`)
 d'**etat** (`state_root`, `battle_state.resolve_state_root` : pointeur, `battle.json`, confinement
 des gates, regle `.legion/` du builder, `.legion/**` toujours autorise, logs de gate). Hors worktree
 les deux racines sont confondues : comportement inchange. Depuis un worktree, le builder ecrit son
-`build-report.md` dans `<principal>/.legion/battles/<id>/` (chemin absolu) ; le `.legion/` du
+rapport (`build-report.md` ou `build-report-<slice_id>.md`) dans `<principal>/.legion/battles/<id>/` (chemin absolu) ; le `.legion/` du
 worktree n'est pas de l'etat et reste bloque.
 
 Les globs sont relatifs a la racine d'edition (cwd du hook). `**` matche tout
@@ -108,9 +109,12 @@ try:
     from battle_state import resolve_state_root
     # Matcher de globs partage avec `artifact_check.py tree-verify --guard` (GH#66, C6).
     from battle_state import glob_match as _glob_match
+    # Nom de rapport par slice (GH#129) : source unique partagee avec `merge-reports`.
+    from battle_state import slice_report_id as _slice_report_id
     GATE_ARTIFACT = {PLUGIN_PREFIX + g: a for g, a in _GATE_ARTIFACT_SRC.items()}
     # Producteur : hors `.legion/`, regles de perimetre standard ; SOUS `.legion/`, seul
-    # son rapport est autorise (jamais `battle.json` -> pas d'auto-elargissement du guard).
+    # son rapport est autorise (`build-report.md` ou `build-report-<slice_id>.md`, GH#129 ;
+    # jamais `battle.json` -> pas d'auto-elargissement du guard).
     PRODUCER_ARTIFACT = {PLUGIN_PREFIX + g: a for g, a in _PRODUCER_ARTIFACT_SRC.items()}
 except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
@@ -119,6 +123,9 @@ except Exception as _exc:  # ImportError, SyntaxError du module... jamais plante
 
     def resolve_state_root(cwd):  # repli : pas de resolution (les decisions ferment de toute facon)
         return cwd
+
+    def _slice_report_id(name):  # repli : aucun motif reconnu (les decisions ferment de toute facon)
+        return None
 
     def _glob_match(rel_path, patterns):  # jamais appele hors repli ; ferme si c'etait le cas
         raise RuntimeError("battle_state.glob_match indisponible")
@@ -240,7 +247,8 @@ def _producer_state_decision(agent_type, rel: str | None, battle_id: str | None,
     l'etat de battle, donc bloque.
 
     - None  -> pas un producteur, ou cible hors de tout `.legion/` : regles standard.
-    - True  -> son rapport dans la battle active : autorise.
+    - True  -> son rapport dans la battle active : autorise (`build-report.md`, ou
+      `build-report-<slice_id>.md` dont l'id passe `battle_state.slice_report_id`, GH#129).
     - False -> tout autre chemin sous un `.legion/` (`battle.json`, artefact de gate…).
     """
     artifact = PRODUCER_ARTIFACT.get(agent_type)
@@ -251,7 +259,13 @@ def _producer_state_decision(agent_type, rel: str | None, battle_id: str | None,
         return None
     if battle_id is None or rel is None:
         return False
-    return rel.casefold() == f".legion/battles/{battle_id}/{artifact}".casefold()
+    prefix = f".legion/battles/{battle_id}/".casefold()
+    folded = rel.casefold()
+    if folded == prefix + artifact.casefold():
+        return True
+    if not folded.startswith(prefix):
+        return False
+    return _slice_report_id(rel[len(prefix):]) is not None
 
 
 def _resolved_parts(repo_root: Path, file_path: str) -> tuple[str, ...]:
@@ -1114,12 +1128,15 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
             agent_type, rel, battle_id, _resolved_parts(repo_root, file_path.replace("\\", "/"))
         )
         if decision is False:
-            expected = f".legion/battles/{battle_id or '<aucune battle active>'}/{PRODUCER_ARTIFACT[agent_type]}"
+            base = f".legion/battles/{battle_id or '<aucune battle active>'}/"
+            expected = f"{base}{PRODUCER_ARTIFACT[agent_type]}"
+            expected_slice = f"{base}build-report-<slice_id>.md"
             if state != repo_root:  # worktree : le rapport vit dans le depot principal
                 expected = (state / expected).as_posix()
+                expected_slice = (state / expected_slice).as_posix()
             return 2, (
-                f"BLOQUE : le `{agent_type}` n'ecrit sous `.legion/` QUE son rapport "
-                f"`{expected}`.\nTentative : `{rel}`.\n"
+                f"BLOQUE : le `{agent_type}` n'ecrit sous `.legion/` QUE son rapport : "
+                f"`{expected}` (BUILD agrege) ou `{expected_slice}` (une slice).\nTentative : `{rel}`.\n"
                 f"L'etat de la battle (`battle.json`, perimetre, artefacts de gate) "
                 f"appartient a l'orchestrateur."
             )
@@ -1877,6 +1894,9 @@ def _t_guard_wt_subprocess(bs) -> None:
         report = str(main / ".legion" / "battles" / "B" / "build-report.md")                 # G4
         code, err = _run_hook(_ev("Write", "legion:builder", report, content="# B"), wt)
         assert code == 0, (code, err)
+        slice_report = str(main / ".legion" / "battles" / "B" / "build-report-slice-1.md")   # G9
+        code, err = _run_hook(_ev("Write", "legion:builder", slice_report, content="## slice-1"), wt)
+        assert code == 0, (code, err)
         code, err = _run_hook(_ev("Edit", "claude", str(wt / "docs" / "x.md")), wt, LEGION_GUARD_OFF="1")
         assert code == 0 and "[guard bypass]" in err, (code, err)                            # G13
     _with_wt(bs, "_t_guard_wt_subprocess", body)
@@ -1902,12 +1922,22 @@ def _t_guard_wt_builder(bs) -> None:
             code, msg = _decide(bad, edit_root, main)                                           # G5
             expected = (main / ".legion/battles/B/build-report.md").as_posix()
             assert code == 2 and expected in msg, (edit_root, code, msg)
+            for name in ("build-report-slice-1.md", "build-report-slice-2.md"):                 # G8
+                ok = _ev("Write", "legion:builder", str(main / ".legion/battles/B" / name), content="## s")
+                assert _decide(ok, edit_root, main)[0] == 0, (edit_root, name)
+            bad = _ev("Write", "legion:builder", str(edit_root / ".legion/battles/B/build-report-slice-1.md"),
+                      content="## s")
+            code, msg = _decide(bad, edit_root, main)
+            expected = (main / ".legion/battles/B/build-report-<slice_id>.md").as_posix()
+            assert code == 2 and expected in msg and "build-report.md" in msg, (edit_root, code, msg)   # G8, G11
             for target in (".legion/battles/B/battle.json", ".legion/active-battle"):         # G6
                 assert _decide(_ev("Edit", "legion:builder", str(main / target)), edit_root, main)[0] == 2, target
         _wt_guard_json(main, "{}")   # guard non arme : memes refus
         assert _decide(_ev("Edit", "legion:builder", str(main / ".legion/battles/B/battle.json")), wt, main)[0] == 2
         bad = _ev("Write", "legion:builder", str(wt / ".legion/battles/B/build-report.md"), content="# B")
         assert _decide(bad, wt, main)[0] == 2
+        ok = _ev("Write", "legion:builder", str(main / ".legion/battles/B/build-report-slice-1.md"), content="## s")
+        assert _decide(ok, wt, main)[0] == 0                                                   # G10 (worktree)
         assert _decide(_ev("Edit", "legion:builder", str(wt / "src/a.py")), wt, main)[0] == 0
     _with_wt(bs, "_t_guard_wt_builder", body)
 
@@ -2039,6 +2069,17 @@ def _self_test() -> int:
     assert _producer_state_decision("legion:builder", ".legion/battles/B/build-report.md", None) is False
     assert _producer_state_decision("legion:builder", "src/x.cs", "B") is None      # hors .legion -> standard
     assert _producer_state_decision("claude", ".legion/battles/B/battle.json", "B") is None  # orchestrateur libre
+    # rapport par slice (GH#129) : G1 fichiers distincts, G4 autre battle, G5 hors motif, G7 casse
+    for name in ("build-report-slice-1.md", "build-report-slice-2.md", "build-report-s1.md"):
+        assert _producer_state_decision("legion:builder", f".legion/battles/B/{name}", "B") is True, name
+    assert _producer_state_decision("legion:builder", ".Legion/battles/B/Build-Report-Slice-1.md", "B") is True
+    assert _producer_state_decision("legion:builder", ".legion/battles/AUTRE/build-report-slice-1.md", "B") is False
+    for name in ("build-report-.md", "build-report--x.md", "build-report-a_b.md", "build-report-a.b.md",
+                 "build-report-s1.md.bak", "build-report-s1.txt", "x/build-report-s1.md",
+                 "gate-review.md", "battle.json"):
+        assert _producer_state_decision("legion:builder", f".legion/battles/B/{name}", "B") is False, name
+    assert _producer_state_decision("legion:builder", ".legion/battles/B/build-report-slice-1.md", None) is False
+    assert _producer_state_decision("legion:reviewer", ".legion/battles/B/build-report-slice-1.md", "B") is None
     # casse (disque insensible) : .LEGION est le meme dossier -> bloque ; rapport en casse differente -> ok
     assert _producer_state_decision("legion:builder", ".LEGION/battles/B/battle.json", "B") is False
     assert _producer_state_decision("legion:builder", ".Legion/battles/B/Build-Report.md", "B") is True
@@ -2075,6 +2116,12 @@ def _self_test() -> int:
         assert _decide({"tool_name": "Write", "agent_type": "legion:builder",
                         "tool_input": {"file_path": ".legion/battles/B/build-report.md",
                                        "content": "# Build"}}, _root)[0] == 0
+        assert _decide({"tool_name": "Write", "agent_type": "legion:builder",
+                        "tool_input": {"file_path": ".legion/battles/B/build-report-slice-1.md",
+                                       "content": "## slice-1"}}, _root)[0] == 0   # G10 : rapport de slice
+        code, msg = _decide({"tool_name": "Edit", "agent_type": "legion:builder",
+                             "tool_input": {"file_path": ".legion/battles/B/gate-review.md"}}, _root)
+        assert code == 2 and "build-report.md" in msg and "build-report-<slice_id>.md" in msg, (code, msg)  # G11
         assert _decide({"tool_name": "Edit", "agent_type": "legion:builder",
                         "tool_input": {"file_path": "src/x.cs"}}, _root)[0] == 0
         # session principale (orchestrateur) : battle.json toujours ecrivable
@@ -2097,6 +2144,8 @@ def _self_test() -> int:
                             "tool_input": {"file_path": ".legion/battles/B/build-report.md"}}, _root)[0] == 2
             assert _decide({**_w, "agent_type": "legion:builder",
                             "tool_input": {"file_path": ".LEGION/battles/B/battle.json"}}, _root)[0] == 2
+            assert _decide({**_w, "agent_type": "legion:builder",
+                            "tool_input": {"file_path": ".legion/battles/B/build-report-slice-1.md"}}, _root)[0] == 2  # G12
             # C1 (option B) : le builder est bloque pour TOUTE ecriture en repli
             assert _decide({**_w, "agent_type": "legion:builder",
                             "tool_input": {"file_path": "src/x.cs"}}, _root)[0] == 2
