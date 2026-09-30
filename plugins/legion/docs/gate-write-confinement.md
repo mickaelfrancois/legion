@@ -333,7 +333,10 @@ sur une commande non analysable.
   `git checkout` d'une branche extraite ailleurs échoue, ce qui ferme le chemin en doctrine.
   Le sha de l'entrée d'index fait partie de l'empreinte de chaque chemin de `status` : un blob
   indexé changé sous « MM » est vu. Le worktree `--batch-worktrees` suppose que les worktrees du
-  harness restent en place jusqu'au `tree-verify` du tronc, puis le fan-in (`fan_in.py apply`,
+  harness restent en place jusqu'au `tree-verify` du tronc. `<base>` est un commit synthétique
+  sans ref (`fan_in.py base`, arbre principal non commité compris) : invisible de l'empreinte
+  (`objects/` ignoré), et le builder aligne son worktree dessus (`fan_in.py align`) ; l'alignement
+  est prouvé par la faute `[base]` de `tree-verify --base`. Puis le fan-in (`fan_in.py apply`,
   sous un nouveau `tree-snapshot` / `tree-verify --guard`), puis `fan_in.py cleanup` après la
   vérification verte du projet. Limite du fan-in : `git apply` valide tout le lot avant d'écrire ;
   seule une erreur d'E/S pendant l'écriture pourrait laisser un état partiel.

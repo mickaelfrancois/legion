@@ -2669,6 +2669,13 @@ def _t_doc_fan_in() -> None:
         m = re.search(rf'fan_in\.py"? {sub}\b', sec)
         assert m, f"fan_in.py {sub} absent du §D --auto de battle.md"
         pos[sub] = m.start()
+    mb = re.search(r'fan_in\.py"? base\b', sec)
+    assert mb, "fan_in.py base absent du §D --auto de battle.md"
+    assert mb.start() < sec.index("tree-snapshot") and mb.start() < pos["apply"], \
+        "fan_in.py base doit précéder tree-snapshot et apply (§D --auto)"
+    builder_md = Path(__file__).resolve().parents[1] / "agents/builder.md"
+    if builder_md.is_file():
+        assert "align" in builder_md.read_text(encoding="utf-8"), "builder.md doit citer align"
     i_batch = sec.index("--batch-worktrees")
     i_merge = sec.index("merge-reports", pos["cleanup"])
     assert i_batch < pos["apply"] < pos["cleanup"] < i_merge, "ordre du fan-in (§D --auto)"

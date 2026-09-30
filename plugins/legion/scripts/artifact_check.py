@@ -49,7 +49,8 @@ et les worktrees enregistrés sont exclus des chemins. `tree-verify` recalcule e
 `--fingerprint` (retenu par l'orchestrateur) protège le fichier `--before` contre une
 réécriture. `--guard` lit `allow`/`deny` de la battle active de la racine d'état
 (`battle_state.resolve_state_root` : dépôt principal depuis un worktree lié, comme `guard.py`) ;
-`--base` compare un worktree à un arbre propre au commit donné. Fail-closed : hors dépôt,
+`--base` compare un worktree à un arbre propre au commit donné, dont le HEAD doit descendre du
+commit donné (faute `[base]` sinon : worktree non aligné, jamais filtrable). Fail-closed : hors dépôt,
 `git` absent, fichier illisible → refus (exit 2), jamais `ok`.
 """
 
@@ -838,6 +839,8 @@ def tree_verify(before_path: str | None, fingerprint: str | None, base: str | No
     if before.get("head") != after.get("head"):
         committed = _committed_paths(root, before.get("head"), after.get("head"))
     diff = _tree_diff(before, after, committed)
+    if base is not None and _git_ok(root, "merge-base", "--is-ancestor", base, "HEAD") is None:
+        diff["faults"].append("base")            # worktree non aligné : HEAD ne descend pas de base
     oos = _apply_filter(diff["changed"], flt)
     fault = bool(diff["faults"] or oos)
     named = [f"[{f}]" for f in diff["faults"]]
@@ -1386,6 +1389,23 @@ def _t_tree_worktrees() -> None:
             assert rc == 2 and out["refused"] is True, out
 
 
+def _t_tree_base_ancestry() -> None:
+    with _TreeRepo() as r:                                                            # V1
+        old = r.git("rev-parse", "HEAD").strip()
+        r.write("src/found.txt", "f\n")
+        r.git("add", "-A")
+        r.commit("fondation")
+        new = r.git("rev-parse", "HEAD").strip()
+        wt = os.path.join(r.root, ".claude", "worktrees", "w1")
+        r.git("worktree", "add", "-q", "--detach", wt, old)      # worktree resté à l'ancien HEAD
+        r.battle({"allow": ["src/**"]})
+        rc, out = r.run("tree-verify", "--base", new, "--root", wt, "--guard")
+        assert rc == 2 and out["fault"] is True and "[base]" in out["changed"], out
+        r.git("reset", "-q", "--hard", new, cwd=wt)              # aligne
+        rc, out = r.run("tree-verify", "--base", new, "--root", wt, "--guard")
+        assert rc == 0 and out["ok"] is True, out
+
+
 def _t_tree_stdout_bounded() -> None:
     with _TreeRepo() as r:                                                            # T22
         for i in range(500):
@@ -1739,7 +1759,7 @@ _TREE_TESTS = (
     _t_tree_diff_pure, _t_tree_changes, _t_tree_dirty_start, _t_tree_index_and_head,
     _t_tree_ignored_and_legion, _t_tree_state, _t_tree_index_mask, _t_tree_crlf,
     _t_tree_allow_filter, _t_tree_guard, _t_tree_usage, _t_tree_refusals, _t_tree_no_git,
-    _t_tree_special_files, _t_tree_worktrees, _t_tree_guard_from_worktree,
+    _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree,
     _t_tree_stdout_bounded, _t_tree_nested_repo,
 )
 
