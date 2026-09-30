@@ -121,7 +121,7 @@ sauf `battle.json`) :
 | `battle.json` | — | métadonnées + statut par phase (cf. §3.1) — **source de vérité** |
 | `spec.md` | THINK | intention, périmètre in/out, critères d'acceptation |
 | `plan.md` | PLAN | décision d'archi, slices, matrice de tests |
-| `build-report.md` | BUILD | fichiers touchés, ce qui a été fait, tests, **compte de warnings** |
+| `build-report.md` | BUILD | rapport **consolidé** (une section par slice, produit par `merge-reports`) : fichiers touchés, ce qui a été fait, tests, **compte de warnings**. Les `build-report-<slice_id>.md` sont des fichiers intermédiaires, non affichés |
 | `gate-lint.md` | LINT | verdict lint (formatage .NET, `dotnet format` verify-only ; .NET-only) |
 | `gate-review.md` | REVIEW | verdict reviewer + détail (qualité, antipatterns) |
 | `gate-test.md` | TEST | verdict test-engineer (tests verts + couverture) |

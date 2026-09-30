@@ -5,7 +5,7 @@ argument-hint: start <issue|slug> [--profile <p>] [--step] | build [slice|all] [
 
 You are the **battle orchestrator** of `legion`. Load the `battle-workflow` skill
 doctrine before acting. Producers and gates each write their **own** artifact: the
-`builder` writes `build-report.md`, every gate writes its single `gate-*.md` /
+`builder` writes its per-slice report `build-report-<slice_id>.md` (you consolidate them into `build-report.md` with `merge-reports`), every gate writes its single `gate-*.md` /
 `plan.md` / `pr-feedback.md` (the `guard.py` hook **confines** each gate to that one
 file). You persist everything else — `spec.md`, the PR artifacts — and `battle.json`
 through `battle_state.py` only (see the box below); you read the gate artifacts from disk when you need their detail. A gate returns
@@ -18,7 +18,7 @@ session's context.
 > through the deterministic script, called as
 > `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" <sub> …` (fall back to
 > `python3`, same interpreter as the other script calls). Subcommands: `init`,
-> `transition`, `approve-plan`, `set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`,
+> `transition`, `approve-plan`, `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`,
 > `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`. The script prints one JSON object on
 > stdout; **read it**. Exit code `2` means **refused** (or invalid usage): relay the
 > `reason` to the user and **do not advance**. The script enforces the phase
@@ -473,18 +473,18 @@ same conventions as the `builder` agent: load `dotnet-claude-kit:clean-architect
 when `battle.json.stack.build_target` is set — repo without a `.sln`); **note the
 warning count** from the build summary. For `all`, build **each slice in order**,
 collecting a `{ slice_id, build_ok, warnings }` per slice and recording it with `slice …`
-as above. Write `build-report.md`: one file, one `## <slice-id>` section appended per slice.
+as above. Write the slice report yourself: `build-report-<slice-id>.md` in the battle dir (same format as the builder's: starts with `## <slice-id>`, no `#` H1, optional trailing `## Hors périmètre — candidats issue` section), one file per slice. This keeps a mix of `build slice-1 --auto` and inline `build slice-2` correct. Consolidation into `build-report.md` happens once, in the classification below.
 
 **Mode — `--auto`.** Delegate to the `builder` agent via the `Agent` tool
 (`subagent_type: builder`). Pass a self-contained prompt: battle dir, `plan.md`
 path, `slice_id`, the `guard.allow` globs from `battle.json`, and — when set —
 `stack.build_target` (the explicit build target for a repo without a `.sln`). Pass the battle
 dir and the `plan.md` path as **absolute paths in the main repo** (`<main>/.legion/battles/<id>/`,
-`<main>` = the main checkout). An isolated builder writes `build-report.md` at that absolute
+`<main>` = the main checkout). An isolated builder writes its own `build-report-<slice_id>.md` at that absolute
 path, never into the `.legion/` of its own worktree; the hooks and the state CLIs (`battle_state.py`,
 `artifact_check.py --guard`) resolve the battle from the main
-repo (`git rev-parse --git-common-dir`). After a parallel batch, check that `build-report.md`
-holds one `## <slice_id>` section per slice. For `all`,
+repo (`git rev-parse --git-common-dir`). Each builder owns a distinct report file, so parallel builders never race on a shared file; the
+missing-report check is done by `merge-reports` (below). Tell each builder it must not write another slice's report. For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep
 dependent slices sequential. **Sequential builders** are wrapped in the tree integrity
 check with `--guard` (above). **Parallel builders** write in their own worktree, so before the
@@ -508,8 +508,8 @@ Collect each
 `{ slice_id, build_ok, warnings, files_touched }`. Before delegating, call
 `slice <id> in_progress`; on the builder's return, call
 `slice <id> done|blocked --warnings N --files …` with that result. A red build of a slice
-→ `slice <id> blocked`, then `transition build blocked`. The builder appends its own
-`## <slice_id>` section to the shared `build-report.md`.
+→ `slice <id> blocked`, then `transition build blocked`. The builder writes its own
+`build-report-<slice_id>.md`.
 
 After build (either mode), **classify the result and record it immediately** with
 `transition` — for `all`, only after **every targeted slice** has a result:
@@ -522,11 +522,23 @@ After build (either mode), **classify the result and record it immediately** wit
   (`continue` ⇒ relancer le build : `transition build in_progress`, puis
   `slice <id> in_progress` ; `escalate` ⇒ escalade, cf. §E) ; en mode `step`,
   stop. Do not advance until resolved.
-- **all `build_ok` (with or without warnings)** → `transition build done` **only when
+- **all `build_ok` (with or without warnings)** → **consolidate the reports first**, then
+  `transition build done` **only when
   every declared slice is `done`** (the script refuses otherwise and cites the remaining
   ids). With `build slice-N` while other slices are still `pending`, leave `build`
   `in_progress` and announce the next slice (`next-slice`): in `autonomous` mode chain
   straight into it, in `step` mode hand back.
+  Consolidation: once every targeted slice is `done` (and only then, before `transition build done`,
+  in every mode), run
+  `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" merge-reports`. It assembles `build-report.md`
+  from the `build-report-<id>.md` files in the `battle.json.slices` order (plan order), with one
+  final grouped `## Hors périmètre — candidats issue` section; it never writes `battle.json` and is
+  idempotent. With no declared slice (aggregated BUILD) it only checks that `build-report.md` exists.
+  On **exit 2** (`missing: [ids]`, or a blank report): re-run the builder of each missing slice for
+  its report only, or write that `build-report-<id>.md` yourself (inline); if it is still missing,
+  `slice <id> blocked` then `transition build blocked`. Relay the script's `warnings` (injected
+  title, undeclared extra report) to the user. For a legacy battle (slices `done` before this
+  flow, no per-slice report), split `build-report.md` into per-slice files yourself, then re-run.
   Warnings are **non-blocking remarks**: log them (in `build-report.md` and in the
   relay to the user), then **auto-advance straight into §E** (the gate cascade)
   without waiting for a separate command — exactly as for a clean build. Announce
@@ -714,7 +726,11 @@ though the gate ran.
           et le rejouer ; ne pas avancer.
      d. Passer au builder le **chemin de l'artefact** `gate-*.md` (lire depuis le
         disque, ne pas injecter le contenu dans ce contexte) et relancer BUILD pour
-        cette slice. Ce BUILD correctif n'appelle **jamais** `slice …` : les slices restent
+        cette slice. Passer aussi le `slice_id` de la slice visée (celle dont
+        `slices[].files` contient les fichiers en FAIL, sinon la dernière slice) : le
+        builder **ajoute** une sous-section `### Correction (<gate>)` à son
+        `build-report-<slice_id>.md`. Puis lancer `merge-reports` avant de relancer la
+        cascade, pour que `build-report.md` reflète la correction. Ce BUILD correctif n'appelle **jamais** `slice …` : les slices restent
         `done` (l'invalidation de la cascade ne « dé-construit » pas une slice). S'il
         échoue, enregistrer seulement `transition build blocked` (et
         `bump-autocorrect <phase-key> --build-failure`) ; les slices restent `done`. Les
@@ -747,7 +763,7 @@ Optional, **at most once per battle**, between the last gate and DELIVER.
 - **Trigger**: every required gate is `accept*` (all `done`) and at least one carries a
   useful WARN worth fixing before shipping.
 - **Procedure**: `battle_state.py invalidate --reason polish`, then a corrective BUILD
-  (pass the builder the WARN detail by artifact path), then re-run the **whole required
+  (pass the builder the WARN detail by artifact path and the `slice_id` to update — it appends a `### Correction (<gate>)` subsection to that slice's report — then run `merge-reports`), then re-run the **whole required
   cascade from `lint`**.
 - **Outside the 2/6 budget**: the polishing round never touches `run.autocorrect`. A
   `revise` raised *during* the round enters the normal loop above, which does consume

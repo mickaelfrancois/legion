@@ -183,13 +183,13 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 Seul sous-agent **producteur** : il écrit du code (Read/Grep/Glob + Edit/Write/Bash),
 **soumis à `guard.py`** (même périmètre que la session). Modèle **sonnet** (fixe) —
 une slice trop complexe se **découpe** au PLAN. Mandat : coder **une** slice du
-`plan.md`, build vert localement, rendre `build-report.md`. Il n'invoque aucune gate
+`plan.md`, build vert localement, rendre son rapport de slice `build-report-<slice_id>.md` (un fichier par slice : des builders parallèles ne partagent aucun fichier ; l'orchestrateur les consolide en `build-report.md` par `battle_state.py merge-reports` avant `transition build done`). Il n'invoque aucune gate
 (c'est l'orchestrateur qui séquence builder → gates).
 
 Deux modes : *inline* (la session principale code, défaut) ; *autonome*
 (`/battle build --auto` délègue chaque slice à un `builder`, parallélisable en
 worktrees). Depuis un worktree, le builder reçoit le dossier de la battle en chemin
-absolu du dépôt principal et y écrit son `build-report.md`.
+absolu du dépôt principal et y écrit son rapport de slice.
 
 ---
 
@@ -207,7 +207,8 @@ Deux niveaux : **par repo** (la battle) et **global** (le fleet).
         ├── battle.json        # métadonnées + profil + statut des phases (écrit par battle_state.py seul)
         ├── spec.md            # THINK
         ├── plan.md            # PLAN
-        ├── build-report.md    # BUILD
+        ├── build-report-<slice_id>.md  # BUILD — rapport par slice (intermédiaire, écrit par le builder)
+        ├── build-report.md    # BUILD — consolidé par `merge-reports` (lu par les gates, retro, Legatus)
         ├── gate-lint.md       # LINT (.NET-only)
         ├── gate-review.md     # REVIEW
         ├── gate-test.md       # TEST
@@ -227,7 +228,7 @@ lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
-`set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`, `invalidate`, `set-delivery`,
+`set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
 `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`). Sans `--repo`, la racine d'état du CLI suit celle des hooks : depuis un worktree lié, c'est le dépôt principal (battle active) ; `init` et `activate` visent toujours le dépôt principal ; `--repo` explicite prime. `build done` exige que toutes les
 slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
 pendant un re-plan ouvert (`approved_at` à `null`) ou tant que `build` est `pending`
@@ -246,7 +247,7 @@ unique** des profils (`PROFILES`, dont `init` dérive `required_gates`) et de
 l'heuristique qui ajoute `security` à `required_gates` sur slice sensible
 (`security_hits`, `mark_security_auto`), ainsi que des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
 dérivent `guard.py`, `fleet_sync.py` et `eval.py`. `set-delivery --pr-json <fichier>` interprète la sortie de `gh pr view` sans réseau : le
-command-file appelle `gh`, le script ne fait que lire le fichier. La liste des sous-commandes ne change pas. Les command-files l'appellent ; ils
+command-file appelle `gh`, le script ne fait que lire le fichier. `merge-reports` (GH#129) consolide les `build-report-<slice_id>.md` en `build-report.md` ; c'est la seule sous-commande qui écrit un artefact de battle (jamais `battle.json`). Les command-files l'appellent ; ils
 n'éditent plus `battle.json` à la main.
 
 ### 5.2 Global — `~/.claude/legion/fleet.d/` (un shard par battle)
@@ -291,11 +292,12 @@ PreToolUse(Edit|Write|MultiEdit) :   (+ Bash|PowerShell, voir « Filtre Bash » 
      ne sont pas dans la table → règles de périmètre standard ci-dessous.
   0b. BUILDER SOUS .legion/ (actif même guard non armé). Si `agent_type` ==
      legion:builder et file_path ∈ .legion/** : seul
-     .legion/battles/<active>/build-report.md → exit 0 ; tout autre chemin
+     .legion/battles/<active>/build-report.md ou build-report-<slice_id>.md
+     (`slice_report_id`, source unique dans `battle_state.py`) → exit 0 ; tout autre chemin
      (battle.json, active-battle, artefact de gate) → exit 2. Empêche le builder
      d'élargir son propre `guard.allow`. Comparaison insensible à la casse. `.legion/`
      est résolu depuis la racine d'état (`git rev-parse --git-common-dir`, dépôt
-     principal même depuis un worktree) : le `build-report.md` du dépôt principal est
+     principal même depuis un worktree) : le rapport (`build-report.md` / `build-report-<slice_id>.md`) du dépôt principal est
      autorisé depuis un worktree, tout autre `.legion/` (y compris celui du worktree)
      est bloqué. L'outil `Bash` est traité à part (filtre Bash ci-dessous).
   1. Lire la battle active (.legion/active-battle → battle.json → guard.allow/deny).
