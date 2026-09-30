@@ -188,7 +188,10 @@ une slice trop complexe se **découpe** au PLAN. Mandat : coder **une** slice du
 
 Deux modes : *inline* (la session principale code, défaut) ; *autonome*
 (`/battle build --auto` délègue chaque slice à un `builder`, parallélisable en
-worktrees). Depuis un worktree, le builder reçoit le dossier de la battle en chemin
+worktrees). Un builder parallèle part de l'arbre principal figé, pas de `HEAD` : l'orchestrateur
+fige la base du lot (`fan_in.py base`, travail non commité compris, commit sans ref) et le
+builder aligne son worktree dessus avant de coder (`fan_in.py align`) ; `tree-verify --base`
+en prouve l'alignement (faute `[base]`). Depuis un worktree, le builder reçoit le dossier de la battle en chemin
 absolu du dépôt principal et y écrit son rapport de slice. Le delta d'un worktree ne
 revient pas seul dans l'arbre principal : l'orchestrateur le réintègre (fan-in,
 `scripts/fan_in.py apply`, tout-ou-rien, sous `tree-verify --guard`), puis supprime les
@@ -410,7 +413,7 @@ plugins/legion/
 │   ├── artifact_check.py        # delivery check d'artefact de gate §E (snapshot/verify métadonnées-seules) + empreinte de l'arbre (tree-snapshot/tree-verify, --self-test)
 │   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
-│   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
+│   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`base` fige l'arbre principal, `align` aligne un worktree, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
 └── skills/

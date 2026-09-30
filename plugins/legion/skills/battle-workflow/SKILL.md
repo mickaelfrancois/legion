@@ -104,6 +104,9 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   gates review. A parallel builder works in its own worktree and does not commit there: the
   orchestrator merges its delta back into the main tree (fan-in, `scripts/fan_in.py apply`,
   then `cleanup` once the project verification is green); a slice is `done` only after that.
+  A parallel builder starts from the frozen main tree, not from `HEAD`: the orchestrator
+  freezes it (`fan_in.py base`, uncommitted work included) and the builder aligns its worktree
+  on that `<base>` (`fan_in.py align`) before writing any code; `tree-verify --base` proves it.
 - **Gates** — `architect`, `lint`, `reviewer`, `test-engineer`, `security`
   (+ `pr-triage`). They *judge* a deliverable. **Read-only on the code**, but each **writes its own
   single artifact** (`plan.md` / `gate-*.md` / `pr-feedback.md`) and returns only its

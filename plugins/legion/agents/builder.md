@@ -37,9 +37,16 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
 4. **Périmètre guard** : globs autorisés en écriture (`guard.allow`)
 5. **Cible build** (optionnel) : chemin de projet à builder quand le repo n'a pas
    de `.sln` (`battle.json.stack.build_target`). Absent ⇒ build depuis la racine.
+6. **Lot parallèle uniquement** : `<base>` (sha de 40 hexa, l'arbre principal figé) et le
+   chemin absolu de `fan_in.py`. Absents ⇒ tu n'es pas dans un lot parallèle : saute l'étape 0.
 
 ## Procédure
 
+0. **Lot parallèle : aligne ton worktree avant tout code.** Lance, depuis la racine de ton
+   worktree, `python "<chemin de fan_in.py>" align --base <base>`. Il avance ton worktree sur
+   `<base>` (l'état figé du principal, fondation non commitée comprise) ; sans effet si tu y es
+   déjà. S'il échoue (`ok:false`), **stop** : rapport `build_ok: false` avec la raison, sans
+   coder. L'orchestrateur vérifie cet alignement (`tree-verify --base`, faute `[base]`).
 1. **Lire `plan.md`** et isoler la slice `slice_id` (étape + fichiers visés).
 2. **Charger les conventions** avant de produire :
    - code → `dotnet-claude-kit:clean-architecture` + `dotnet-claude-kit:modern-csharp`
@@ -201,6 +208,8 @@ l'orchestrateur les relaie à l'utilisateur, puis enchaîne les gates sans inter
 - **Ne pas** écrire hors `guard.allow` — stop + report. Cela vaut aussi par `Bash`
   (`echo >`, `sed -i`, `git checkout`…) : l'orchestrateur compare l'arbre avant/après
   (`tree-verify --guard`) et une écriture hors périmètre est détectée (escalade cas 3).
+- **Ne pas** aligner ton worktree à la main (`git reset`, `git checkout`, `git merge`…) :
+  seul `fan_in.py align` le fait, avec ses contrôles.
 - **Ne pas** désactiver un analyzer / supprimer un test pour forcer un build vert.
 - **Ne pas** boucler au-delà du budget d'itérations.
 - **Ne pas** invoquer d'autres sous-agents (l'orchestrateur séquence builder → gates).

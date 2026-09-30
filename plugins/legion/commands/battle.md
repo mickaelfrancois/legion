@@ -491,15 +491,26 @@ check with `--guard` (above). **Parallel builders** write in their own worktree,
 deltas must be merged back into the main tree (the **fan-in**, `scripts/fan_in.py`, the only
 script that writes code into the main tree). Run a parallel batch in this fixed order:
 
-1. Call `slice <id> in_progress` for **every** slice of the batch. Then note `<base>` =
-   `git rev-parse HEAD` (validate `^[0-9a-f]{40}$`) and take the snapshot S1 of the main tree:
-   `tree-snapshot --out .legion/battles/<id>/_tree-before.json`. No `battle_state.py` write
-   between this snapshot and step 4.
-2. Launch the builders in parallel (`isolation: worktree`).
+1. Call `slice <id> in_progress` for **every** slice of the batch. Then freeze the main tree
+   as the batch base: `<base>` = the `base` field of
+   `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" base` (validate `^[0-9a-f]{40}$`). It commits
+   the main tree as it stands, uncommitted and untracked files included (`.legion/`,
+   `.claude/worktrees/` and ignored files excluded), into an unreferenced commit on top of
+   `HEAD`; on a clean tree it returns `HEAD` itself. It touches no ref, no `HEAD` and no index.
+   It refuses (exit 2) on a nested repository. Never use `git rev-parse HEAD` here: a foundation
+   slice that is still uncommitted would be invisible to the builders. Then take the snapshot S1
+   of the main tree: `tree-snapshot --out .legion/battles/<id>/_tree-before.json`. No
+   `battle_state.py` write between this snapshot and step 4.
+2. Launch the builders in parallel (`isolation: worktree`). Each builder prompt carries
+   `<base>` and the absolute path of `fan_in.py`: the builder's first action is
+   `fan_in.py align --base <base>`, which moves its worktree onto `<base>` (`reset --keep`, the
+   harness branch is kept). If `align` fails the builder returns `build_ok: false` and stops.
 3. For each builder take its worktree path from `git worktree list --porcelain` (never from
    the builder's returned text), check it matches `^[A-Za-z0-9._/:\\ -]+$` (no `$`, backtick
    or `"`), then run `artifact_check.py tree-verify --base <base> --root "<worktree>" --guard`
-   (the script also checks the path against `git worktree list`).
+   (the script also checks the path against `git worktree list`). In `--base` mode it also
+   requires `<base>` to be an ancestor of the worktree `HEAD` (fault `[base]`): this proves the
+   builder aligned. It follows the same path as any other fault of this step (step 5).
 4. On the main tree run `tree-verify --before S1 --fingerprint F1 --batch-worktrees`
    **without a filter**: no isolated builder may touch the main tree, and a fault is charged to
    the whole batch. The fingerprint includes the list of registered worktrees and every branch
@@ -547,6 +558,10 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
     (same pairs). It removes each worktree and its harness branch only after proving the main
     tree already holds the delta; otherwise it keeps them (`kept`, exit 2). A refusal is
     **non-blocking**: relay it as a warning and flag it for the REFLECT.
+    **Resuming an interrupted batch.** `<base>` is held only in the orchestrator's context and is
+    no longer `git rev-parse HEAD` of the main tree. A builder that aligned and did not commit has
+    `HEAD` = `<base>` in its worktree: read it there (`git -C "<worktree>" rev-parse HEAD`). If no
+    aligned worktree is left, re-run the batch from step 1.
 13. Continue with the classification below: `merge-reports`, then `transition build done`.
 
 Collect each `{ slice_id, build_ok, warnings, files_touched }` from the builders. For a

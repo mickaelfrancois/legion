@@ -32,7 +32,22 @@ worktree est conservé (`kept`). Si la preuve tient : `git worktree remove --for
 extraite par ce worktree, si aucun autre worktree ne l'a extraite et si ce n'est pas la branche
 courante du principal. Un refus est non bloquant pour l'orchestrateur (warning).
 
+Sous-commande `base` (avant le lot, depuis la racine du principal) : fige l'arbre de travail du
+principal, non commité et fichiers non suivis compris, en un commit **sans ref** (index
+temporaire : `read-tree HEAD`, `add -A` sans `.legion/` ni `.claude/worktrees/`, `write-tree`,
+`commit-tree -p HEAD`). Ni `HEAD`, ni index, ni branche, ni ref ne bougent. Arbre propre : rend
+`HEAD` (aucun objet créé). Un gitlink (dépôt imbriqué) ou un chemin `.legion/` dans l'arbre figé
+-> `refused`.
+
+Sous-commande `align --base <sha>` (première action d'un builder, depuis la racine de son
+worktree) : avance le worktree sur `<base>` par `git reset --keep` (la branche du harnais est
+conservée, avancée). Sans effet si le HEAD descend déjà de `<base>`. Refus (fail-closed) si le
+contexte n'est pas un worktree enregistré sous `<principal>/.claude/worktrees/`, si `<base>` est
+inconnu, si le HEAD n'est pas un ancêtre de `<base>` ou si le worktree n'est pas propre.
+
 Usage :
+    python fan_in.py base
+    python fan_in.py align --base <sha>
     python fan_in.py apply --base <sha> --slice <id> <worktree> [--slice <id> <worktree> ...]
     python fan_in.py cleanup --base <sha> --slice <id> <worktree> [--slice <id> <worktree> ...]
     python fan_in.py --self-test
@@ -43,6 +58,8 @@ Sortie : un objet JSON sur stdout
                  out_of_scope_count, applied:[] }
     conflit -> { ok:false, conflict:{slice, kind, files<=50}, reason, applied:[] }
     faute   -> { ok:false, fault:true, reason, applied:[] }
+base    -> { ok:true, base, head, frozen:<bool>, files:<n> } ; refus -> { ok:false, refused:true, reason }
+align   -> { ok:true, aligned:<bool>, head } ; refus -> { ok:false, refused:true, reason }
 cleanup -> { ok:bool, removed:[{slice, worktree, branch, branch_kept?}], kept:[{slice, worktree,
                  reason}] } ; `ok` = `kept` vide ; refus d'entrée -> { ok:false, refused:true, reason,
                  removed:[], kept:[] }
@@ -468,6 +485,115 @@ def cleanup_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
     return {"ok": not kept, "removed": removed[:_MAX_LIST], "kept": kept[:_MAX_LIST]}
 
 
+# --- commandes base et align ---------------------------------------------------------------
+
+_BASE_EXCLUDES = (".legion", ".claude/worktrees")
+_BASE_IDENT = ("-c", "user.name=legion", "-c", "user.email=legion@localhost", "-c", "commit.gpgsign=false")
+
+
+def _diff_entries(root: str, a: str, b: str) -> list[tuple[str, str, str]]:
+    """`[(oldmode, newmode, path)]` de `git diff --raw` entre deux arbres ou commits."""
+    toks = ac._git(root, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff", a, b).split(b"\0")
+    out: list[tuple[str, str, str]] = []
+    i = 0
+    while i < len(toks) - 1:
+        if not toks[i].startswith(b":"):
+            i += 1
+            continue
+        fields = toks[i][1:].decode("ascii", "replace").split()
+        out.append((fields[0], fields[1], os.fsdecode(toks[i + 1])))
+        i += 2
+    return out
+
+
+def base_batch(cwd: str) -> dict:
+    """Cœur de `base` ; ne lève jamais : toute faute devient un objet `ok:false`."""
+    try:
+        main, _slices, _guard = _context(cwd)
+        head = ac._git(main, "rev-parse", "HEAD").decode().strip()
+        head_tree = ac._git(main, "rev-parse", "HEAD^{tree}").decode().strip()
+        with tempfile.TemporaryDirectory() as td:
+            idx = os.path.join(td, "index")
+            ac._git(main, "read-tree", "HEAD", index=idx)
+            ac._git(main, "add", "-A", index=idx)
+            # Les exclusions ne passent pas en pathspec (`git add` refuse un pathspec qui vise un
+            # chemin ignoré) : on les retire de l'index puis on y remet la version de HEAD.
+            ac._git(main, "rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", *_BASE_EXCLUDES, index=idx)
+            kept = ac._git(main, "ls-tree", "-r", "-z", "HEAD", "--", *_BASE_EXCLUDES)
+            info = b"".join(m.group(1) + b" " + m.group(2) + b" 0\t" + m.group(3) + b"\n"
+                            for m in (re.match(rb"(\d+) \w+ ([0-9a-f]+)\t(.*)", e, re.S)
+                                      for e in kept.split(b"\0") if e) if m)
+            if info:
+                ac._git(main, "update-index", "--index-info", data=info, index=idx)
+            tree = ac._git(main, "write-tree", index=idx).decode().strip()
+        entries = _diff_entries(main, head_tree, tree)
+        for old, new, path in entries:
+            if _GITLINK in (old, new):
+                raise _Refuse(f"gitlink (dépôt imbriqué) dans l'arbre du principal : {path}")
+            if ac._is_legion(path):
+                raise _Refuse(f"chemin .legion/ dans l'arbre figé : {path}")
+        if tree == head_tree:
+            return {"ok": True, "base": head, "head": head, "frozen": False, "files": 0}
+        base = ac._git(main, *_BASE_IDENT, "commit-tree", tree, "-p", head, "-m",
+                       "legion: base du lot").decode().strip()
+        if not ac._COMMIT_RE.fullmatch(base):
+            raise _Refuse("commit-tree n'a pas rendu de sha")
+        return {"ok": True, "base": base, "head": head, "frozen": True, "files": len(entries)}
+    except _Refuse as exc:
+        return {"ok": False, "refused": True, "reason": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - contrat : jamais d'exception non rattrapée
+        return {"ok": False, "fault": True, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _align_context(cwd: str, base: str) -> str:
+    """Racine réelle du worktree du builder ; `_Refuse` si le contexte n'est pas sûr."""
+    top = ac._toplevel(cwd)
+    if os.path.realpath(cwd) != top:
+        raise _Refuse("à lancer depuis la racine du worktree du builder (pas un sous-dossier)")
+    main = os.path.realpath(str(bs.main_repo_root(Path(cwd))))
+    if top == main:
+        raise _Refuse("à lancer depuis un worktree de builder, pas depuis le dépôt principal")
+    if not top.startswith(os.path.join(main, ".claude", "worktrees") + os.sep):
+        raise _Refuse("worktree hors de .claude/worktrees/")
+    if os.path.normcase(os.path.abspath(cwd)) != os.path.normcase(top) or ac._has_symlink_between(main, top):
+        raise _Refuse("lien symbolique dans le chemin du worktree")
+    entry = next((e for e in _wt_entries(main) if e["path"] == top), None)
+    if entry is None:
+        raise _Refuse("worktree non enregistré par git")
+    if entry["prunable"]:
+        raise _Refuse("worktree prunable")
+    if not ac._COMMIT_RE.fullmatch(base):
+        raise _Refuse("--base n'est pas un sha hexadécimal complet")
+    rc, _, _ = _run(top, "cat-file", "-e", f"{base}^{{commit}}")
+    if rc != 0:
+        raise _Refuse(f"--base {base[:12]} ne désigne aucun commit existant")
+    return top
+
+
+def align_worktree(cwd: str, base: str) -> dict:
+    """Cœur de `align` ; ne lève jamais : toute faute devient un objet `ok:false`."""
+    try:
+        top = _align_context(cwd, base)
+        head = ac._git(top, "rev-parse", "HEAD").decode().strip()
+        rc, _, _ = _run(top, "merge-base", "--is-ancestor", base, "HEAD")
+        if rc == 0:
+            return {"ok": True, "aligned": False, "head": head}
+        rc, _, _ = _run(top, "merge-base", "--is-ancestor", "HEAD", base)
+        if rc != 0:
+            raise _Refuse("le HEAD du worktree n'est pas un ancêtre de --base (alignement refusé)")
+        if ac._git(top, "status", "--porcelain", "-uall").strip():
+            raise _Refuse("worktree non propre : alignement refusé (aucun travail n'est écrasé)")
+        ac._git(top, "reset", "--keep", base)
+        now = ac._git(top, "rev-parse", "HEAD").decode().strip()
+        if now != base or ac._git(top, "status", "--porcelain", "-uall").strip():
+            raise _Refuse("alignement non vérifié (HEAD différent de --base ou statut non vide)")
+        return {"ok": True, "aligned": True, "head": now}
+    except _Refuse as exc:
+        return {"ok": False, "refused": True, "reason": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - contrat : jamais d'exception non rattrapée
+        return {"ok": False, "fault": True, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 # --- CLI -----------------------------------------------------------------------------------
 
 def _usage(msg: str) -> int:
@@ -505,8 +631,20 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if "--self-test" in args:
         return _self_test()
+    if args and args[0] == "base":
+        if len(args) != 1:
+            return _usage("base n'attend aucun argument")
+        res = base_batch(os.getcwd())
+        print(json.dumps(res, ensure_ascii=False))
+        return 0 if res["ok"] else 2
+    if args and args[0] == "align":
+        if len(args) != 3 or args[1] != "--base" or not ac._COMMIT_RE.fullmatch(args[2]):
+            return _usage("align --base <sha hexadécimal complet>")
+        res = align_worktree(os.getcwd(), args[2])
+        print(json.dumps(res, ensure_ascii=False))
+        return 0 if res["ok"] else 2
     if not args or args[0] not in ("apply", "cleanup"):
-        return _usage("sous-commande attendue : apply | cleanup | --self-test")
+        return _usage("sous-commande attendue : base | align | apply | cleanup | --self-test")
     parsed = _parse_batch(args[1:])
     if isinstance(parsed, str):
         return _usage(f"{args[0]} --base <sha> --slice <id> <worktree> [...] : " + parsed)
@@ -599,6 +737,22 @@ class _Fx:
         for sid, wt in pairs:
             args += ["--slice", sid, wt]
         return self.run(*args)
+
+    def base_cmd(self, cwd: str | None = None) -> tuple[int, dict, str]:
+        return self.run("base", cwd=cwd)
+
+    def align(self, wt: str, base: str | None = None, cwd: str | None = None) -> tuple[int, dict, str]:
+        return self.run("align", "--base", base or self.base, cwd=cwd or wt)
+
+    def foundation(self) -> None:
+        """Fondation non commitée dans le principal : fichier modifié, fichier neuf, ignoré, état."""
+        self.write(self.main, "src/a.txt", "a-found\n")
+        self.write(self.main, "src/found.txt", "found\n")
+        self.write(self.main, "bin/x", "ignored\n")
+        self.write(self.main, ".legion/battles/B/extra.md", "state\n")
+
+    def tree_of(self, commit: str) -> list[str]:
+        return self.git(self.main, "ls-tree", "-r", "--name-only", commit).split()
 
     def worktrees(self) -> list[str]:
         return [os.path.realpath(l[len("worktree "):]) for l in
@@ -990,13 +1144,213 @@ def _t_f22_cleanup_mode_lost() -> None:
     _with_fx("F22", body)
 
 
+def _t_b1_base_nominal() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.foundation()
+        rc, out, _ = fx.base_cmd()
+        assert rc == 0 and out["ok"] is True and out["frozen"] is True, (rc, out)
+        base, head = out["base"], fx.git(fx.main, "rev-parse", "HEAD").strip()
+        assert base != head and out["head"] == head and out["files"] == 2, out
+        fx.git(fx.main, "merge-base", "--is-ancestor", head, base)
+        files = fx.tree_of(base)
+        assert "src/found.txt" in files and not any(f.startswith(("bin/", ".legion/")) for f in files), files
+        assert fx.git(fx.main, "show", f"{base}:src/a.txt") == "a-found\n"
+    _with_fx("B1", body)
+
+
+def _t_b2_base_clean_fallback() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.main, "bin/x", "ignored\n")
+        fx.write(fx.main, ".legion/battles/B/extra.md", "state\n")
+        rc, out, _ = fx.base_cmd()
+        head = fx.git(fx.main, "rev-parse", "HEAD").strip()
+        assert rc == 0 and out["base"] == head and out["frozen"] is False, (rc, out)
+    _with_fx("B2", body)
+
+
+def _t_b3_base_unignored_state() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.write(fx.main, ".gitignore", "bin/\n")                    # `.legion/` et `.claude/` non ignorés
+        fx.write(fx.main, ".legion/battles/B/extra.md", "state\n")
+        rc, out, _ = fx.base_cmd()
+        assert rc == 0 and out["frozen"] is True, (rc, out)
+        files = fx.tree_of(out["base"])
+        assert not any(f.startswith((".legion", ".claude")) for f in files), files
+        assert fx.git(fx.main, "show", f"{out['base']}:.gitignore") == "bin/\n"
+        entries = fx.git(fx.main, "ls-tree", "-r", out["base"])
+        assert "160000" not in entries, entries
+    _with_fx("B3", body)
+
+
+def _t_b4_base_invariants() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.foundation()
+        before = (fx.git(fx.main, "rev-parse", "HEAD"), fx.git(fx.main, "ls-files", "-s"),
+                  fx.git(fx.main, "for-each-ref"), fx.fingerprint(tmp), fx.git(fx.main, "branch"))
+        rc, out, _ = fx.base_cmd()
+        assert rc == 0 and out["frozen"] is True, out
+        after = (fx.git(fx.main, "rev-parse", "HEAD"), fx.git(fx.main, "ls-files", "-s"),
+                 fx.git(fx.main, "for-each-ref"), fx.fingerprint(tmp), fx.git(fx.main, "branch"))
+        assert before == after
+    _with_fx("B4", body)
+
+
+def _t_b5_base_nested_repo() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        nested = os.path.join(fx.main, "src", "nested")
+        os.makedirs(nested)
+        fx.git(nested, "init", "-q")
+        fx.write(nested, "f.txt", "f\n")
+        fx.git(nested, "add", "-A")
+        fx.git(nested, "commit", "-q", "-m", "n")
+        before = fx.git(fx.main, "for-each-ref")
+        rc, out, _ = fx.base_cmd()
+        assert rc == 2 and out["refused"] is True and "gitlink" in out["reason"], (rc, out)
+        assert fx.git(fx.main, "for-each-ref") == before
+    _with_fx("B5", body)
+
+
+def _t_b6_base_context() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        rc, out, _ = fx.base_cmd(cwd=fx.w1)
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        rc, out, _ = fx.base_cmd(cwd=os.path.join(fx.main, "src"))
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        fx.set_battle(allow=())
+        rc, out, _ = fx.base_cmd()
+        assert rc == 2 and out["refused"] is True and "armé" in out["reason"], (rc, out)
+        rc, _, err = fx.run("base", "extra")
+        assert rc == 1 and err.strip()
+    _with_fx("B6", body)
+
+
+def _t_a1_align_nominal() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.foundation()
+        base = fx.base_cmd()[1]["base"]
+        rc, out, _ = fx.align(fx.w1, base)
+        assert rc == 0 and out["ok"] is True and out["aligned"] is True and out["head"] == base, (rc, out)
+        assert fx.git(fx.w1, "rev-parse", "HEAD").strip() == base
+        assert fx.read(fx.w1, "src/found.txt") == b"found\n" and fx.read(fx.w1, "src/a.txt") == b"a-found\n"
+        assert fx.git(fx.w1, "status", "--porcelain", "-uall") == ""
+        rc, out, _ = fx.align(fx.w1, base)
+        assert rc == 0 and out["aligned"] is False, out
+    _with_fx("A1", body)
+
+
+def _t_a2_align_branch() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.foundation()
+        base = fx.base_cmd()[1]["base"]
+        fx.git(fx.w1, "checkout", "-q", "-b", "harness/x")
+        rc, out, _ = fx.align(fx.w1, base)
+        assert rc == 0 and out["aligned"] is True, (rc, out)
+        assert fx.git(fx.main, "rev-parse", "harness/x").strip() == base
+        assert fx.git(fx.w1, "symbolic-ref", "HEAD").strip() == "refs/heads/harness/x"
+    _with_fx("A2", body)
+
+
+def _t_a3_align_refusals() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.foundation()
+        base = fx.base_cmd()[1]["base"]
+        fx.write(fx.w1, "src/dirty.txt", "mine\n")                   # worktree sale
+        rc, out, _ = fx.align(fx.w1, base)
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        assert fx.read(fx.w1, "src/dirty.txt") == b"mine\n"
+        assert fx.git(fx.w1, "rev-parse", "HEAD").strip() == fx.base
+        fx.git(fx.w2, "checkout", "-q", "--orphan", "other")          # HEAD sans lien
+        fx.git(fx.w2, "commit", "-q", "-m", "unrelated")
+        head2 = fx.git(fx.w2, "rev-parse", "HEAD")
+        rc, out, _ = fx.align(fx.w2, base)
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        assert fx.git(fx.w2, "rev-parse", "HEAD") == head2
+        rc, out, _ = fx.align(fx.main, base, cwd=fx.main)             # depuis le principal
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        assert fx.git(fx.main, "rev-parse", "HEAD").strip() == fx.base
+        rc, out, _ = fx.align(fx.wt_out, base)                        # hors .claude/worktrees/
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        os.remove(os.path.join(fx.w1, "src", "dirty.txt"))
+        rc, out, _ = fx.align(fx.w1, "0" * 40)                        # base inconnue
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        rc, out, _ = fx.align(fx.w1, base, cwd=os.path.join(fx.w1, "src"))   # sous-dossier
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        for a in (["align"], ["align", "--base"], ["align", "--base", "zz"],
+                  ["align", "--base", base, "x"]):
+            rc, out, err = fx.run(*a, cwd=fx.w1)
+            assert rc == 1 and err.strip() and out == {}, (a, rc, err)
+    _with_fx("A3", body)
+
+
+def _t_a4_align_base_is_head() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        rc, out, _ = fx.base_cmd()
+        assert out["base"] == fx.base and out["frozen"] is False, out
+        rc, out, _ = fx.align(fx.w1, fx.base)
+        assert rc == 0 and out["ok"] is True and out["aligned"] is False, (rc, out)
+    _with_fx("A4", body)
+
+
+def _t_e1_end_to_end() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.foundation()
+        fx.git(fx.main, "worktree", "remove", "--force", fx.wt_out)
+        fx.git(fx.w1, "checkout", "-q", "-b", "harness/x")
+        rc, out, _ = fx.base_cmd()
+        assert rc == 0 and out["frozen"] is True, out
+        base = out["base"]
+        fx.base = base
+        snap = os.path.join(tmp, "s1.json")
+        rc, s1 = fx.ac("tree-snapshot", "--out", snap)
+        assert rc == 0, s1
+        head, idx = fx.git(fx.main, "rev-parse", "HEAD"), fx.git(fx.main, "ls-files", "-s")
+        for wt in (fx.w1, fx.w2):
+            rc, out, _ = fx.align(wt, base)
+            assert rc == 0 and out["aligned"] is True, (wt, out)
+        fx.write(fx.w1, "src/a.txt", "a-builder\n")
+        fx.write(fx.w1, "src/found.txt", "found-builder\n")
+        fx.write(fx.w2, "docs/u2.txt", "u2\n")
+        rc, ver = fx.ac("tree-verify", "--before", snap, "--fingerprint", s1["fingerprint"],
+                        "--batch-worktrees")
+        assert rc == 0 and ver["ok"] is True, ver
+        rc, res, _ = fx.apply(*fx.both())
+        assert rc == 0 and res["ok"] is True, res
+        assert fx.read(fx.main, "src/a.txt") == b"a-builder\n"
+        assert fx.read(fx.main, "src/found.txt") == b"found-builder\n"
+        assert fx.read(fx.main, "docs/u2.txt") == b"u2\n"
+        assert fx.git(fx.main, "rev-parse", "HEAD") == head and fx.git(fx.main, "ls-files", "-s") == idx
+        rc, ver = fx.ac("tree-verify", "--before", snap, "--fingerprint", s1["fingerprint"], "--guard")
+        assert rc == 0 and ver["ok"] is True, ver
+        fx.set_battle(statuses=("done", "done"))
+        rc, out, _ = fx.cleanup(*fx.both())
+        assert rc == 0 and out["ok"] is True and out["kept"] == [], (rc, out)
+        assert fx.worktrees() == [fx.main] and "harness/x" not in fx.branches(), fx.worktrees()
+    _with_fx("E1", body)
+
+
+def _t_e2_not_aligned() -> None:
+    def body(fx: _Fx, tmp: str) -> None:
+        fx.foundation()
+        base = fx.base_cmd()[1]["base"]
+        fx.write(fx.w1, "docs/u1.txt", "u1\n")                       # w1 jamais aligné
+        before = (fx.read(fx.main, "src/a.txt"), fx.git(fx.main, "rev-parse", "HEAD"))
+        rc, out, _ = fx.apply(("slice-1", fx.w1), base=base)
+        assert rc == 2 and out["refused"] is True and "descend" in out["reason"], (rc, out)
+        assert (fx.read(fx.main, "src/a.txt"), fx.git(fx.main, "rev-parse", "HEAD")) == before
+        assert fx.read(fx.main, "docs/u1.txt") is None
+    _with_fx("E2", body)
+
+
 _TESTS = (_t_import_smoke, _t_f1_nominal, _t_f2_order, _t_f3_overlap, _t_f4_dirty_main,
           _t_f5_untracked_present, _t_f6_out_of_scope_and_deny, _t_f7_legion_forced,
           _t_f8_committed_and_dirty, _t_f9_head_not_descendant, _t_f10_invalid_worktrees,
           _t_f11_slice_problems, _t_f12_fail_closed, _t_f13_nested_repo, _t_f14_state_untouched,
           _t_f15_integrity_envelope, _t_f16_cleanup_nominal, _t_f17_cleanup_before_apply,
           _t_f18_cleanup_branch_kept, _t_f19_usage, _t_f20_bounded_output, _t_f21_mode_and_symlink,
-          _t_f22_cleanup_mode_lost)
+          _t_f22_cleanup_mode_lost, _t_b1_base_nominal, _t_b2_base_clean_fallback,
+          _t_b3_base_unignored_state, _t_b4_base_invariants, _t_b5_base_nested_repo,
+          _t_b6_base_context, _t_a1_align_nominal, _t_a2_align_branch, _t_a3_align_refusals,
+          _t_a4_align_base_is_head, _t_e1_end_to_end, _t_e2_not_aligned)
 
 
 def _self_test() -> int:
