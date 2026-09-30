@@ -228,7 +228,7 @@ lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `bump-autocorrect`, `invalidate`, `set-delivery`,
-`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`). `build done` exige que toutes les
+`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`). Sans `--repo`, la racine d'état du CLI suit celle des hooks : depuis un worktree lié, c'est le dépôt principal (battle active) ; `init` et `activate` visent toujours le dépôt principal ; `--repo` explicite prime. `build done` exige que toutes les
 slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
 pendant un re-plan ouvert (`approved_at` à `null`) ou tant que `build` est `pending`
 (déclarer les slices **avant** `approve-plan`) ; sans id, elle vide la liste (BUILD agrégé,

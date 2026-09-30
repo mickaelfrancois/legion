@@ -24,7 +24,9 @@ session's context.
 > `reason` to the user and **do not advance**. The script enforces the phase
 > preconditions and the auto-correction budgets; you no longer re-check them by hand.
 > `set-delivery --pr-json <file>` records the PR/CI state read by `gh`; the script only
-> parses the file and never touches the network.
+> parses the file and never touches the network. Without `--repo`, the script resolves the state
+> root like the hooks: from a linked worktree it targets the **main repo** (the active battle
+> there); `init` and `activate` always target the main repo. An explicit `--repo <path>` wins.
 > Reading `battle.json` with `Read` stays allowed.
 
 > **Surfacing commands to the user — always namespace them.** This plugin's
@@ -479,7 +481,8 @@ path, `slice_id`, the `guard.allow` globs from `battle.json`, and — when set �
 `stack.build_target` (the explicit build target for a repo without a `.sln`). Pass the battle
 dir and the `plan.md` path as **absolute paths in the main repo** (`<main>/.legion/battles/<id>/`,
 `<main>` = the main checkout). An isolated builder writes `build-report.md` at that absolute
-path, never into the `.legion/` of its own worktree; the hooks resolve the battle from the main
+path, never into the `.legion/` of its own worktree; the hooks and the state CLIs (`battle_state.py`,
+`artifact_check.py --guard`) resolve the battle from the main
 repo (`git rev-parse --git-common-dir`). After a parallel batch, check that `build-report.md`
 holds one `## <slice_id>` section per slice. For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep

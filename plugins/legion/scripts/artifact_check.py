@@ -47,7 +47,8 @@ compris par Bash. `tree-snapshot` prend une empreinte (HEAD, branche, entrées d
 `battle.json`, masques d'index `assume-unchanged`/`skip-worktree` + `info/exclude`) ; `.legion/`
 et les worktrees enregistrés sont exclus des chemins. `tree-verify` recalcule et compare.
 `--fingerprint` (retenu par l'orchestrateur) protège le fichier `--before` contre une
-réécriture. `--guard` lit `allow`/`deny` de la battle active du cwd (comme `guard.py`) ;
+réécriture. `--guard` lit `allow`/`deny` de la battle active de la racine d'état
+(`battle_state.resolve_state_root` : dépôt principal depuis un worktree lié, comme `guard.py`) ;
 `--base` compare un worktree à un arbre propre au commit donné. Fail-closed : hors dépôt,
 `git` absent, fichier illisible → refus (exit 2), jamais `ok`.
 """
@@ -698,7 +699,11 @@ def tree_snapshot(out: str, root_arg: str | None) -> dict:
 
 
 def _load_guard_filter() -> dict:
-    """`allow`/`deny` de la battle active du cwd (`--guard`). `_Refuse` si illisible/invalide."""
+    """`allow`/`deny` de la battle active de la racine d'état (`--guard`).
+
+    Racine d'état = `battle_state.resolve_state_root(cwd)` : dépôt principal depuis un worktree
+    lié, sinon le cwd. Distincte de la racine d'arbre (`_toplevel`, racine d'édition).
+    `_Refuse` si illisible/invalide."""
     try:
         if _SCRIPTS_DIR not in sys.path:
             sys.path.insert(0, _SCRIPTS_DIR)
@@ -706,7 +711,7 @@ def _load_guard_filter() -> dict:
         from pathlib import Path
     except Exception as exc:  # noqa: BLE001
         raise _Refuse(f"battle_state.py inimportable ({type(exc).__name__}: {exc})") from exc
-    active = bs.load_active_battle(Path(os.getcwd()))
+    active = bs.load_active_battle(bs.resolve_state_root(Path(os.getcwd())))
     if active is None:
         raise _Refuse("--guard : aucune battle active lisible (fail-closed)")
     guard, valid = bs.guard_of(active[1])
@@ -1702,13 +1707,40 @@ def _t_tree_refs_and_worktrees() -> None:
         assert rc == 2 and "[git-state]" in out["changed"], out
 
 
+def _t_tree_guard_from_worktree() -> None:
+    """GH#128 : `--guard` lancé depuis un worktree lié lit la battle du dépôt principal."""
+    with _TreeRepo() as r:
+        base = r.git("rev-parse", "HEAD").strip()
+        wt = os.path.join(r.root, ".claude", "worktrees", "w1")
+        r.git("worktree", "add", "-q", "-b", "wt1", wt)
+        r.battle({"allow": ["src/**"]})
+        snap = os.path.join(r.root, ".legion", "_wt-before.json")
+        rc, out = r.run("tree-snapshot", "--out", snap, cwd=wt)                        # A1
+        assert rc == 0 and out["ok"] is True, (rc, out)
+        fp = out["fingerprint"]
+        os.makedirs(os.path.join(wt, "src"), exist_ok=True)
+        _write(os.path.join(wt, "src", "n.txt"), b"1")
+        rc, out = r.run("tree-verify", "--before", snap, "--fingerprint", fp, "--guard", cwd=wt)
+        assert rc == 0 and out["ok"] is True, out
+        os.makedirs(os.path.join(wt, "docs"), exist_ok=True)
+        _write(os.path.join(wt, "docs", "z.txt"), b"1")
+        rc, out = r.run("tree-verify", "--before", snap, "--fingerprint", fp, "--guard", cwd=wt)
+        assert rc == 2 and out["out_of_scope"] == ["docs/z.txt"], out
+        rc, out = r.run("tree-verify", "--base", base, "--root", wt, "--guard", cwd=wt)  # A2
+        assert rc == 2 and out["out_of_scope"] == ["docs/z.txt"], out
+        os.remove(os.path.join(r.root, ".legion", "active-battle"))                    # A3
+        rc, out = r.run("tree-verify", "--base", base, "--root", wt, "--guard", cwd=wt)
+        assert rc == 2 and out["refused"] is True, out
+
+
 _TREE_TESTS = (
     _t_tree_git_state, _t_tree_refs_and_worktrees,
     _t_tree_git_config_and_hooks, _t_tree_forced_git_options, _t_tree_empty_commit_and_ignores,
     _t_tree_diff_pure, _t_tree_changes, _t_tree_dirty_start, _t_tree_index_and_head,
     _t_tree_ignored_and_legion, _t_tree_state, _t_tree_index_mask, _t_tree_crlf,
     _t_tree_allow_filter, _t_tree_guard, _t_tree_usage, _t_tree_refusals, _t_tree_no_git,
-    _t_tree_special_files, _t_tree_worktrees, _t_tree_stdout_bounded, _t_tree_nested_repo,
+    _t_tree_special_files, _t_tree_worktrees, _t_tree_guard_from_worktree,
+    _t_tree_stdout_bounded, _t_tree_nested_repo,
 )
 
 _TESTS = (_t_absent, _t_empty, _t_not_canonical, _t_relative_equals_absolute,

@@ -25,7 +25,9 @@ Lecteurs partagés (hooks, GH#85), en lecture seule, sans exception : `active_ba
 `battles_dir(root)` et `guard_of(battle) -> (dict | None, bool)` (GH#104 : bloc `guard` et sa
 validité ; pur, ne lève jamais ; source unique de la forme valide, partagée avec `validate`),
 `resolve_state_root(cwd) -> Path` (GH#68 : racine de l'état `.legion/` ; dans un worktree lié, le
-dépôt principal si une battle y est active, sinon le cwd ; ne lève jamais).
+dépôt principal si une battle y est active, sinon le cwd ; ne lève jamais), `main_repo_root(cwd)
+-> Path` (GH#128 : le dépôt principal d'un worktree lié même sans battle active, sinon le cwd ;
+utilisé par `init` / `activate`).
 
 Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
@@ -69,7 +71,8 @@ Cœur pur :
   écrit `phases.<p>.covers` (ids des slices `done`), remis à `null` avec le verdict.
 
 Usage (options globales `--battle <id>` défaut : pointeur `.legion/active-battle`, et
-`--repo <path>` défaut : cwd) :
+`--repo <path>` défaut : dépôt principal depuis un worktree lié — battle active pour les
+lectures/mutations, toujours pour `init`/`activate` (GH#128) — sinon le cwd) :
     python battle_state.py init <id> --ticket T --title T --profile P [--step] [--required-gates g…]
     python battle_state.py transition <phase> <status> [--verdict v] [--fails json]
                                       [--round n] [--threads json]
@@ -1075,6 +1078,32 @@ def _pick_state_root(cwd: Path, git_dir: str, common_dir: str, main_has_battle: 
     return cd.parent if main_has_battle else cwd
 
 
+def _linked_main_root(cwd: Path) -> Path | None:
+    """Dépôt principal d'un worktree lié non bare (GH#128, partagé par `resolve_state_root` et
+    `main_repo_root`), chemin réel ; `None` sinon. Chemin rapide sans sous-processus quand
+    `cwd/.git` est un dossier. Toute erreur (git absent, délai, code != 0, sortie incomplète)
+    donne `None`. L'environnement git hérité est nettoyé. Ne lève jamais.
+    """
+    try:
+        cwd = Path(cwd)
+        if (cwd / ".git").is_dir():
+            return None
+        env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--git-dir", "--git-common-dir"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2, env=env)
+        if proc.returncode != 0:
+            return None
+        lines = proc.stdout.splitlines()
+        if len(lines) < 2:
+            return None
+        git_dir, common_dir = lines[0].strip(), lines[1].strip()
+        picked = _pick_state_root(cwd, git_dir, common_dir, True)
+        return None if picked == cwd else picked
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return None
+
+
 def resolve_state_root(cwd: Path) -> Path:
     """Racine de l'état `.legion/` pour un `cwd` (GH#68). Lecture seule, ne lève jamais.
 
@@ -1084,25 +1113,33 @@ def resolve_state_root(cwd: Path) -> Path:
     sortie incomplète) renvoie `cwd` tel quel. L'environnement git hérité est nettoyé.
     """
     try:
-        cwd = Path(cwd)
-        if (cwd / ".git").is_dir():
-            return cwd
-        env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
-        proc = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--git-dir", "--git-common-dir"],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2, env=env)
-        if proc.returncode != 0:
-            return cwd
-        lines = proc.stdout.splitlines()
-        if len(lines) < 2:
-            return cwd
-        git_dir, common_dir = lines[0].strip(), lines[1].strip()
-        cd = Path(common_dir)
-        cd = Path(os.path.realpath(cd if cd.is_absolute() else cwd / cd))
-        has_battle = active_battle_id(cd.parent) is not None
-        return _pick_state_root(cwd, git_dir, common_dir, has_battle)
+        main = _linked_main_root(cwd)
+        if main is not None and active_battle_id(main) is not None:
+            return main
+        return Path(cwd)
     except Exception:  # noqa: BLE001 - contrat : jamais d'exception
         return Path(cwd) if isinstance(cwd, (str, os.PathLike)) else cwd
+
+
+def main_repo_root(cwd: Path) -> Path:
+    """Dépôt principal pour un `cwd` (GH#128) : celui d'un worktree lié non bare, même sans battle
+    active, sinon le `cwd`. Utilisé par `init` / `activate`. Lecture seule, ne lève jamais."""
+    try:
+        main = _linked_main_root(cwd)
+        return main if main is not None else Path(cwd)
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return Path(cwd) if isinstance(cwd, (str, os.PathLike)) else cwd
+
+
+def _cli_root(args, cwd: Path) -> Path:
+    """Racine d'état du CLI (GH#128). `--repo` non vide l'emporte ; sinon `init` / `activate`
+    visent toujours le dépôt principal (`main_repo_root`), les autres `resolve_state_root`."""
+    repo = getattr(args, "repo", None)
+    if repo:
+        return Path(repo)
+    if getattr(args, "cmd", None) in ("init", "activate"):
+        return main_repo_root(cwd)
+    return resolve_state_root(cwd)
 
 
 def _write_pointer(root: Path, value: str) -> None:
@@ -1202,7 +1239,7 @@ def _build_parser_parts():
     publique d'argparse) donne les sous-commandes dans l'ordre de déclaration."""
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--battle", default=argparse.SUPPRESS, help="id (défaut : pointeur active-battle)")
-    common.add_argument("--repo", default=argparse.SUPPRESS, help="racine du dépôt (défaut : cwd)")
+    common.add_argument("--repo", default=argparse.SUPPRESS, help="racine de l'état (défaut : dépôt principal depuis un worktree lié — battle active pour les lectures/mutations, toujours pour init/activate — sinon le cwd)")
     p = _Parser(prog="battle_state.py", parents=[common],
                 description="Transitions d'état déterministes de battle.json")
     sub = p.add_subparsers(dest="cmd", parser_class=_Parser)
@@ -1443,14 +1480,15 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
     raise _Refuse(f"sous-commande inconnue : {cmd}")  # pragma: no cover
 
 
-def run_command(argv: list[str], upsert=None, fleet_dir=None) -> tuple[int, dict]:
+def run_command(argv: list[str], upsert=None, fleet_dir=None, cwd=None) -> tuple[int, dict]:
     """Exécute une sous-commande. Retourne (code, résultat JSON). Ne lève jamais.
-    `upsert`/`fleet_dir` : injection pour les tests (sinon `fleet_sync` réel)."""
+    `upsert`/`fleet_dir` : injection pour les tests (sinon `fleet_sync` réel) ; `cwd` : répertoire
+    de départ de la résolution de racine (défaut `Path.cwd()`, GH#128)."""
     try:
         args = _build_parser().parse_args(argv)
         if not args.cmd:
             raise _Refuse("usage invalide : sous-commande requise")
-        root = Path(getattr(args, "repo", None) or Path.cwd())
+        root = _cli_root(args, Path(cwd) if cwd else Path.cwd())
         explicit = getattr(args, "battle", None)
         result: dict = {"ok": True}
         mutation_warnings: list[str] = []
@@ -2889,11 +2927,12 @@ def _t_fleet_sync_called() -> None:
         assert json.loads(shards[0].read_text(encoding="utf-8"))["id"] == "b1"
 
 
-def _cli(tmp: str, *argv: str) -> tuple[int, dict]:
+def _cli(tmp: str, *argv: str, cwd=None) -> tuple[int, dict]:
     import subprocess
     env = dict(os.environ, LEGION_FLEET=str(Path(tmp) / "fleet.json"))
     p = subprocess.run([sys.executable, str(Path(__file__).resolve()), *argv], env=env,
-                       capture_output=True, text=True, encoding="utf-8", timeout=60)
+                       capture_output=True, text=True, encoding="utf-8", timeout=60,
+                       cwd=str(cwd) if cwd else None)
     assert "Traceback" not in p.stderr, p.stderr
     return p.returncode, json.loads(p.stdout)
 
@@ -2915,7 +2954,7 @@ def _t_cli_exit_codes() -> None:
         repo = Path(td) / "repo"
         repo.mkdir()
         g = ["--repo", str(repo)]
-        code, res = _cli(td, *g, "init", "b1", "--ticket", "GH#1", "--title", "T", "--profile", "feature")
+        code, res = _cli(td, *g, "init", "b1", "--ticket", "GH#1", "--title", "T", "--profile", "feature", "--profile", "feature")
         assert code == 0 and res["ok"] is True
         code, res = _cli(td, *g, "transition", "plan", "in_progress")   # think pas done
         assert code == 2 and res["ok"] is False and "think" in res["reason"]
@@ -2964,7 +3003,7 @@ def _t_cli_exit_codes() -> None:
 def _t_id_whitelist() -> None:
     with _Repo() as r:
         for bad in ("D:x", "a/b", "a\\b", "..", ".", "-x", "a b", "a_b", "é", "x:y"):
-            reason = r.refused("init", bad, "--ticket", "T", "--title", "T", "--profile", "feature")
+            reason = r.refused("init", bad, "--ticket", "T", "--title", "T", "--profile", "feature", "--profile", "feature")
             assert "invalide" in reason, (bad, reason)
         r.init("2026-09-29-GH-69")
         # lien symbolique sortant de .legion/battles/
@@ -2974,7 +3013,7 @@ def _t_id_whitelist() -> None:
             (r.root / ".legion" / "battles" / "lnk").symlink_to(outside, target_is_directory=True)
         except (OSError, NotImplementedError):
             return
-        reason = r.refused("init", "lnk", "--ticket", "T", "--title", "T", "--profile", "feature")
+        reason = r.refused("init", "lnk", "--ticket", "T", "--title", "T", "--profile", "feature", "--profile", "feature")
         assert "hors de" in reason and not list(outside.iterdir())
 
 
@@ -3281,26 +3320,26 @@ def _t_commands_refused_after_abort_cli() -> None:
 
 def _t_init_profiles() -> None:
     with _Repo() as r:
-        res = r.ok("init", "h1", "--ticket", "GH#1", "--title", "T", "--profile", "hotfix")
+        res = r.ok("init", "h1", "--ticket", "GH#1", "--title", "T", "--profile", "feature", "--profile", "hotfix")
         assert res["profile"] == "hotfix" and res["required_gates"] == ["lint", "reviewer", "test-engineer"]
         assert r.load("h1")["required_gates"] == ["lint", "reviewer", "test-engineer"]
         for prof in ("security", "spike"):
-            res = r.ok("init", prof, "--ticket", "GH#1", "--title", "T", "--profile", prof)
+            res = r.ok("init", prof, "--ticket", "GH#1", "--title", "T", "--profile", "feature", "--profile", prof)
             assert res["required_gates"] == list(PROFILES[prof])
             b = r.load(prof)
             assert b["required_gates"] == list(PROFILES[prof]) and "security" not in b["phases"]
         res = r.init("f1")
         assert res["required_gates"] == list(DEFAULT_REQUIRED_GATES)
         assert r.load("f1")["run"]["mode"] == "autonomous"
-        r.ok("init", "h2", "--ticket", "GH#1", "--title", "T", "--profile", "hotfix",
+        r.ok("init", "h2", "--ticket", "GH#1", "--title", "T", "--profile", "feature", "--profile", "hotfix",
              "--required-gates", "architect")
         assert r.load("h2")["required_gates"] == ["architect"]
         ptr = (r.root / ".legion" / "active-battle").read_text(encoding="utf-8")
-        reason = r.refused("init", "bad", "--ticket", "GH#1", "--title", "T", "--profile", "bugfix")
+        reason = r.refused("init", "bad", "--ticket", "GH#1", "--title", "T", "--profile", "feature", "--profile", "bugfix")
         assert all(p in reason for p in PROFILES) and "bugfix" in reason
         assert not (r.root / ".legion" / "battles" / "bad").exists()
         assert (r.root / ".legion" / "active-battle").read_text(encoding="utf-8") == ptr
-        assert "invalide" in r.refused("init", "a/b", "--ticket", "T", "--title", "T",
+        assert "invalide" in r.refused("init", "a/b", "--ticket", "T", "--title", "T", "--profile", "feature",
                                        "--profile", "bugfix")
 
 
@@ -3338,7 +3377,7 @@ def _t_validate_profile() -> None:
 
 def _t_hotfix_e2e() -> None:
     with _Repo() as r:
-        r.ok("init", "hf", "--ticket", "GH#1", "--title", "T", "--profile", "hotfix")
+        r.ok("init", "hf", "--ticket", "GH#1", "--title", "T", "--profile", "feature", "--profile", "hotfix")
         r.ok("transition", "think", "done")
         r.ok("transition", "plan", "in_progress")
         r.ok("transition", "plan", "done", "--verdict", "accept")
@@ -3717,9 +3756,169 @@ _RESOLVE_ROOT_TESTS = (
 )
 
 
+# --- CLI : racine d'état par défaut (GH#128) ----------------------------------------------
+
+def _bj(root: Path, bid: str) -> dict:
+    return json.loads((root / ".legion" / "battles" / bid / "battle.json").read_text(encoding="utf-8"))
+
+
+def _seed_battle(tmp: str, main: Path, bid: str = "B") -> None:
+    code, res = _cli(tmp, "--repo", str(main), "init", bid, "--ticket", "GH#1", "--title", "T", "--profile", "feature")
+    assert code == 0, res
+
+
+def _t_cli_worktree_transition() -> None:         # S1
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        (main / ".legion" / "active-battle").unlink()
+        _seed_battle(tmp, main)
+        for w in (wt, wt_out):
+            code, res = _cli(tmp, "transition", "think", "done", cwd=w)
+            assert code == 0, res
+            assert _bj(main, "B")["phases"]["think"]["status"] == "done"
+            assert not (w / ".legion").exists(), w
+    _with_fixture("_t_cli_worktree_transition", body)
+
+
+def _t_cli_worktree_set_guard() -> None:          # S2
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        (main / ".legion" / "active-battle").unlink()
+        _seed_battle(tmp, main)
+        code, res = _cli(tmp, "set-guard", "--allow", "src/**", cwd=wt)
+        assert code == 0, res
+        assert _bj(main, "B")["guard"]["allow"] == ["src/**"]
+        assert not (wt / ".legion").exists()
+    _with_fixture("_t_cli_worktree_set_guard", body)
+
+
+def _t_cli_explicit_repo_wins() -> None:          # S3
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        code, res = _cli(tmp, "--repo", str(wt), "init", "Y", "--ticket", "GH#2", "--title", "T", "--profile", "feature", cwd=wt)
+        assert code == 0, res
+        assert (wt / ".legion" / "battles" / "Y" / "battle.json").exists()
+        assert not (main / ".legion" / "battles" / "Y").exists()
+        _seed_battle(tmp, main)
+        with tempfile.TemporaryDirectory() as out:
+            code, res = _cli(tmp, "--repo", str(main), "validate", cwd=out)
+            assert code == 0, res
+    _with_fixture("_t_cli_explicit_repo_wins", body)
+
+
+def _t_cli_init_from_worktree() -> None:          # S4
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        (main / ".legion" / "active-battle").write_text("", encoding="utf-8")
+        code, res = _cli(tmp, "init", "X", "--ticket", "GH#3", "--title", "T", "--profile", "feature", cwd=wt)
+        assert code == 0, res
+        assert _bj(main, "X")["repo"] == "main"
+        assert active_battle_id(main) == "X"
+        assert not (wt / ".legion").exists()
+        code, res = _cli(tmp, "transition", "think", "done", cwd=wt)
+        assert code == 0, res
+        assert _bj(main, "X")["phases"]["think"]["status"] == "done"
+    _with_fixture("_t_cli_init_from_worktree", body)
+
+
+def _t_cli_init_switches_pointer() -> None:       # S5
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        _seed_battle(tmp, main)
+        assert active_battle_id(main) == "B"
+        code, res = _cli(tmp, "init", "X", "--ticket", "GH#4", "--title", "T", "--profile", "feature", cwd=wt)
+        assert code == 0, res
+        assert (main / ".legion" / "battles" / "X" / "battle.json").exists()
+        assert active_battle_id(main) == "X"
+    _with_fixture("_t_cli_init_switches_pointer", body)
+
+
+def _t_cli_activate_from_worktree() -> None:      # S6
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        _seed_battle(tmp, main)
+        (main / ".legion" / "active-battle").write_text("", encoding="utf-8")
+        code, res = _cli(tmp, "activate", "B", cwd=wt)
+        assert code == 0, res
+        assert active_battle_id(main) == "B"
+        assert not (wt / ".legion").exists()
+    _with_fixture("_t_cli_activate_from_worktree", body)
+
+
+def _t_cli_default_unchanged() -> None:           # S7
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        code, res = _cli(tmp, "init", "M", "--ticket", "GH#5", "--title", "T", "--profile", "feature", cwd=main)
+        assert code == 0, res
+        assert (main / ".legion" / "battles" / "M" / "battle.json").exists()
+        code, res = _cli(tmp, "transition", "think", "done", cwd=main)
+        assert code == 0, res
+        assert _bj(main, "M")["phases"]["think"]["status"] == "done"
+        with tempfile.TemporaryDirectory() as out:
+            code, res = _cli(tmp, "init", "N", "--ticket", "GH#6", "--title", "T", "--profile", "feature", cwd=out)
+            assert code == 0, res
+            assert (Path(out) / ".legion" / "battles" / "N" / "battle.json").exists()
+    _with_fixture("_t_cli_default_unchanged", body)
+
+
+def _t_cli_root_unit() -> None:                   # S8
+    import subprocess as _sp
+    ns = argparse.Namespace
+
+    def body(main, wt, wt_out):
+        (main / "sub").mkdir()
+        assert _cli_root(ns(cmd="init", repo="/x/r"), wt) == Path("/x/r")
+        assert _cli_root(ns(cmd="init", repo=""), main) == main
+        assert _cli_root(ns(cmd="init"), main) == main
+        assert _cli_root(ns(cmd="init"), main / "sub") == main / "sub"
+        assert _rp(_cli_root(ns(cmd="init"), wt)) == _rp(main)
+        assert _rp(_cli_root(ns(cmd="activate"), wt)) == _rp(main)
+        assert _rp(main_repo_root(wt_out)) == _rp(main)
+        (main / ".legion" / "active-battle").write_text("", encoding="utf-8")
+        assert _cli_root(ns(cmd="transition"), wt) == wt       # lecture : principal sans battle
+        assert _rp(_cli_root(ns(cmd="init"), wt)) == _rp(main)  # init : toujours le principal
+    _with_fixture("_t_cli_root_unit", body)
+
+    def bad_code(*a, **k):
+        return _sp.CompletedProcess(a, 128, "", "fatal")
+
+    def missing(*a, **k):
+        raise FileNotFoundError("git")
+    real = _sp.run
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        assert _linked_main_root(d) is None
+        try:
+            for fake in (bad_code, missing):
+                _sp.run = fake
+                assert main_repo_root(d) == d
+                assert _cli_root(ns(cmd="init"), d) == d
+                assert _cli_root(ns(cmd="validate"), d) == d
+        finally:
+            _sp.run = real
+
+
+def _t_cli_help_repo_default() -> None:           # S9
+    parser = _build_parser()
+    helps = [parser.format_help()]
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            helps.append(action.choices["validate"].format_help())
+    for h in helps:
+        assert "défaut : cwd" not in h, h
+    assert "dépôt principal" in helps[-1], helps[-1]
+
+
+_CLI_ROOT_TESTS = (
+    _t_cli_worktree_transition, _t_cli_worktree_set_guard, _t_cli_explicit_repo_wins,
+    _t_cli_init_from_worktree, _t_cli_init_switches_pointer, _t_cli_activate_from_worktree,
+    _t_cli_default_unchanged, _t_cli_root_unit, _t_cli_help_repo_default,
+)
+
+
 def _self_test() -> int:
     failed = 0
-    tests = _CORE_TESTS + _INTEGRATION_TESTS + _RESOLVE_ROOT_TESTS
+    tests = _CORE_TESTS + _INTEGRATION_TESTS + _RESOLVE_ROOT_TESTS + _CLI_ROOT_TESTS
     for fn in tests:
         try:
             fn()
