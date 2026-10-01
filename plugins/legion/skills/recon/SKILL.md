@@ -30,6 +30,12 @@ back as a **« Cadrage »** section on the issue. The payoff is downstream:
   It never proposes a technical approach (layers, design, implementation choices):
   that is the `architect`'s job at PLAN. Exploring the repo to establish facts stays
   allowed.
+- **Decisions belong to the user.** A **fact** can be checked in the repo or the
+  environment (current behaviour, a file, an existing convention): establishing it is
+  your job. A **decision** is about what to build (scope, criterion, trade-off,
+  priority): only the user takes it. Never write a `**Décisions.**` line for a question
+  that was not asked in a round. A recommendation accepted by `ok` or by silence is a
+  valid decision — it was asked.
 
 ## §1 — Preflight
 
@@ -95,36 +101,68 @@ yet), every branch is Missing.
 - **Recommend an answer to every question, with a short justification.** Don't ask
   blank questions: the user reacts to a concrete proposal rather than starting from
   nothing.
+- **Lettered options when there are real alternatives.** Such a question offers **2 to 4
+  lettered options** (a, b, c, d) in their natural order — do not move the recommended
+  one to the top. The ➡️ line gives the recommended **letter** and its justification.
+  Add no « autre » option: a free answer is always accepted (« 2: autre chose… »). Keep
+  an open question only when the answers cannot be listed (a name, a free threshold).
+  Why: without visible alternatives the user can still answer freely, but only by
+  inventing an answer, so in practice they rarely deviate from the recommendation.
 - **Plain text, not `AskUserQuestion`.** A text round lets the user answer only the
   numbers they want to change; the tool forces one interaction per question.
 - **Format of a round:**
   ```markdown
-  **Q1 — <titre court>.** <la question, avec ses options si besoin>
-  ➡️ Recommandé : <réponse> — <justification courte>
+  **Q1 — <titre court>.** <la question>
+  - a. <option>
+  - b. <option>
+  - c. <option>
 
-  **Q2 — …**
+  ➡️ Recommandé : **b** — <justification courte>
+
+  **Q2 — <titre court>.** <question ouverte : réponse non énumérable>
+  ➡️ Recommandé : <réponse> — <justification courte>
   ```
   End the round with one line: « Réponds `ok`, ou seulement les numéros à changer. »
 
 ### Answers by exception
 
 - **`ok` accepts the whole round.** A question left unanswered in a reply **accepts
-  its recommendation**. The user only answers to deviate (« 2: B »).
+  its recommendation**. The user only answers to deviate (« 2: b »).
 - **An answer that contradicts an earlier decision reopens that branch** in the next
   round: its « Décisions » line is **replaced**, never duplicated, and the questions
   that depended on it are asked again.
+- **A discovered fact that contradicts an earlier answer reopens that branch** the same
+  way: present the fact in the next round, ask the question again, and replace its
+  « Décisions » line once the user answers. Never correct the decision yourself — even
+  when the user was wrong about the code, the fact is yours, the decision is theirs.
 
 ### Discipline
 
 - **Explore the repo instead of asking** whenever a question can be settled from the
-  code. Use `Grep`/`Glob`/`Read` to find the existing pattern, the affected files, the
-  current behaviour — then bring the finding to the user, don't make them recite it.
+  code — then bring the finding to the user, don't make them recite it. Pick the tool by
+  the size of the search:
+  - a **known file or symbol** → read it directly (`Read` / `Grep`);
+  - a **large search** (several files, a convention to sweep) → delegate it to an
+    `Explore` sub-agent through the `Agent` tool, **in the background**, so its file
+    dumps stay out of the interview's context.
+- **Never block a round on an exploration.** While `Explore` runs, the round asks the
+  questions that do not depend on it. A question that needs the fact being searched
+  depends on an open answer (see Rounds): it moves to the round after the result. Say
+  so in the round with one line: « En attente d'exploration : <fait> ». If every
+  remaining question waits on an exploration, announce the wait and hold the round
+  until `Explore` returns — do not fall back to a direct large search, which would
+  bring the dumps back into the interview.
+- **Fallback.** `Explore` unavailable, failing or empty → search directly with
+  `Grep` / `Read`. Still nothing → an **assumption to confirm in PLAN** (rule below).
+  Never ask the user for a fact the repo can give.
 - **Verify every code-level claim before it enters the « Cadrage ».** A file, symbol, or
   current-behaviour statement you write into the brief must be checked with `Read`/`Grep`
-  first. If you cannot verify it, frame it as an **assumption to confirm in PLAN** —
-  never assert it as fact. (RETEX: a « Cadrage » named the wrong file as carrying a
-  per-phase visual and omitted the one that actually displayed it; the architect caught
-  it before any code, but a verified claim would have spared the push-back.)
+  first — including every `file:line` an `Explore` sub-agent reports: it reads excerpts,
+  so re-read each one with `Read` before it enters the brief. If you cannot verify it,
+  frame it as an **assumption to confirm in PLAN** — never assert it as fact. (RETEX: a
+  « Cadrage » named the wrong file as carrying a per-phase visual and omitted the one
+  that actually displayed it; the architect caught it before any code, but a verified
+  claim would have spared the push-back.)
 - **State the scope of any rule or check the « Cadrage » proposes.** When the brief
   prescribes a control (a new gate, a threshold, a lint rule…), say **what it applies
   to** — the slice diff vs the whole repo. Scope left implicit defaults wrong: legion's
@@ -187,7 +225,9 @@ pour l'instant" rather than leaving it blank).
 **The `**Décisions.**` rubric** logs one line per question settled during the rounds:
 `- <question courte> → <réponse retenue>`. When the answer departs from your
 recommendation, append ` _(écart : reco « <recommandation> »)_`, so the `architect`
-sees the rejected recommendation without reading the issue. Keep the label
+sees the rejected recommendation without reading the issue. Write the retained answer
+and the recommendation **as text** (the option's wording), never as a bare letter: a
+letter means nothing outside its round. Keep the label
 **exactly** `**Décisions.**`: `/legion:battle start` looks for it to copy these lines
 into `spec.md`. Omit the rubric when no question was asked **and** the issue carries
 no earlier `**Décisions.**` rubric — an earlier one is always kept (see the re-run
@@ -232,10 +272,16 @@ decisions the `architect` must still see.
 - Pre-THINK and stateless: nothing under `.legion/`, no battle started.
 - Pre-scan shown first; only Partial / Missing branches are questioned.
 - Rounds of ≤5 independent numbered questions, a recommended answer + short
-  justification each; `ok` or silence = recommendation accepted; explore the repo
-  before asking.
+  justification each; real alternatives as 2-4 lettered options (➡️ = letter +
+  justification, a free answer still accepted; « Décisions » lines in text, not
+  letters); `ok` or silence = recommendation accepted; explore the repo
+  before asking — large searches via a background `Explore` (never blocking the round),
+  direct `Read`/`Grep` otherwise; every `file:line` re-checked with `Read`.
 - A contradicting answer reopens its branch and replaces its « Décisions » line.
 - Stays on the WHAT: no technical approach, that is the `architect`'s job.
+- Decisions belong to the user: facts are yours, decisions are theirs; no « Décisions »
+  line without a question asked in a round; a contradicting fact reopens the branch,
+  never a silent correction.
 - « Cadrage » in French; identifiers English.
 - Confirm before the `gh issue edit`; degrade to paste-ready output if `gh` is absent.
 - Pose the `legion-recon` label at the outward write (both the `gh issue edit` and the
