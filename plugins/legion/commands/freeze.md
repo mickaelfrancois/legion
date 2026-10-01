@@ -5,8 +5,9 @@ argument-hint: <glob> [<glob> ...] | off
 
 Set the write perimeter of the **active battle**. Arguments: `$ARGUMENTS`
 
-1. Resolve the active battle: read `.legion/active-battle` (battle id), then
-   `.legion/battles/<id>/battle.json`. If there is no active battle, say so and
+1. Resolve the active battle: read `<state>/.legion/active-battle` (battle id), then
+   `<state>/.legion/battles/<id>/battle.json`, where `<state>` is the main repo root (even when
+   the session runs in the battle's worktree). If there is no active battle, say so and
    stop — `/freeze` only applies inside a battle.
 
 2. Update the perimeter through the state script:

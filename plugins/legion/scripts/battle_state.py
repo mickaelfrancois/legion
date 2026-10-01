@@ -91,9 +91,11 @@ pour `init`/`activate` (GH#128) — sinon cette racine, ou le cwd hors dépôt) 
     python battle_state.py bump-autocorrect <phase> (--fails <json> | --build-failure)
     python battle_state.py invalidate [--reason R]     # defaut R = manual
     python battle_state.py set-delivery (--pr-url <url> | --pr-json <fichier>)
+                                    # --pr-json persiste aussi headRefName/headRefOid (GH#152)
     python battle_state.py set-guard [--allow [g…]] [--deny [g…]] [--careful on|off]
     python battle_state.py set-meta [--title] [--profile] [--required-gates …] [--stack-kind]
                                     [--build-target] [--test-target]
+                                    [--worktree-path P --worktree-branch B --worktree-base SHA]
     python battle_state.py set-slices <id> [<id>…] | set-slices --replace [<id>…]
     python battle_state.py slice <id> <in_progress|done|blocked> [--warnings N] [--files [f…]]
     python battle_state.py next-slice                  # lecture seule (ni écriture ni synchro)
@@ -101,6 +103,13 @@ pour `init`/`activate` (GH#128) — sinon cette racine, ou le cwd hors dépôt) 
     python battle_state.py merge-reports               # écrit build-report.md ; exit 2 = rapport manquant
     python battle_state.py activate <id>
     python battle_state.py --self-test   # tests hermétiques, sort 0 offline
+
+Bloc optionnel `worktree` (GH#152) : `{path, branch, base, created_at}`, écrit par `set-meta
+--worktree-path/--worktree-branch/--worktree-base` (les trois ensemble ou aucun). `path` doit être
+`<racine d'état>/.claude/worktrees/<id>`, `branch` un nom de branche git valide, `base` un sha de 40
+hexa. Absent ou `null` = mode en place. `delivery.head_ref` / `delivery.head_oid` : branche et tip de
+la PR (`headRefName` / `headRefOid` de `gh pr view`), posés par `set-delivery --pr-json` s'ils sont
+fournis, remis à `null` par `--pr-url`.
 
 Sortie : un objet JSON sur stdout (`ok`, `reason` si refus). Écriture atomique ; après chaque
 mutation, le shard fleet est réécrit (échec = `warnings`, jamais bloquant).
@@ -914,6 +923,47 @@ def glob_match(rel_path: str, patterns) -> bool:
     return any(glob_to_regex(p).search(rel_path) for p in patterns)
 
 
+_SHA40_RE = re.compile(r"[0-9a-f]{40}")
+_REF_BAD_CHARS = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
+
+
+def _branch_problem(name) -> "str | None":
+    """Contrôle pur d'un nom de branche (règles de `git check-ref-format --branch`). `None` si valide."""
+    if not isinstance(name, str) or not name:
+        return "branche absente ou vide"
+    if name == "@" or name.startswith("-") or name.startswith("/") or name.endswith("/") \
+            or name.endswith(".") or "//" in name or ".." in name or "@{" in name \
+            or _REF_BAD_CHARS.search(name):
+        return f"nom de branche invalide : {name!r}"
+    for part in name.split("/"):
+        if part.startswith(".") or part.endswith(".lock"):
+            return f"nom de branche invalide : {name!r}"
+    return None
+
+
+def _worktree_problem(wt, battle_id=None) -> "str | None":
+    """Contrôle structurel pur du bloc `worktree` (absent ou `null` : valide). `None` si valide."""
+    if wt is None:
+        return None
+    if not isinstance(wt, dict):
+        return "worktree n'est ni un objet ni null"
+    path = wt.get("path")
+    if not isinstance(path, str) or not path:
+        return "worktree.path absent ou vide"
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if len(parts) < 3 or parts[-3:-1] != [".claude", "worktrees"] or not _ID_RE.fullmatch(parts[-1]):
+        return f"worktree.path hors de .claude/worktrees/<id> : {path!r}"
+    if isinstance(battle_id, str) and battle_id and parts[-1] != battle_id:
+        return f"worktree.path : dernier segment {parts[-1]!r} différent de l'id {battle_id!r}"
+    problem = _branch_problem(wt.get("branch"))
+    if problem:
+        return f"worktree.branch : {problem}"
+    base = wt.get("base")
+    if not isinstance(base, str) or not _SHA40_RE.fullmatch(base):
+        return f"worktree.base n'est pas un sha de 40 hexa : {base!r}"
+    return None
+
+
 def validate(battle) -> tuple[list[str], list[str]]:
     """Valide la structure. Champs inconnus tolérés. Retourne (errors, warnings)."""
     errors: list[str] = []
@@ -981,6 +1031,13 @@ def validate(battle) -> tuple[list[str], list[str]]:
                 warnings.append(f"delivery.ci inconnu : {dl['ci']!r}")
             if dl.get("checked_at") is not None and not isinstance(dl["checked_at"], str):
                 warnings.append("delivery.checked_at n'est pas une chaîne")
+            for key in ("head_ref", "head_oid"):
+                if dl.get(key) is not None and not isinstance(dl[key], str):
+                    warnings.append(f"delivery.{key} n'est pas une chaîne")
+    if "worktree" in battle:
+        problem = _worktree_problem(battle["worktree"], battle.get("id"))
+        if problem:
+            errors.append(problem)
     ab = battle.get("aborted")
     if ab is not None and not (isinstance(ab, dict) and ab.get("at")):
         warnings.append("aborted n'est pas un objet avec `at`")
@@ -1054,8 +1111,9 @@ def _check_verdict(el) -> tuple[str, str | None, str | None]:
 
 
 def pr_status_from_gh(obj) -> dict:
-    """Sortie de `gh pr view --json state,mergedAt,statusCheckRollup,url` (déjà parsée) ->
-    `{"pr_state", "ci", "failing"}`. Pure (ni disque ni réseau). `state` fait foi (`mergedAt` est
+    """Sortie de `gh pr view --json state,mergedAt,statusCheckRollup,url[,headRefName,headRefOid]`
+    (déjà parsée) -> `{"pr_state", "ci", "failing"}` (+ `head_ref` / `head_oid` si `headRefName` /
+    `headRefOid` sont des chaînes non vides ; absents ou invalides = clés omises). Pure (ni disque ni réseau). `state` fait foi (`mergedAt` est
     ignoré) ; `ci` : `fail` > `pending` > `pass`, `none` si le rollup est `[]` ou `null` ;
     `failing` : `[{"name", "url"}]` des checks en échec. `ValueError` sur toute entrée invalide."""
     if not isinstance(obj, dict):
@@ -1083,7 +1141,12 @@ def pr_status_from_gh(obj) -> dict:
         ci = "pending"
     else:
         ci = "pass"
-    return {"pr_state": _GH_PR_STATES[state], "ci": ci, "failing": failing}
+    out = {"pr_state": _GH_PR_STATES[state], "ci": ci, "failing": failing}
+    for src, key in (("headRefName", "head_ref"), ("headRefOid", "head_oid")):
+        val = obj.get(src)
+        if isinstance(val, str) and val:
+            out[key] = val
+    return out
 
 
 _CI_TARGET_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -1429,7 +1492,8 @@ def _build_parser_parts():
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--pr-url")
     g.add_argument("--pr-json", help="fichier JSON de `gh pr view --json "
-                                     "state,mergedAt,statusCheckRollup,url` (GH#74)")
+                                     "state,mergedAt,statusCheckRollup,url[,headRefName,headRefOid]` "
+                                     "(GH#74, GH#152)")
     s = add("set-guard")
     s.add_argument("--allow", nargs="*", default=None)
     s.add_argument("--deny", nargs="*", default=None)
@@ -1441,6 +1505,9 @@ def _build_parser_parts():
     s.add_argument("--stack-kind")
     s.add_argument("--build-target")
     s.add_argument("--test-target")
+    s.add_argument("--worktree-path")
+    s.add_argument("--worktree-branch")
+    s.add_argument("--worktree-base")
     s = add("set-slices")
     s.add_argument("ids", nargs="*")  # le refus « au moins un id » vit dans le cœur (--replace : vide permis)
     s.add_argument("--replace", action="store_true",
@@ -1489,7 +1556,18 @@ def _new_battle(root: Path, args) -> dict:
     }
 
 
-def _mutation(args, battle: dict) -> tuple[dict, dict]:
+def _git_branch_check(name: str) -> None:
+    """Confirme `name` avec `git check-ref-format --branch` (best-effort : git absent = ignoré)."""
+    try:
+        res = subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True,
+                             stdin=subprocess.DEVNULL, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if res.returncode != 0:
+        raise _Refuse(f"set-meta : worktree.branch refusée par git check-ref-format : {name!r}")
+
+
+def _mutation(args, battle: dict, root: "Path | None" = None) -> tuple[dict, dict]:
     """Applique la sous-commande `args.cmd` sur `battle` (cœur pur). Retourne (battle, extra)."""
     cmd = args.cmd
     if cmd == "transition":
@@ -1554,7 +1632,7 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
         if args.pr_url is not None:   # nouvelle PR : l'état de suivi repart de zéro
             out["delivery"] = {**(out["delivery"] if isinstance(out.get("delivery"), dict) else {}),
                                "pr_url": args.pr_url, "pr_state": "open", "ci": None,
-                               "checked_at": None}
+                               "checked_at": None, "head_ref": None, "head_oid": None}
             return out, {"pr_url": args.pr_url}
         delivery = out.get("delivery")
         pr_url = delivery.get("pr_url") if isinstance(delivery, dict) else None
@@ -1576,9 +1654,11 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
             raise _Refuse(f"--pr-json : url {gh['url']!r} différente de delivery.pr_url {pr_url!r}")
         checked_at = _now_iso()
         delivery.update(pr_state=status["pr_state"], ci=status["ci"], checked_at=checked_at)
+        heads = {k: status[k] for k in ("head_ref", "head_oid") if k in status}
+        delivery.update(heads)
         return out, {"pr_state": status["pr_state"], "ci": status["ci"],
                      "checked_at": checked_at, "failing": status["failing"],
-                     "ci_fails": ci_fails(status["failing"])}
+                     "ci_fails": ci_fails(status["failing"]), **heads}
     if cmd == "set-guard":
         if args.allow is None and args.deny is None and args.careful is None:
             raise _Refuse("set-guard : aucune option (--allow, --deny ou --careful)")
@@ -1618,6 +1698,25 @@ def _mutation(args, battle: dict) -> tuple[dict, dict]:
                 stack[key] = val or None  # "" => null
                 out["stack"] = stack
                 touched.append(f"stack.{key}")
+        wt_opts = (args.worktree_path, args.worktree_branch, args.worktree_base)
+        if any(v is not None for v in wt_opts):
+            if any(v is None for v in wt_opts):
+                raise _Refuse("set-meta : --worktree-path, --worktree-branch et --worktree-base "
+                              "vont ensemble")
+            bid = out.get("id")
+            wt = {"path": args.worktree_path, "branch": args.worktree_branch,
+                  "base": args.worktree_base, "created_at": _now_iso()}
+            problem = _worktree_problem(wt, bid)
+            if problem:
+                raise _Refuse(f"set-meta : {problem}")
+            if root is not None:
+                expected = Path(root) / ".claude" / "worktrees" / str(bid)
+                if os.path.realpath(args.worktree_path) != os.path.realpath(expected):
+                    raise _Refuse(f"set-meta : worktree.path {args.worktree_path!r} différent de "
+                                  f"{str(expected)!r}")
+            _git_branch_check(args.worktree_branch)
+            out["worktree"] = wt
+            touched.append("worktree")
         if not touched:
             raise _Refuse("set-meta : aucune option")
         return out, {"updated": touched}
@@ -1737,7 +1836,7 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None, cwd=None) -> tuple
                 return 0, {"ok": True, "battle": bid, "required": derive_required_phases(battle)}
             if args.cmd == "merge-reports":  # lit battle.json, écrit build-report.md, pas de synchro
                 return _merge_reports_cmd(bdir, bid, battle)
-            new, extra = _mutation(args, battle)
+            new, extra = _mutation(args, battle, root)
             _save(bdir, new)
             mutation_warnings = extra.pop("_warnings", [])
             result.update(battle=bid, **extra)
@@ -2771,6 +2870,37 @@ def _t_doc_abort_stale() -> None:
     assert "stale=" in fleet and "24" in fleet, "stale / seuil absents de fleet.md"
 
 
+def _t_doc_worktree_mode() -> None:   # GH#152 : doctrine du mode worktree
+    root = Path(__file__).resolve().parents[1]
+    battle_md, retro_md = root / "commands/battle.md", root / "commands/retro.md"
+    if not (battle_md.is_file() and retro_md.is_file()):
+        print("SKIP: _t_doc_worktree_mode (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    battle, retro = battle_md.read_text(encoding="utf-8"), retro_md.read_text(encoding="utf-8")
+    for needle in ("battle_worktree.py\" create", "battle_worktree.py\" close-check",
+                   "battle_worktree.py\" close --battle", "battle_worktree.py\" where",
+                   "--in-place", "set-meta --worktree-path", "EnterWorktree", "ExitWorktree",
+                   "close [<battle-id>]", "## §J"):
+        assert needle in battle, f"{needle!r} absent de battle.md"
+    assert "<state>" in battle and "<state>" in retro, "ancrage <state> absent"
+    # aucun chemin `.legion/` relatif dans un bloc shell (ancrage sur <state>)
+    for name, text in (("battle.md", battle), ("retro.md", retro)):
+        for block in re.findall(r"```.*?```", text, re.S):
+            assert not re.search(r'["\s]\.legion/', block), f"chemin .legion/ relatif dans un bloc de {name}"
+    # §G.1 : pas de checkout en mode worktree ; checkout -b conserve sous --in-place
+    g1 = battle[battle.index("1. **Branch name.**"):battle.index("2. **Commit**")]
+    wt_part = g1[:g1.index("**`--in-place`**")]
+    assert "no `checkout`" in wt_part, "§G.1 worktree : interdiction du checkout absente"
+    assert "git checkout" not in wt_part, "§G.1 worktree : un checkout est present"
+    assert "git checkout -b <me>/<token>" in g1, "§G.1 --in-place : checkout -b perdu"
+    # §D : lot --auto sequentiel en mode worktree
+    d = battle[battle.index("**Mode — `--auto`.**"):battle.index("After build (either mode)")]
+    assert "Exception — worktree mode" in d and "sequential" in d, "§D : repli sequentiel absent"
+    # options validees par liste fermee
+    assert "closed list" in battle and "`--in-place` (no value" in battle, "liste fermee de start"
+
+
 def _t_cascade_refused_during_replan() -> None:
     b = _fx({"think": "done", "plan": ("done", "accept"), "build": "done"})
     b["phases"]["plan"]["approved_at"] = "T0"
@@ -3105,7 +3235,7 @@ _CORE_TESTS = (
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
     _t_slice_report_names, _t_merge_nominal, _t_merge_missing_blank, _t_merge_out_of_scope,
-    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale,
+    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
@@ -3211,6 +3341,75 @@ def _t_set_meta() -> None:
         r.refused("set-meta", "--required-gates", "reviewr")
         r.refused("set-meta")
         assert "bugfix" in r.refused("set-meta", "--profile", "bugfix")
+
+
+_SHA_A = "a" * 40
+
+
+def _wt_args(r: "_Repo", bid="b1", branch="me/152", base=_SHA_A, path=None) -> list:
+    path = path or str(r.root / ".claude" / "worktrees" / bid)
+    return ["set-meta", "--worktree-path", path, "--worktree-branch", branch, "--worktree-base", base]
+
+
+def _t_set_meta_worktree() -> None:
+    with _Repo() as r:
+        r.init()
+        legacy = r.load()
+        assert "worktree" not in legacy and validate(legacy)[0] == []   # battle legacy valide
+        res = r.ok(*_wt_args(r))
+        assert res["updated"] == ["worktree"], res
+        b = r.load()
+        wt = b["worktree"]
+        assert wt["path"] == str(r.root / ".claude" / "worktrees" / "b1") and wt["branch"] == "me/152"
+        assert wt["base"] == _SHA_A and datetime.fromisoformat(wt["created_at"])
+        assert validate(b)[0] == []
+        b["worktree"] = None
+        assert validate(b)[0] == []
+        before = r.path().read_text(encoding="utf-8")
+        assert "ensemble" in r.refused("set-meta", "--worktree-path", str(r.root))
+        assert "ensemble" in r.refused("set-meta", "--worktree-branch", "me/1", "--worktree-base", _SHA_A)
+        assert "worktree.path" in r.refused(*_wt_args(r, path=str(r.root / "autre" / "b1")))
+        assert "worktree.path" in r.refused(*_wt_args(r, path=str(r.root / ".claude" / "worktrees" / "b2")))
+        other = Path(r._td.name) / "ailleurs" / ".claude" / "worktrees" / "b1"
+        assert "différent" in r.refused(*_wt_args(r, path=str(other)))
+        for bad in ("", "-x", "a..b", "a b", "a/", "x.lock", "a@{b", "a~1"):
+            assert "branch" in r.refused(*_wt_args(r, branch=bad)), bad
+        assert "base" in r.refused(*_wt_args(r, base="abc"))
+        assert "base" in r.refused(*_wt_args(r, base="A" * 40))
+        assert r.path().read_text(encoding="utf-8") == before
+    b = _fx()
+    b["id"] = "b1"
+    for wt in ("x", {"path": "/x/.claude/worktrees/b1"},
+               {"path": "/x/y/b1", "branch": "me/1", "base": _SHA_A},
+               {"path": "/x/.claude/worktrees/b1", "branch": "..", "base": _SHA_A},
+               {"path": "/x/.claude/worktrees/b2", "branch": "me/1", "base": _SHA_A}):
+        b["worktree"] = wt
+        assert validate(b)[0], wt
+    b["worktree"] = {"path": "/x/.claude/worktrees/b1", "branch": "me/1", "base": _SHA_A}
+    assert validate(b)[0] == []
+
+
+def _t_set_delivery_head_fields() -> None:
+    assert "head_oid" not in pr_status_from_gh(_gh())
+    st = pr_status_from_gh({**_gh(), "headRefName": "me/152", "headRefOid": _SHA_A})
+    assert st["head_ref"] == "me/152" and st["head_oid"] == _SHA_A
+    assert "head_ref" not in pr_status_from_gh({**_gh(), "headRefName": 5, "headRefOid": ""})
+    with _Repo() as r:
+        r.init()
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
+        res = r.ok("set-delivery", "--pr-json", _write_gh(r, _gh()))   # sans head*
+        d = r.load()["delivery"]
+        assert d["head_ref"] is None and d["head_oid"] is None and "head_oid" not in res
+        res = r.ok("set-delivery", "--pr-json",
+                   _write_gh(r, {**_gh(), "headRefName": "me/152", "headRefOid": _SHA_A}))
+        d = r.load()["delivery"]
+        assert d["head_ref"] == "me/152" and d["head_oid"] == _SHA_A and res["head_oid"] == _SHA_A
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/2")   # nouvelle PR : remis à null
+        d = r.load()["delivery"]
+        assert d["head_ref"] is None and d["head_oid"] is None
+    b = _fx()
+    b["delivery"] = {"pr_url": "u", "head_oid": 5}
+    assert any("head_oid" in x for x in validate(b)[1])
 
 
 def _t_activate_close() -> None:
@@ -3865,7 +4064,8 @@ def _t_set_delivery_pr_json_cli() -> None:
         r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
         before = r.load()
         assert before["delivery"] == {"pr_url": "https://x.test/pr/1", "pr_state": "open",
-                                      "ci": None, "checked_at": None}
+                                      "ci": None, "checked_at": None,
+                                      "head_ref": None, "head_oid": None}
         n = len(r.calls)
         res = r.ok("set-delivery", "--pr-json", _write_gh(r, _red_gh()))
         assert res["pr_state"] == "open" and res["ci"] == "fail"
@@ -3934,7 +4134,7 @@ def _t_set_delivery_pr_url_resets() -> None:
         r.ok("set-delivery", "--pr-url", "https://x.test/pr/2")
         d = r.load()["delivery"]
         assert d == {"pr_url": "https://x.test/pr/2", "pr_state": "open", "ci": None,
-                     "checked_at": None}, d
+                     "checked_at": None, "head_ref": None, "head_oid": None}, d
 
 
 def _t_set_delivery_aborted() -> None:
@@ -4034,7 +4234,8 @@ def _t_merge_reports_subcommand() -> None:        # M16
 
 _INTEGRATION_TESTS = (
     _t_security_hits, _t_security_auto_slice,
-    _t_init_profiles, _t_set_meta_profile, _t_validate_profile, _t_hotfix_e2e,
+    _t_init_profiles, _t_set_meta_profile, _t_set_meta_worktree, _t_set_delivery_head_fields,
+    _t_validate_profile, _t_hotfix_e2e,
     _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_atomic_and_corrupt,
     _t_fleet_sync_called, _t_phases_cs, _t_cli_exit_codes, _t_import_no_side_effect,
     _t_id_whitelist, _t_atomic_keeps_mode, _t_fleet_sync_explicit_path,

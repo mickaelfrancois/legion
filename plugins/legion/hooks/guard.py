@@ -48,6 +48,14 @@ Regles :
   n'est pas bloque par un bloc `guard` invalide). Repli d'import : gate et builder fermes (exit 2),
   session principale silencieuse. Commande non analysable (quote non fermee) -> exit 2. Ne voit ni
   `python -c`, ni `bash -c`, ni `eval` : la garantie est portee par `artifact_check.py tree-verify`.
+- **Checkout principal protege (battle en worktree, GH#152, C8)** : quand la battle active porte
+  un bloc `worktree` dont `path` existe, toute ecriture (Edit/Write/MultiEdit) qui tombe sous la
+  racine d'etat (le checkout principal), hors de `worktree.path`, hors `.legion/**`, hors
+  `.claude/worktrees/**` (autres worktrees, ex. builders isoles) et hors memoire Claude est
+  bloquee (exit 2), session dans le worktree ou dans le principal (repli), guard arme ou non,
+  quel que soit l'appelant non-gate. Bypass `LEGION_GUARD_OFF=1`. Bloc absent / `null` / chemin
+  disparu / `battle.json` illisible : regle sans effet (le fail-closed existant s'applique ensuite).
+  Evaluee apres le confinement des gates et la regle `.legion/` du builder, avant `_load_active_guard`.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -1065,6 +1073,49 @@ def _shell_decision(data: dict, repo_root: Path, state_root: Path | None = None)
     )
 
 
+def _worktree_main_decision(
+    repo_root: Path, state: Path, file_path: str
+) -> tuple[int, str] | None:
+    """Regle C8 (GH#152) : en mode worktree, le checkout principal est ferme a l'ecriture.
+
+    None -> la regle ne s'applique pas (pas de battle active lisible, pas de bloc `worktree`,
+    chemin disparu, cible hors du principal, dans le worktree, sous `.legion/**`, sous
+    `.claude/worktrees/**` ou memoire Claude). (2, message) -> ecriture bloquee.
+    """
+    if not file_path:
+        return None
+    try:
+        active = load_active_battle(state)
+        if active is None:
+            return None
+        battle_id, data = active
+        block = data.get("worktree") if isinstance(data, dict) else None
+        wt_path = block.get("path") if isinstance(block, dict) else None
+        if not isinstance(wt_path, str) or not wt_path.strip() or not Path(wt_path).exists():
+            return None
+        if _is_claude_memory(file_path):
+            return None
+        target = Path(file_path)
+        if not target.is_absolute():
+            target = repo_root / target
+        rel_main = _relative(state, str(target))
+        if rel_main is None:
+            return None  # hors du checkout principal
+        if _relative(Path(wt_path), str(target)) is not None:
+            return None  # dans le worktree de la battle
+        if _matches(rel_main, (ALWAYS_ALLOW[0],)) or _matches(rel_main, (".claude/worktrees/**",)):
+            return None
+    except Exception:  # lecture impossible : le fail-closed existant s'applique ensuite
+        return None
+    return 2, (
+        f"BLOQUE : la battle {battle_id} travaille dans le worktree `{wt_path}` ; "
+        f"le checkout principal (`{state}`) est protege.\n"
+        f"Tentative : `{rel_main}`. Ecris dans le worktree (relance `claude` depuis `{wt_path}` "
+        f"si la session est restee dans le principal).\n"
+        f"Bypass delibere : LEGION_GUARD_OFF=1"
+    )
+
+
 def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tuple[int, str]:
     """Retourne (exit_code, message). exit 2 = blocage.
 
@@ -1142,6 +1193,11 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
             )
         if decision is True:
             return 0, ""
+
+    # Mode worktree (C8) : checkout principal ferme, guard arme ou non.
+    wt_block = _worktree_main_decision(repo_root, state, file_path)
+    if wt_block is not None:
+        return wt_block
 
     active = _load_active_guard(state)
     if active is None:
@@ -2020,6 +2076,71 @@ def _t_guard_wt_compat(bs) -> None:
             os.chdir(real_cwd)
 
 
+def _wt_battle_json(main: Path, wt: Path, allow: str = '["src/**"]', worktree=True) -> None:
+    """`battle.json` de `B` avec bloc `worktree` (path = `wt`), ou sans (`worktree=False`)."""
+    bdir = main / ".legion" / "battles" / "B"
+    bdir.mkdir(parents=True, exist_ok=True)
+    doc = {"guard": {"allow": json.loads(allow)}}
+    if worktree:
+        doc["worktree"] = {"path": str(wt), "branch": "me/1", "base": "0" * 40,
+                           "created_at": "2026-10-01T00:00:00Z"}
+    (bdir / "battle.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _t_guard_wt_main_protected(bs) -> None:
+    """C8 : checkout principal ferme en mode worktree (session dans le worktree, puis dans le principal)."""
+    def body(main, wt, wt_out):
+        _wt_battle_json(main, wt)
+        spec = str(main / ".legion" / "battles" / "B" / "spec.md")
+        for root in (wt, main):   # session dans le worktree, puis repli dans le principal
+            def ev(p, a="claude"):
+                return _ev("Edit", a, p)
+            assert "protege" not in _decide(ev(str(wt / "src" / "x")), root, main)[1], root  # ni C8
+            code, msg = _decide(ev(str(main / "src" / "x")), root, main)
+            assert code == 2 and str(wt) in msg and "LEGION_GUARD_OFF=1" in msg, (root, code, msg)
+            assert _decide(ev(spec), root, main)[0] == 0, root
+            assert "protege" not in _decide(ev(str(main / ".claude" / "worktrees" / "agent-x" / "src" / "a")), root, main)[1]  # ni C8
+            assert "protege" not in _decide(ev(str(wt_out / "src" / "x")), root, main)[1]  # ni C8
+            assert "protege" not in _decide(ev(str(Path.home() / ".claude/projects/p/memory/x.md")), root, main)[1]  # ni C8
+            assert _decide(ev(str(main / "src" / "x"), "legion:builder"), root, main)[0] == 2
+            assert _decide(ev(str(main / "src" / "x"), "legion:lint"), root, main)[0] == 2  # gate : confinement
+        # relatif depuis le worktree : <wt>/src/x permis, <wt>/.legion/x bloque (guard arme)
+        assert _decide(_ev("Edit", "claude", "src/x"), wt, main)[0] == 0
+        assert _decide(_ev("Edit", "claude", ".legion/x"), wt, main)[0] == 2
+        # guard non arme : le principal reste protege
+        _wt_battle_json(main, wt, "[]")
+        assert _decide(_ev("Edit", "claude", str(main / "src" / "x")), wt, main)[0] == 2
+        assert _decide(_ev("Edit", "claude", str(wt / "docs" / "x")), wt, main)[0] == 0
+        # sous-processus reel (cwd = worktree) + bypass
+        _wt_battle_json(main, wt)
+        code, err = _run_hook(_ev("Edit", "claude", str(main / "src" / "x")), wt)
+        assert code == 2 and "protege" in err, (code, err)
+        code, err = _run_hook(_ev("Edit", "claude", str(main / "src" / "x")), wt, LEGION_GUARD_OFF="1")
+        assert code == 0 and "[guard bypass]" in err, (code, err)
+    _with_wt(bs, "_t_guard_wt_main_protected", body)
+
+
+def _t_guard_wt_main_inactive(bs) -> None:
+    """C8 sans effet : bloc absent / null / chemin disparu / invalide ; battle.json illisible = fail-closed existant."""
+    def body(main, wt, wt_out):
+        target = str(main / "src" / "x")
+        _wt_battle_json(main, wt, worktree=False)                     # legacy : decisions d'avant
+        assert _decide(_ev("Edit", "claude", target), main)[0] == 0
+        assert _decide(_ev("Edit", "claude", str(main / "docs" / "x")), main)[0] == 2   # guard arme, hors allow
+        bdir = main / ".legion" / "battles" / "B"
+        (bdir / "battle.json").write_text('{"guard":{"allow":["src/**"]},"worktree":null}', encoding="utf-8")
+        assert _decide(_ev("Edit", "claude", target), main)[0] == 0
+        _wt_battle_json(main, wt_out / "disparu")                      # chemin inexistant
+        assert _decide(_ev("Edit", "claude", target), main)[0] == 0
+        for bad in ('{"guard":{"allow":["src/**"]},"worktree":"x"}',
+                    '{"guard":{"allow":["src/**"]},"worktree":{"path":3}}'):
+            (bdir / "battle.json").write_text(bad, encoding="utf-8")
+            assert _decide(_ev("Edit", "claude", target), main)[0] == 0, bad
+        (bdir / "battle.json").write_text("{pas du json", encoding="utf-8")   # illisible : fail-closed
+        assert _decide(_ev("Edit", "claude", target), main)[0] == 2
+    _with_wt(bs, "_t_guard_wt_main_inactive", body)
+
+
 def _self_test() -> int:
     global _IMPORT_ERROR
     if _IMPORT_ERROR is not None:
@@ -2191,6 +2312,8 @@ def _self_test() -> int:
     _t_guard_wt_invalid(battle_state)
     _t_guard_wt_shell(battle_state)
     _t_guard_wt_compat(battle_state)
+    _t_guard_wt_main_protected(battle_state)
+    _t_guard_wt_main_inactive(battle_state)
 
     print("OK: guard self-test passed", file=sys.stderr)
     return 0

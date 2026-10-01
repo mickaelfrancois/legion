@@ -1,6 +1,6 @@
 ---
-description: Orchestrate a legion battle (start | build | review | test | deliver | address | resume | status | abort). Creates per-repo battle state, runs the gate pipeline, persists artifacts.
-argument-hint: start <issue|slug> [--profile <p>] [--step] | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status | abort [<battle-id>] [--reason <text>]
+description: Orchestrate a legion battle (start | build | review | test | deliver | address | resume | status | close | abort). Creates per-repo battle state, runs the gate pipeline, persists artifacts.
+argument-hint: start <issue|slug> [--profile <p>] [--step] [--in-place] | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status | close [<battle-id>] | abort [<battle-id>] [--reason <text>]
 ---
 
 You are the **battle orchestrator** of `legion`. Load the `battle-workflow` skill
@@ -31,6 +31,18 @@ session's context.
 > resolution (raw cwd). An explicit `--repo <path>` wins.
 > Reading `battle.json` with `Read` stays allowed.
 
+> **State root `<state>` — anchor every `.legion/` path on it.** A battle runs by default in
+> a dedicated worktree `<main>/.claude/worktrees/<id>` (§A.1), but its state stays in the
+> **main repo**: `.legion/` of the worktree is never the battle's state. So every `.legion/…`
+> path in this file means `<state>/.legion/…`, where `<state>` is the `state_root` printed by
+> `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>`. Take that value
+> once per session (and again after a `resume`), check it is an existing absolute directory,
+> and write **absolute** paths in shell commands and in `Read` / `Write` calls. Never build a
+> `.legion/` path from the cwd. `battle_worktree.py` always starts from the main repo and
+> from an explicit `--battle <id>`, never from the active-battle pointer (which `close` and
+> `abort` clear). It prints one JSON object (exit `0` ok, `2` refused, `1` usage error), never
+> writes `battle.json` or `.legion/`, and never uses the network.
+
 > **Surfacing commands to the user — always namespace them.** This plugin's
 > commands are **namespaced**: the user must type `/legion:battle …`
 > (bare `/battle` resolves to *Unknown command*). Whenever you suggest a next step,
@@ -43,13 +55,14 @@ Arguments: `$ARGUMENTS`
 
 ## Dispatch
 
-- `start <issue|slug> [--profile <p>] [--step]` → §A. **Validate the options before any shell call.** The accepted options are a closed list: `--profile` with one of `feature`, `hotfix`, `security`, `spike` (default `feature`), and `--step`. Anything else: refuse and relay the list to the user. Never substitute `$ARGUMENTS` raw into a shell command: parse it, check each value against the list, and pass only the validated values.
+- `start <issue|slug> [--profile <p>] [--step] [--in-place]` → §A. **Validate the options before any shell call.** The accepted options are a closed list: `--profile` with one of `feature`, `hotfix`, `security`, `spike` (default `feature`), `--step`, and `--in-place` (no value: skip the dedicated worktree and work in the main checkout, as before). Anything else: refuse and relay the list to the user. Never substitute `$ARGUMENTS` raw into a shell command: parse it, check each value against the list, and pass only the validated values.
 - `build [slice|all] [--auto]` → §D
 - `review` / `test` → §E (review gate, then test gate, then security if required)
 - `deliver` → §G (branch, commit, push, PR linked to the issue)
 - `address` → §H (handle human PR review comments — repeatable, post-deliver)
 - `resume <battle-id>` → §B
 - `status` (or empty) → §C
+- `close [<battle-id>]` → §J (after the PR is merged: remove the worktree and the local branch, update the main checkout). The only accepted value is a `<battle-id>` matching `^[A-Za-z0-9][A-Za-z0-9-]*$`; refuse any option.
 - `abort [<battle-id>] [--reason <text>]` → §I (abandon a battle that will not be delivered)
 
 ---
@@ -85,6 +98,13 @@ Arguments: `$ARGUMENTS`
    (the file is git-ignored with `.legion/` and transient). Exit `2` (no git repository,
    `git` missing, `safe.directory` refused) → **escalation case 5**: fix the
    environment before any battle.
+
+4. **Worktree mode** (default; skipped with `--in-place`) — the main checkout must be able to
+   host `.claude/worktrees/` and `.legion/` as **ignored** paths, and must be clean. The
+   script `battle_worktree.py create` (§A.1 step 2b) checks both and refuses with `not_ignored`
+   or `dirty`. On `not_ignored`, propose the missing line (`.claude/worktrees/` and/or
+   `.legion/`) for `.gitignore`, **commit it** as a standalone change with the user's OK, then
+   retry; or fall back to `--in-place`. Never create the worktree with an unignored path.
 
 ### §A.preflight — reading files & console encoding
 
@@ -157,6 +177,59 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    net is the `deliver` staging discipline (§G.2). **Note:** if you do add the line,
    that edits `.gitignore` — a tracked change `deliver` must resolve explicitly
    (§G.2), not leave dangling.
+
+2b. **Create the worktree and enter it** (default; with `--in-place` skip this whole step,
+   write **no** `worktree` block and keep the flow of the main checkout). Run from the main
+   repo, with the validated `<id>`:
+
+   ```bash
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" create --battle <id>
+   ```
+
+   It creates `<main>/.claude/worktrees/<id>` on a new branch `<me>/<token>` cut from `HEAD`
+   of the main checkout, then copies the local files declared in `.worktreeinclude` at the
+   repo root (gitignore syntax; only regular files that git ignores, never a symlink, never
+   anything under `.legion/` or `.claude/`, never an overwrite). The main checkout keeps its
+   `HEAD`, branch and index. It prints `{ ok, path, branch, base, created, copied, skipped }`.
+   `created: false` means a previous run already made a matching worktree (idempotent): go on.
+   Exit `2` (refused) carries `reason`; relay it and **do not advance**:
+   - `dirty` (modified or untracked files in the main checkout): list them, ask the user to
+     commit or stash them, or to restart with `--in-place`;
+   - `not_ignored`: see §A.preflight item 4;
+   - `branch_exists` / `path_exists`: a stale branch or directory. The user removes or renames
+     it; never delete it yourself, never reuse it;
+   - `concurrent_battle`: another battle already owns a live worktree. Parallel battles are
+     not supported yet: finish or `close` that one, or use `--in-place`;
+   - `aborted`, `no_commit`, `invalid`: relay the message.
+
+   Then record the block, with the three values **taken from the `create` JSON** (all three
+   together, never one alone):
+
+   ```bash
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-meta --worktree-path "<path>" --worktree-branch "<branch>" --worktree-base "<base>" --battle <id>
+   ```
+
+   The script refuses a path that is not `<state>/.claude/worktrees/<id>`, or an invalid branch
+   name or base (exit `2`: relay the `reason`).
+
+   **Enter the worktree.** Try `EnterWorktree` with `name = <id>` (same path as the worktree
+   just created). If the tool is missing or refuses, go straight to the fallback. Then
+   **verify**, whatever the tool answered:
+
+   ```bash
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>
+   ```
+
+   `ok: true` (and `inside: true`) means the session is in the worktree, on the branch
+   `worktree.branch`: continue at step 3. Anything else (`ok: false`, exit `2`) is the
+   **deterministic fallback**: the session stays in the main checkout and **writes no code**.
+   Tell the user, in this form: « Worktree prêt : `<path>`. Quitte cette session, relance
+   `claude` depuis ce dossier, puis `/legion:battle resume <id>`. » and stop. While the
+   session is in the main checkout, `guard.py` blocks any write there outside `.legion/**`
+   (a battle with a `worktree` block, even without `/legion:guard`).
+
+   From now on the session works in the worktree: code, build, tests, gates and DELIVER run
+   there; the state is read and written through the scripts and `<state>` paths only.
 
 3. **THINK — seed `spec.md`.** Branch on the shape of `<issue|slug>`:
 
@@ -363,12 +436,20 @@ Re-point the active battle with
 `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" activate <battle-id>` (so the
 guard hooks track the resumed battle; a refusal means the battle does not exist),
 then check the state with `… battle_state.py validate` (relay any error or warning).
-Read `.legion/battles/<battle-id>/battle.json`. Summarize phase
+Read `<state>/.legion/battles/<battle-id>/battle.json`. Summarize phase
 statuses and the last verdict. Announce the next pending phase and what it needs.
 **An aborted battle is not resumed**: if `activate` is refused because the battle carries
 `aborted` (exit `2`), relay the `reason` and stop — do not work around it. To consult it,
 use `Read` and `… battle_state.py validate --battle <battle-id>` (the only command an
 aborted battle still accepts).
+**Re-enter the worktree.** If `battle.json` has a `worktree` block (worktree mode), run
+`python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <battle-id>`. `ok: true`
+means the session is already in the worktree, on its branch. Otherwise, if `exists: true`,
+try `EnterWorktree` with `name = <battle-id>`, then run `where` again. Still `ok: false` (or the
+tool is absent): same fallback as §A.1 step 2b — write no code, ask the user to relaunch
+`claude` from `worktree_path`, then `/legion:battle resume <battle-id>`. If `exists: false`, the
+worktree is gone: relay it and stop (escalation case 4). A battle **without** a `worktree`
+block (legacy or `--in-place`) resumes in place, as before.
 Do not re-run completed phases unless asked. If `build` is `in_progress` or `blocked`,
 run `… battle_state.py next-slice`: it names the slice to resume from (read-only, JSON
 `{slice, slices_done, slices_total}`). Never replay slices already `done`.
@@ -401,10 +482,11 @@ et retenter.
 
 ## §C — status
 
-List every battle under `.legion/battles/`, showing id, profile, and the
+List every battle under `<state>/.legion/battles/`, showing id, profile, and the
 current phase with its status/verdict. One line per battle. Read-only: read each
 `battle.json` with `Read`. Add the marker `aborted` to the line of a battle whose
-`battle.json` carries an `aborted` field.
+`battle.json` carries an `aborted` field. Add the mode to each line: `worktree <path> · <branch>`
+when `battle.json` has a `worktree` block (read both values from it), else `en place`.
 
 **Refresh the PR state.** For each battle that has `delivery.pr_url` and is neither closed
 (`reflect` done) nor `aborted`, do the following. This is the **only** write of `status`:
@@ -414,11 +496,11 @@ it updates the delivery metadata (`pr_state`, `ci`, `checked_at`) and never chan
    call and say so. No free-form string ever reaches the shell.
 2. Run:
    ```bash
-   gh pr view <n> --json state,mergedAt,statusCheckRollup,url > ".legion/battles/<id>/pr-status.json"
+   gh pr view <n> --json state,mergedAt,statusCheckRollup,url,headRefName,headRefOid > "<state>/.legion/battles/<id>/pr-status.json"
    ```
 3. Only if `gh` exited `0`, run:
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json ".legion/battles/<id>/pr-status.json" --battle <id>
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
    ```
    Exit `2` means the file was refused: relay the `reason`. The JSON printed on stdout
    also carries `failing` (`[{name, url}]`, the failed checks, not persisted).
@@ -490,7 +572,13 @@ state CLIs (`battle_state.py`, `artifact_check.py --guard`) resolve the battle f
 repo (`git rev-parse --git-common-dir`). Each slice owns a distinct report file, so parallel builders never race on a shared file; the
 missing-report check is done by `merge-reports` (below). Tell each builder it must not write another slice's report. For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep
-dependent slices sequential. **Sequential builders** are wrapped in the tree integrity
+dependent slices sequential. **Exception — worktree mode.** If `battle.json` has a `worktree`
+block, **never** run the parallel batch: `fan_in.py` refuses any tree other than the main
+checkout, so it cannot work from the battle's worktree. Run every slice as a **sequential**
+builder (wrapped in the tree integrity check with `--guard`, above) and **warn the user** that
+parallel builders are not available in worktree mode yet (`--in-place` keeps them). Pass the
+builder the **worktree** as its working directory, and still the battle dir and `plan.md` as
+absolute paths under `<state>`. **Sequential builders** are wrapped in the tree integrity
 check with `--guard` (above). **Parallel builders** write in their own worktree, so their
 deltas must be merged back into the main tree (the **fan-in**, `scripts/fan_in.py`, the only
 script that writes code into the main tree). Run a parallel batch in this fixed order:
@@ -503,7 +591,7 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
    `HEAD`; on a clean tree it returns `HEAD` itself. It touches no ref, no `HEAD` and no index.
    It refuses (exit 2) on a nested repository. Never use `git rev-parse HEAD` here: a foundation
    slice that is still uncommitted would be invisible to the builders. Then take the snapshot S1
-   of the main tree: `tree-snapshot --out .legion/battles/<id>/_tree-before.json`. No
+   of the main tree: `tree-snapshot --out <state>/.legion/battles/<id>/_tree-before.json`. No
    `battle_state.py` write between this snapshot and step 4.
 2. Launch the builders in parallel (`isolation: worktree`). Each builder prompt carries
    `<base>` and the absolute path of `fan_in.py`: the builder's first action is
@@ -655,11 +743,11 @@ fault. `<id>` is the validated battle id, never `$ARGUMENTS`.
 
 1. **Snapshot.** After `transition <phase-key> in_progress` (or `slice <id> in_progress`)
    and **before** `Agent`, run
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" tree-snapshot --out ".legion/battles/<id>/_tree-before.json"`.
+   `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" tree-snapshot --out "<state>/.legion/battles/<id>/_tree-before.json"`.
    Keep the `fingerprint` it prints; it must match `^[0-9a-f]{64}$`. A refusal (exit `2`)
    → do not launch the agent, **escalation case 5**.
 2. **Verify.** After the return and **before** the delivery check (below), run
-   `artifact_check.py tree-verify --before ".legion/battles/<id>/_tree-before.json" --fingerprint <fingerprint>`.
+   `artifact_check.py tree-verify --before "<state>/.legion/battles/<id>/_tree-before.json" --fingerprint <fingerprint>`.
    For a builder (or any BUILD), add `--guard`. Passing the fingerprint back protects the
    snapshot file against a rewrite: a file that no longer matches is refused.
 3. **On a fault** (`fault: true`, exit `2`): the gate's verdict **does not count**. Run
@@ -696,7 +784,7 @@ back to `python3`); the script prints one JSON object on stdout and works the sa
 Windows, Linux, WSL and macOS:
 
 1. **Before** invoking, resolve the expected artifact path
-   `.legion/battles/<id>/<artifact>` (architect → `plan.md`, lint → `gate-lint.md`,
+   `<state>/.legion/battles/<id>/<artifact>` (architect → `plan.md`, lint → `gate-lint.md`,
    reviewer → `gate-review.md`, test-engineer → `gate-test.md`, security →
    `gate-security.md`, pr-triage → `pr-feedback.md`) and, **if it already exists** (a
    re-loop round),
@@ -995,7 +1083,17 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
       branch is a **repo-admin UI action** on GitHub; surface it to the user rather
       than attempting it by script.
 
-1. **Branch name** — `<me>/<token>`: `<me>` from `git config user.email` (local
+1. **Branch name.**
+
+   **Worktree mode** (`battle.json` has a `worktree` block): the branch already exists, the
+   script made it at start. **Create no branch and run no `checkout`.** Run
+   `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>` and require
+   `ok: true` and `current_branch` == `worktree.branch`. Otherwise **escalate (case 4)**: the
+   session is not on the battle's branch, never switch it. Commit and push from the worktree
+   on `worktree.branch`; the branch of the main checkout is never touched. Skip the rest of
+   this step and go to step 2.
+
+   **`--in-place`** (no `worktree` block): the rule below, unchanged. `<me>/<token>`: `<me>` from `git config user.email` (local
    part before `@`; fallback `user.name`), `<token>` from `battle.json.ticket`
    (`GH#<n>` → `<n>`) or the battle slug if no issue. Check first with
    `git rev-parse -q --verify refs/heads/<me>/<token>`:
@@ -1076,15 +1174,15 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    **Where the commit-message file lives (if you use one).** A multi-line body with
    accents or other non-ASCII punctuation is fragile through `-m` on a Windows console;
    writing the message to a file and committing with `git commit -F <file>` is more
-   robust. When you do, that file **must live under `.legion/battles/<id>/`** (e.g.
-   `.legion/battles/<id>/commit-msg.txt`) — **never outside the repo** (no
+   robust. When you do, that file **must live under `<state>/.legion/battles/<id>/`** (e.g.
+   `<state>/.legion/battles/<id>/commit-msg.txt`) — **never outside the repo** (no
    `$CLAUDE_JOB_DIR/tmp/…`). Reason: once a write scope is armed (`/freeze` or
    `/guard`), the `guard.py` hook blocks every write outside it, while `.legion/**` is
    always allowed and git-ignored — so a scratch message file there is writable yet
    never committed (the path whitelist + `git reset -q HEAD .legion` above already
    guarantee it). `git commit -m` stays fine for a short one-line subject.
 
-3. **Compose the PR body** → write `.legion/battles/<id>/pr-body.md` from the
+3. **Compose the PR body** → write `<state>/.legion/battles/<id>/pr-body.md` from the
    artifacts: intent/scope (`spec.md`), approach (`plan.md`), and the gate verdicts
    (review/test/security `accept`). **Written in French** (identifiers & file names
    stay English). Apply the **writing charter**
@@ -1109,8 +1207,8 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
 
 5. **Push & open the PR**:
    ```bash
-   git push -u origin <me>/<token>
-   gh pr create --title "<summary>" --body-file ".legion/battles/<id>/pr-body.md" --fill-first --base <default-branch>
+   git push -u origin <me>/<token>   # worktree mode: <me>/<token> is worktree.branch
+   gh pr create --title "<summary>" --body-file "<state>/.legion/battles/<id>/pr-body.md" --fill-first --base <default-branch>
    ```
    For the `spike` profile, add `--draft`: the PR opens as a draft.
    Use the repo's default branch as `--base` (read it once, e.g.
@@ -1120,13 +1218,13 @@ by `/legion:battle address` (§H, repeatable); when the PR is stabilized,
    push command + a ready-to-paste PR body and stop.
 
 6. **Comment the issue** (numeric issue only; best-effort, never blocking). Write a
-   **short battle-review comment** to `.legion/battles/<id>/wi-comment.md`: 3–5
+   **short battle-review comment** to `<state>/.legion/battles/<id>/wi-comment.md`: 3–5
    lines, **in French**, what was delivered and why it matters (from `spec.md` +
    gate outcomes); end with the PR URL. Apply the **writing charter** (`battle-workflow`
    § « Charte de style des documents ») — simple, precise language; it is already short,
    so **no separate « En bref »**; reread it against the charter before posting. Then:
    ```bash
-   gh issue comment <n> --body-file ".legion/battles/<id>/wi-comment.md"
+   gh issue comment <n> --body-file "<state>/.legion/battles/<id>/wi-comment.md"
    ```
    The issue itself closes on merge via `Closes #<n>` — do not close it here (a `spike`
    PR carries `Refs #<n>` instead: the issue stays open). On
@@ -1165,7 +1263,7 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    2. For each `failing` entry printed by `set-delivery`: if its URL is a GitHub Actions
       run (`/actions/runs/<digits>/`, digits validated), take `<run-id>` and run
       ```bash
-      gh run view <run-id> --log-failed > ".legion/battles/<id>/ci-failed-<run-id>.log"
+      gh run view <run-id> --log-failed > "<state>/.legion/battles/<id>/ci-failed-<run-id>.log"
       ```
       Without a run id (an external status context), note the URL only.
    3. Classify the cause. If it does not come from the code in scope (broken runner,
@@ -1203,14 +1301,14 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    comment (real author + body; skip bot/automation authors and empty system
    threads). For each kept thread record `{ thread_id: <node id>, file: <path>,
    line, comments:[{id: <databaseId>, author, content}] }` and write the list to
-   `.legion/battles/<id>/_threads.json`. **Empty list** → announce "no active review
+   `<state>/.legion/battles/<id>/_threads.json`. **Empty list** → announce "no active review
    comment" and **stop**, unless a CI-fix commit from step 0 is waiting: then skip to
    steps 5-6.
 
 2. **Triage.** Invoke the `pr-triage` gate via `Agent` (`subagent_type: pr-triage`),
    wrapped in the **tree integrity check** (§E, standard form, no filter).
    Self-contained prompt: `plan.md` path, `_threads.json` path, battle dir, repo
-   root, the PR branch `<me>/<token>`. The gate **writes** `pr-feedback.md` itself
+   root, the PR branch (`<me>/<token>`; in worktree mode `worktree.branch`). The gate **writes** `pr-feedback.md` itself
    (appending this round when the file already exists — the guard confines it to
    that one file) and **returns** the `TRIAGE:` JSON block. **Run the tree integrity
    check, then the gate artifact delivery check** (§E) on `pr-feedback.md` — the modified-time guard especially
@@ -1259,7 +1357,9 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
 6. **Push**: first run `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" check-cascade`
    (read-only). Exit `2` (incomplete cascade) → **do not push**: relay `missing`
    (`[{phase, status}]`) and re-run the cascade (step 3). Exit `0` →
-   `git push origin <me>/<token>` (the commits join the existing PR).
+   `git push origin <me>/<token>` (the commits join the existing PR). In worktree mode, push
+   `worktree.branch` from the worktree; the session stays on it (check with
+   `battle_worktree.py where --battle <id>`).
 
 7. **Reply + resolve** each thread via `gh api graphql` (**best-effort per thread**:
    one failure does not abort the others — warn and continue):
@@ -1330,12 +1430,70 @@ pointer). Without `--reason` the reason is stored as `null`.
    recorded. **Do not close the issue and do not touch the PR.**
 4. **If `delivery.pr_url` is set**, tell the human the PR is still open and that closing
    it is their call. A retrospective (`/legion:retro`) is optional, not required.
-5. The artifacts stay on disk under `.legion/battles/<id>/`. Report: battle id, reason,
-   assignee released or not, PR to handle or not.
+5. The artifacts stay on disk under `<state>/.legion/battles/<id>/`. **The worktree and its
+   branch are kept** (`abort` never removes them: they may hold unpushed work). If
+   `battle.json` has a `worktree` block, tell the human its `path` and `branch` and that
+   removing them is their call (`git worktree remove`, then `git branch -D` once they are sure).
+   Report: battle id, reason, assignee released or not, PR to handle or not, worktree kept or
+   not.
+
+## §J — close a battle (after the PR is merged)
+
+Use once the PR is **merged**: it removes the battle's worktree and local branch and brings the
+main checkout up to date. Only the human asks for it; never close on your own initiative.
+
+**Allowed arguments** — nothing else: an optional `<battle-id>`. Never paste `$ARGUMENTS` into a
+shell command: read the value, check it against `^[A-Za-z0-9][A-Za-z0-9-]*$`, refuse anything
+else (an option, an extra word), then pass it quoted. Without `<battle-id>`, use the active
+battle; if none is active (the pointer is cleared once a battle is closed), ask for the id.
+
+**Run from the main checkout.** `close` removes the worktree: it refuses when the session is
+inside it (`not_inside`). If `battle_worktree.py where --battle <id>` says `inside: true`, try
+`ExitWorktree` with action `keep` (never `remove`), then run `where` again. Still inside, or the
+tool is absent: ask the user to relaunch `claude` from the main repo (`state_root`) and run
+`/legion:battle close <id>` again, and stop. Resolve `<state>` as in the box at the top.
+
+1. **Refresh the PR state** (the proof of the merge comes from it). Same call as §C, from the
+   validated `<n>` (tail of `delivery.pr_url`, `^[0-9]+$`), and only if `gh` exited `0`:
+
+   ```bash
+   gh pr view <n> --json state,mergedAt,statusCheckRollup,url,headRefName,headRefOid > "<state>/.legion/battles/<id>/pr-status.json"
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
+   ```
+
+   This records `delivery.head_ref` and `delivery.head_oid` too: `close` needs `head_oid` to
+   prove that a squash or rebase merge lost no local commit. No `gh` or no `pr_url`: the PR
+   cannot be proven merged, so stop and say so.
+2. **Fetch**: `git fetch origin` (the scripts never use the network).
+3. **Check**: `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" close-check --battle <id>`.
+   It is read-only and prints `{ ok, checks:[{name, ok, detail}], modified, untracked }`. The
+   controls are `pr_merged`, `contained` (the branch is an ancestor of `origin/<default>`, or the
+   PR is merged and `delivery.head_oid` equals the local tip), `worktree_clean` and `not_inside`.
+   A failed control: relay its `detail` (and the `modified` / `untracked` lists) and **stop**.
+   Never remove, commit or stash anything for the user.
+4. **Retrospective.** If `phases.reflect` is not `done`, run `/legion:retro` for this battle
+   first (it closes the battle state and files the lessons), then continue. `close` refuses
+   while `reflect` is not `done`.
+5. **Close**: `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" close --battle <id>`.
+   It replays `close-check`, then runs `git worktree remove` (never `--force`), `git branch -D`
+   (only after the `contained` proof), `git worktree prune`, and fast-forwards the main checkout
+   onto `origin/<default>` only if it is on `<default>` and clean. It prints
+   `{ ok, removed, branch_deleted, pruned, main_updated, warnings }`. Relay every warning:
+   `main_updated: false` with a warning is **not** an error (the main checkout was on another
+   branch or dirty; nothing was forced). Exit `2` carries a `reason`: relay it, do not work
+   around it. A second run is harmless (idempotent).
+   A battle without a `worktree` block (legacy or `--in-place`) goes through the same steps: the
+   script proves the merge and deletes the local branch, and checks out `<default>` first if the
+   main checkout sits on it (clean tree only).
+6. **Report**: worktree removed or not, branch deleted or not, main checkout updated or not,
+   warnings. The remote branch is not deleted (GitHub's auto-delete setting decides).
 
 ## Guardrails
 
 - Never `cd` / `Set-Location`; operate from the current directory.
+- Worktree mode: write nothing to the main checkout except under `.legion/`; `guard.py`
+  blocks it. Never remove a worktree or a branch by hand: `close` (§J) is the only way, and it
+  never uses `--force`.
 - Mutate `battle.json` (and `.legion/active-battle`) **only through `battle_state.py`** —
   never by hand. Persist `spec.md` / PR artifacts yourself; each gate writes **only
   its own** `gate-*.md` / `plan.md` / `pr-feedback.md` (guard-confined) and returns
