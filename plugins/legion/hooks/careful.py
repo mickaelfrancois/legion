@@ -27,7 +27,7 @@ _IMPORT_ERROR: str | None = None
 try:
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))
-    from battle_state import guard_of, load_active_battle, resolve_state_root
+    from battle_state import guard_of, resolve_battle, resolve_state_root
 except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
@@ -47,11 +47,13 @@ DESTRUCTIVE = [
 ]
 
 
-def _careful_active(repo_root: Path) -> bool:
-    active = load_active_battle(repo_root)
-    if active is None:
+def _careful_active(repo_root: Path, data: dict | None = None) -> bool:
+    """Battle de la session du payload (GH#170) : liaison de session, sinon pointeur ;
+    session `foreign` ou sans battle -> inactif."""
+    _bid, battle, _source = resolve_battle(repo_root, data if isinstance(data, dict) else {})
+    if battle is None:
         return False
-    guard, valid = guard_of(active[1])  # GH#104 : bloc invalide -> careful inactif
+    guard, valid = guard_of(battle)  # GH#104 : bloc invalide -> careful inactif
     return valid and bool(guard.get("careful"))
 
 
@@ -73,7 +75,7 @@ def _handle(data: dict, repo_root: Path) -> tuple[int, str]:
         return 0, ""
     if _IMPORT_ERROR is not None:
         return 0, f"[careful] careful desactive : installation legion incomplete ({_IMPORT_ERROR})."
-    if not _careful_active(repo_root):
+    if not _careful_active(repo_root, data):
         return 0, ""
     label = _match(_command_text(data))
     if label:
@@ -186,6 +188,22 @@ def _t_careful_worktree_off() -> None:  # C2
     _careful_worktree(False)
 
 
+def _t_careful_session() -> None:  # K-S1 / K-S2
+    import battle_state
+    rm = {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}}
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        for bid, careful in (("A", True), ("B", False)):
+            bdir = root / ".legion" / "battles" / bid
+            bdir.mkdir(parents=True)
+            (bdir / "battle.json").write_text(json.dumps({"guard": {"careful": careful}}), encoding="utf-8")
+        battle_state._write_pointer(root, "B")
+        battle_state.bind_session(root, "sidA", "A")
+        code, msg = _handle(dict(rm, session_id="sidA"), root)
+        assert code == 0 and "rm -rf" in msg, (code, msg)  # K-S1 : careful de A malgre le pointeur sur B
+        assert _handle(dict(rm, session_id="sidB"), root) == (0, "")  # K-S2 : autre session, pas de careful
+
+
 def _t_careful_not_git() -> None:  # C3
     rm = {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}}
     with tempfile.TemporaryDirectory() as d:
@@ -205,6 +223,7 @@ def _self_test() -> int:
     _t_careful_import_fallback()
     _t_careful_worktree_on()
     _t_careful_worktree_off()
+    _t_careful_session()
     _t_careful_not_git()
     print("OK: careful self-test passed", file=sys.stderr)
     return 0

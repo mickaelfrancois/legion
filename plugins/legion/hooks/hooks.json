@@ -33,6 +33,15 @@
             "command": "$(command -v python || command -v python3) \"$CLAUDE_PLUGIN_ROOT/hooks/fleet_sync.py\""
           }
         ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$(command -v python || command -v python3) \"$CLAUDE_PLUGIN_ROOT/hooks/session_bind.py\""
+          }
+        ]
       }
     ],
     "Stop": [

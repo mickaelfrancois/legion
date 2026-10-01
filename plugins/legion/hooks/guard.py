@@ -63,6 +63,20 @@ Regles :
   cwd et du pointeur : une session restee dans le principal ecrit dans le worktree en chemin
   absolu. Pas de proprietaire (ex. `agent-*`) : guard du pointeur, racine = cwd, comme avant.
   Repli d'import sans `worktree_battle_of` : comportement d'avant.
+- **Battle de la session (GH#170)** : « la battle active » n'est plus seulement le pointeur. Le hook
+  passe son payload a `battle_state.resolve_battle` : la battle liee a la session
+  (`.legion/sessions/<cle>.json`, ecrite par `session_bind.py`) prime sur le pointeur (`session`) ;
+  sinon le pointeur (`pointer`, comportement d'avant, aussi sans cle ni `.legion/sessions/`) ; si le
+  pointeur appartient a une autre session (`foreign`), la session n'a AUCUNE battle : une gate est
+  confinee a rien (exit 2, fail-closed), la session principale n'a ni guard ni C8. Vaut pour le
+  confinement des gates, la regle `.legion/` du builder, `_shell_decision`, C8 et le guard d'ecriture.
+  La resolution par cible (GH#166) reste prioritaire pour le guard d'ecriture. Repli d'import sans
+  `resolve_battle` : pointeur seul. Le hook appelle aussi `battle_state.probe` (sonde opt-in).
+- **Garde-fou des mutations (GH#170, C4)** : pour un appelant non-gate, une commande Bash
+  `battle_state.py <sous-commande>` sans `--battle` (hors `init`, `activate`, `validate`,
+  `session-status`) est bloquee (exit 2) si la session pilote une battle differente du pointeur
+  (`source = session`) ou si le pointeur appartient a une autre session (`foreign`). Best-effort
+  (`shlex`) : commande non analysable ou erreur -> permis. Bypass `LEGION_GUARD_OFF=1`.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -141,6 +155,9 @@ except Exception as _exc:  # ImportError, SyntaxError du module... jamais plante
     def worktree_battle_of(state_root, path):  # repli : pas de battle proprietaire (comportement d'avant)
         return None
 
+    def active_battle_id(repo_root):  # repli : les decisions ferment de toute facon
+        return None
+
     def resolve_state_root(cwd):  # repli : pas de resolution (les decisions ferment de toute facon)
         return cwd
 
@@ -151,20 +168,62 @@ except Exception as _exc:  # ImportError, SyntaxError du module... jamais plante
         raise RuntimeError("battle_state.glob_match indisponible")
 
 
+# Resolveur de session (GH#170) : battle de la session du hook (liaison `.legion/sessions/`), sinon
+# pointeur. Import isole : si `resolve_battle` / `probe` manquent (battle_state.py plus ancien), on
+# garde le comportement d'avant (pointeur seul) sans fermer le hook.
+try:
+    from battle_state import resolve_battle as _resolve_battle_src
+except Exception:  # noqa: BLE001
+    _resolve_battle_src = None
+try:
+    from battle_state import probe as _probe_src
+except Exception:  # noqa: BLE001
+    _probe_src = None
+
+
+def _resolved(state: Path, data) -> tuple[str | None, dict | None, str]:
+    """`(id, battle.json, source)` de la battle de la session (GH#170). Ne leve jamais.
+
+    `source` : `session` | `pointer` | `foreign` | `none`. Repli (resolveur absent) : pointeur seul.
+    `pointer` / `none` : l'appelant relit le pointeur lui-meme (cas `battle.json` illisible compris).
+    """
+    if _resolve_battle_src is None:
+        return None, None, "pointer"
+    try:
+        return _resolve_battle_src(state, data if isinstance(data, dict) else {})
+    except Exception:  # noqa: BLE001
+        return None, None, "pointer"
+
+
+def _battle_id(state: Path, data) -> str | None:
+    """Id de la battle de la session : liaison, sinon pointeur ; `foreign` -> None (GH#170)."""
+    bid, _bdata, source = _resolved(state, data)
+    if source == "session":
+        return bid
+    if source == "foreign":
+        return None
+    return active_battle_id(state)
+
+
 def _matches(rel_path: str, patterns) -> bool:
     """Matcher de globs : delegue a la source unique `battle_state.glob_match` (GH#66, C6)."""
     return _glob_match(rel_path, patterns)
 
 
-def _load_active_guard(repo_root: Path):
+def _load_active_guard(repo_root: Path, data=None):
     """Retourne (battle_id, allow, deny, valid, unreadable) de la battle active, ou None.
 
     `valid` faux (bloc `guard` mal forme, GH#104, ou `battle.json` illisible) : `allow`/`deny`
     valent `[]` et ne doivent pas etre interpretes -- l'appelant ferme (fail-closed).
     `unreadable` vrai (GH#106) : `battle.json` present mais illisible (et non simple bloc
     `guard` invalide) -- seul le message de reparation differe.
+    `data` : payload du hook (GH#170) ; la battle de la session prime sur le pointeur, et une
+    session `foreign` n'a aucune battle (None).
     """
-    active = load_active_battle(repo_root)
+    sid, sdata, source = _resolved(repo_root, data)
+    if source == "foreign":
+        return None
+    active = (sid, sdata) if source == "session" else load_active_battle(repo_root)
     if active is None:
         # Pointeur valide mais `battle.json` present et illisible (JSON invalide, racine
         # non-dict, trop imbrique...) : perimetre inconnu -> fail-closed. Pointeur absent,
@@ -1043,6 +1102,73 @@ def _shell_write_hits(
     return list(dict.fromkeys(hits))
 
 
+_MUTATION_FREE = ("init", "activate", "validate", "session-status")  # sans `--battle` : toujours permis
+
+
+def _battle_state_calls(command: str) -> list[list[str]]:
+    """Pour chaque appel `battle_state.py` de `command` : mots qui le suivent (jusqu'a l'operateur).
+
+    Best-effort (`shlex`) ; commande non analysable -> []. Pur.
+    """
+    import shlex
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return []
+    calls: list[list[str]] = []
+    i = 0
+    while i < len(words):
+        if os.path.basename(words[i].replace("\\", "/")) == "battle_state.py":
+            j = i + 1
+            while j < len(words) and not set(words[j]) <= set("&|;()"):
+                j += 1
+            calls.append(words[i + 1:j])
+            i = j
+        else:
+            i += 1
+    return calls
+
+
+def _mutation_guard(data: dict, state: Path) -> tuple[int, str]:
+    """Garde-fou C4 (GH#170) : un appelant non-gate ne mute pas sans `--battle` la mauvaise battle.
+
+    Bloque (exit 2) `battle_state.py <sous-commande>` sans `--battle` (hors `init` / `activate` /
+    lectures) quand la session pilote une autre battle que le pointeur (`session`) ou quand le
+    pointeur appartient a une autre session (`foreign`). Sinon : permis. Ne leve jamais.
+    """
+    try:
+        tool_input = data.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if not isinstance(command, str) or "battle_state" not in command:
+            return 0, ""
+        mutating = []
+        for args in _battle_state_calls(command):
+            sub = next((a for a in args if not a.startswith("-")), None)
+            if sub is None or sub in _MUTATION_FREE:
+                continue
+            if any(a == "--battle" or a.startswith("--battle=") for a in args):
+                continue
+            mutating.append(sub)
+        if not mutating:
+            return 0, ""
+        bid, _bdata, source = _resolved(state, data)
+        if source == "foreign":
+            return 2, (
+                f"BLOQUE : `battle_state.py {mutating[0]}` sans `--battle` : la battle du pointeur "
+                f"appartient a une autre session. Ajoute `--battle <id>` (la battle que TU pilotes)."
+            )
+        if source == "session" and bid != active_battle_id(state):
+            return 2, (
+                f"BLOQUE : `battle_state.py {mutating[0]}` sans `--battle` : cette session pilote "
+                f"`{bid}`, le pointeur vise une autre battle : ajoute `--battle {bid}`."
+            )
+    except Exception:  # noqa: BLE001 - garde-fou best-effort : jamais bloquant sur erreur
+        return 0, ""
+    return 0, ""
+
+
 def _shell_decision(data: dict, repo_root: Path, state_root: Path | None = None) -> tuple[int, str]:
     """Decision pour un appel `Bash` / `PowerShell` (routee AVANT toute lecture du guard).
 
@@ -1056,7 +1182,7 @@ def _shell_decision(data: dict, repo_root: Path, state_root: Path | None = None)
         return fallback if fallback is not None else (0, "")  # session principale : silencieux
     agent_type = data.get("agent_type")
     if agent_type not in GATE_ARTIFACT:
-        return 0, ""
+        return _mutation_guard(data, state_root or repo_root)
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
@@ -1065,7 +1191,7 @@ def _shell_decision(data: dict, repo_root: Path, state_root: Path | None = None)
             f"(fail-closed)."
         )
     state = state_root or repo_root
-    battle_id = active_battle_id(state)
+    battle_id = _battle_id(state, data)
     try:
         hits = _shell_write_hits(command, str(data.get("tool_name")), repo_root, battle_id, state)
     except ValueError as exc:
@@ -1086,22 +1212,26 @@ def _shell_decision(data: dict, repo_root: Path, state_root: Path | None = None)
 
 
 def _worktree_main_decision(
-    repo_root: Path, state: Path, file_path: str
+    repo_root: Path, state: Path, file_path: str, payload=None
 ) -> tuple[int, str] | None:
     """Regle C8 (GH#152) : en mode worktree, le checkout principal est ferme a l'ecriture.
 
     None -> la regle ne s'applique pas (pas de battle active lisible, pas de bloc `worktree`,
     chemin disparu, cible hors du principal, dans le worktree, sous `.legion/**`, sous
     `.claude/worktrees/**` ou memoire Claude). (2, message) -> ecriture bloquee.
+    `payload` : payload du hook (GH#170) ; la battle de la session prime sur le pointeur.
     """
     if not file_path:
         return None
     try:
-        active = load_active_battle(state)
+        sid, sdata, source = _resolved(state, payload)
+        if source == "foreign":
+            return None
+        active = (sid, sdata) if source == "session" else load_active_battle(state)
         if active is None:
             return None
-        battle_id, data = active
-        block = data.get("worktree") if isinstance(data, dict) else None
+        battle_id, bdata = active
+        block = bdata.get("worktree") if isinstance(bdata, dict) else None
         wt_path = block.get("path") if isinstance(block, dict) else None
         if not isinstance(wt_path, str) or not wt_path.strip() or not Path(wt_path).exists():
             return None
@@ -1183,7 +1313,7 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
     # Prioritaire sur tout le reste, et actif meme guard non arme.
     agent_type = data.get("agent_type")
     if agent_type in GATE_ARTIFACT:
-        battle_id = active_battle_id(state)
+        battle_id = _battle_id(state, data)
         rel = _rel_state(repo_root, state, file_path) if file_path else None
         if _gate_decision(agent_type, rel, battle_id):
             # Confinement OK (bon artefact). Refuser EN PLUS un artefact vide : un `Write`
@@ -1209,7 +1339,7 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
 
     # Producteur sous `.legion/` : seul son rapport (pas d'auto-elargissement du guard).
     if agent_type in PRODUCER_ARTIFACT and file_path:
-        battle_id = active_battle_id(state)
+        battle_id = _battle_id(state, data)
         rel = _rel_state(repo_root, state, file_path)
         decision = _producer_state_decision(
             agent_type, rel, battle_id, _resolved_parts(repo_root, file_path.replace("\\", "/"))
@@ -1231,7 +1361,7 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
             return 0, ""
 
     # Mode worktree (C8) : checkout principal ferme, guard arme ou non.
-    wt_block = _worktree_main_decision(repo_root, state, file_path)
+    wt_block = _worktree_main_decision(repo_root, state, file_path, data)
     if wt_block is not None:
         return wt_block
 
@@ -1251,7 +1381,7 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
         else:
             active = (battle_id, [], [], False, False)
     if owner is None:
-        active = _load_active_guard(state)
+        active = _load_active_guard(state, data)
     if active is None:
         return 0, ""
     battle_id, allow, deny, valid, unreadable = active
@@ -1360,6 +1490,15 @@ def _emit(message: str) -> None:
             raise
 
 
+def _probe(data, state_root: Path) -> None:
+    """Sonde opt-in du harnais (`battle_state.probe`, GH#170). Ne leve jamais, ne change aucune decision."""
+    try:
+        if _probe_src is not None:
+            _probe_src(data, state_root)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> int:
     if "--self-test" in sys.argv:
         return _self_test()
@@ -1373,6 +1512,7 @@ def main() -> int:
 
         edit_root = Path.cwd()
         state_root = resolve_state_root(edit_root)   # depot principal depuis un worktree (GH#68)
+        _probe(data, state_root)
         code, message = _safe_decide(data, edit_root, state_root)
 
         if code == 2 and os.environ.get("LEGION_GUARD_OFF") == "1":
@@ -2268,6 +2408,120 @@ def _t_guard_wt_main_inactive(bs) -> None:
     _with_wt(bs, "_t_guard_wt_main_inactive", body)
 
 
+def _session_repo(bs, root: Path, pointer: str = "B", worktree_a: Path | None = None) -> None:
+    """Fixture GH#170 : battles `A` (allow `src/**`) et `B` (allow `docs/**`), pointeur sur `pointer`,
+    session `sidA` liee a A, `sidB` liee a B. `worktree_a` : A en mode worktree (bloc `worktree`)."""
+    for bid, allow in (("A", "src/**"), ("B", "docs/**")):
+        doc = {"guard": {"allow": [allow]}}
+        if bid == "A" and worktree_a is not None:
+            worktree_a.mkdir(parents=True, exist_ok=True)
+            doc["worktree"] = {"path": str(worktree_a), "branch": "me/1", "base": "0" * 40,
+                               "created_at": "2026-10-01T00:00:00Z"}
+        bdir = root / ".legion" / "battles" / bid
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "battle.json").write_text(json.dumps(doc), encoding="utf-8")
+    (root / ".legion" / "active-battle").write_text(pointer, encoding="utf-8")
+    bs.bind_session(root, "sidA", "A")
+    bs.bind_session(root, "sidB", "B")
+
+
+def _sev(ev: dict, sid: str | None) -> dict:
+    return {**ev, "session_id": sid} if sid else ev
+
+
+def _t_guard_sessions(bs) -> None:
+    """GH#170 G-S1..G-S9 : la battle de la session prime sur le pointeur (unit + sous-processus)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        main = Path(os.path.realpath(tmp))
+        _session_repo(bs, main)                       # pointeur : B ; sidA -> A ; sidB -> B
+        gate = lambda p, sid, agent="legion:architect": _sev(_ev("Write", agent, p, content="# x"), sid)
+        a_plan = str(main / ".legion" / "battles" / "A" / "plan.md")
+        b_plan = str(main / ".legion" / "battles" / "B" / "plan.md")
+        assert _decide(gate(a_plan, "sidA"), main)[0] == 0                       # G-S1
+        assert _decide(gate(b_plan, "sidA"), main)[0] == 2                       # G-S2
+        assert _decide(gate(b_plan, "sidB"), main)[0] == 0
+        assert _decide(gate(b_plan, None), main)[0] == 0                         # sans cle : pointeur
+        code, msg = _decide(gate(a_plan, "sidX"), main)                          # G-S3 : foreign
+        assert code == 2, (code, msg)
+        code, msg = _decide(gate(b_plan, "sidX"), main)
+        assert code == 2 and "<aucune battle active>" in msg, (code, msg)
+        # producteur : rapport sous la battle de sa session
+        rep = lambda bid: str(main / ".legion" / "battles" / bid / "build-report.md")
+        assert _decide(_sev(_ev("Write", "legion:builder", rep("A"), content="x"), "sidA"), main)[0] == 0
+        assert _decide(_sev(_ev("Write", "legion:builder", rep("B"), content="x"), "sidA"), main)[0] == 2
+        # G-S5 : guard de la session pour une cible hors des worktrees de battle
+        ed = lambda rel, sid: _sev(_ev("Edit", "claude", str(main / rel)), sid)
+        assert _decide(ed("src/x", "sidA"), main)[0] == 0
+        assert _decide(ed("docs/x", "sidA"), main)[0] == 2
+        assert _decide(ed("docs/x", "sidB"), main)[0] == 0
+        assert _decide(ed("src/x", "sidB"), main)[0] == 2
+        assert _decide(ed("src/x", "sidX"), main)[0] == 0                        # foreign : ni guard ni C8
+        assert _decide(ed("src/x", None), main)[0] == 2                          # sans cle : pointeur B
+        # G-S6 : log de gate sous la battle de la session
+        sh = lambda cmd, sid: _sev({"tool_name": "Bash", "agent_type": "legion:lint",
+                                    "tool_input": {"command": cmd}}, sid)
+        assert _decide(sh("echo x > .legion/battles/A/x.log", "sidA"), main)[0] == 0
+        assert _decide(sh("echo x > .legion/battles/A/x.log", "sidB"), main)[0] == 2
+        # G-S7 : mutation sans --battle, session sur A, pointeur sur B
+        script = str(Path(bs.__file__).resolve())
+        bsh = lambda cmd, sid: _sev({"tool_name": "Bash", "agent_type": "claude",
+                                     "tool_input": {"command": cmd}}, sid)
+        code, msg = _decide(bsh(f'python3 "{script}" transition build done', "sidA"), main)
+        assert code == 2 and "`A`" in msg and "--battle A" in msg, (code, msg)
+        code, msg = _decide(bsh(f'cd x && python3 {script} close', "sidA"), main)
+        assert code == 2, (code, msg)
+        code, msg = _decide(bsh(f"python3 {script} transition build done", "sidX"), main)   # foreign
+        assert code == 2 and "autre session" in msg, (code, msg)
+        # G-S8 : permis (--battle, init/activate, lecture, session == pointeur, sans cle, autre commande)
+        for cmd, sid in ((f"python3 {script} transition build done --battle A", "sidA"),
+                         (f"python3 {script} --battle A close", "sidA"),
+                         (f"python3 {script} activate A", "sidA"),
+                         (f"python3 {script} init X", "sidA"),
+                         (f"python3 {script} validate", "sidA"),
+                         (f"python3 {script} transition build done", "sidB"),
+                         (f"python3 {script} transition build done", None),
+                         ("ls -la", "sidA"),
+                         (f"python3 {script} 'unclosed", "sidA")):
+            assert _decide(bsh(cmd, sid), main)[0] == 0, (cmd, sid)
+        # G-S7 sous-processus reel du hook : deux session_id
+        code, err = _run_hook(bsh(f'python3 "{script}" transition build done', "sidA"), main)
+        assert code == 2 and "A" in err and "--battle" in err, (code, err)
+        code, err = _run_hook(bsh(f'python3 "{script}" transition build done', "sidB"), main)
+        assert code == 0, (code, err)
+        code, err = _run_hook(gate(a_plan, "sidA"), main)                         # G-S1 sous-processus
+        assert code == 0, (code, err)
+        code, err = _run_hook(gate(b_plan, "sidA"), main)
+        assert code == 2, (code, err)
+        # sonde : aucune ecriture sans opt-in ; avec opt-in, aucune valeur de session_id
+        assert not (main / ".legion" / "hook-probe.jsonl").exists()
+        _run_hook(gate(a_plan, "sidA"), main, LEGION_HOOK_PROBE="1")
+        probe = main / ".legion" / "hook-probe.jsonl"
+        assert probe.exists() and "sidA" not in probe.read_text(encoding="utf-8")
+    # G-S4 : C8 suit la battle de la session (A en worktree, B in-place)
+    with tempfile.TemporaryDirectory() as tmp:
+        main = Path(os.path.realpath(tmp))
+        _session_repo(bs, main, worktree_a=main / ".claude" / "worktrees" / "A")
+        ed = lambda rel, sid: _sev(_ev("Edit", "claude", str(main / rel)), sid)
+        code, msg = _decide(ed("src/x", "sidA"), main)
+        assert code == 2 and "protege" in msg, (code, msg)
+        assert _decide(ed("docs/x", "sidB"), main)[0] == 0
+        assert _decide(ed("src/x", "sidX"), main)[0] == 0                         # foreign : pas de C8
+    # G-S9 : la resolution par cible (lot A) reste prioritaire (G-WT1..G-WT7 : `_t_guard_wt_main_session`)
+    # Repli sans resolveur : comportement d'avant (pointeur seul)
+    global _resolve_battle_src
+    saved = _resolve_battle_src
+    with tempfile.TemporaryDirectory() as tmp:
+        main = Path(os.path.realpath(tmp))
+        _session_repo(bs, main)
+        _resolve_battle_src = None
+        try:
+            ed = lambda rel, sid: _sev(_ev("Edit", "claude", str(main / rel)), sid)
+            assert _decide(ed("docs/x", "sidA"), main)[0] == 0                    # pointeur B
+            assert _decide(ed("src/x", "sidA"), main)[0] == 2
+        finally:
+            _resolve_battle_src = saved
+
+
 def _self_test() -> int:
     global _IMPORT_ERROR
     if _IMPORT_ERROR is not None:
@@ -2443,6 +2697,7 @@ def _self_test() -> int:
     _t_guard_wt_main_inactive(battle_state)
     _t_guard_wt_main_session(battle_state)
     _t_guard_wt_owner_vs_pointer(battle_state)
+    _t_guard_sessions(battle_state)
 
     print("OK: guard self-test passed", file=sys.stderr)
     return 0

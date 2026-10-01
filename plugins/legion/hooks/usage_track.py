@@ -14,8 +14,11 @@ JSONL (chaque tour assistant porte un bloc `message.usage`, chaque skill un
   delta. Attribue l'orchestrateur inline a la battle active.
 
 Sortie = append-only `.legion/battles/<active>/usage.jsonl` (pas de
-read-modify-write partage => sur en concurrence). `active` lu via
-`battle_state.active_battle_id` (pointeur sous `.legion/` de la racine d'etat : depot principal depuis un worktree lie, sinon le cwd, GH#68). Sans battle active => no-op immediat (le hook tourne
+read-modify-write partage => sur en concurrence). La battle est
+resolue par `battle_state.resolve_battle` (GH#170) : liaison de la session du payload, sinon pointeur
+sous `.legion/` de la racine d'etat (depot principal depuis un worktree lie, sinon le cwd, GH#68) ;
+une session `foreign` (autre session liee au pointeur) n'attribue rien (#171). Le curseur du `Stop`
+est par cle de session (`.usage-main-<cle>.json`), `.usage-main.json` sans cle. Sans battle active => no-op immediat (le hook tourne
 dans toutes les sessions, il doit etre quasi gratuit hors battle).
 
 Tests : py usage_track.py --self-test
@@ -38,7 +41,7 @@ _IMPORT_ERROR: str | None = None
 try:
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))
-    from battle_state import active_battle_id, battles_dir, resolve_state_root
+    from battle_state import battles_dir, probe, resolve_battle, resolve_state_root, session_keys
 except Exception as _exc:  # ImportError, SyntaxError du module... jamais planter a l'import
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
@@ -112,13 +115,14 @@ def _tally(records) -> tuple[dict, list]:
     return tokens, skills
 
 
-def _active_battle_dir(cwd: str) -> Path | None:
-    """Dossier de la battle active, ou None (import KO, pointeur absent/vide/invalide,
-    dossier absent). Un pointeur vide ne doit jamais viser `.legion/battles/` lui-meme."""
+def _active_battle_dir(cwd: str, data: dict | None = None) -> Path | None:
+    """Dossier de la battle de la session, ou None (import KO, session `foreign`, pointeur
+    absent/vide/invalide, dossier absent). Un pointeur vide ne doit jamais viser
+    `.legion/battles/` lui-meme."""
     if _IMPORT_ERROR is not None:
         return None
     root = resolve_state_root(Path(cwd))
-    battle_id = active_battle_id(root)
+    battle_id, _battle, _source = resolve_battle(root, data if isinstance(data, dict) else {})
     if battle_id is None:
         return None
     battle_dir = battles_dir(root) / battle_id
@@ -156,7 +160,8 @@ def handle_stop(data: dict, battle_dir: Path) -> None:
     if not tpath:
         return
     tokens, skills = _tally(_iter_records(tpath))
-    cursor_path = battle_dir / ".usage-main.json"
+    keys = session_keys(data)
+    cursor_path = battle_dir / (f".usage-main-{keys[0]}.json" if keys else ".usage-main.json")
     cursor = _read_json(cursor_path)
 
     _atomic_write(cursor_path, {"tokens": tokens, "skills_count": len(skills)})
@@ -189,7 +194,9 @@ def main() -> int:
         print(f"[usage_track] suivi d'usage desactive : installation legion incomplete ({_IMPORT_ERROR}).",
               file=sys.stderr)
         return 0
-    battle_dir = _active_battle_dir(data.get("cwd") or os.getcwd())
+    cwd = data.get("cwd") or os.getcwd()
+    probe(data, resolve_state_root(Path(cwd)))  # sonde opt-in (noms de cles seulement)
+    battle_dir = _active_battle_dir(cwd, data)
     if battle_dir is None:
         return 0  # pas de battle active : no-op
 
@@ -215,6 +222,7 @@ def _t_worktree() -> None:  # U1, U2
         main, wt, _ = fx
         bdir = main / ".legion" / "battles" / "B"
         bdir.mkdir(parents=True)
+        (bdir / "battle.json").write_text("{}", encoding="utf-8")
         got = _active_battle_dir(str(wt))
         assert got is not None and os.path.realpath(got) == os.path.realpath(bdir), got  # U1
         tp = Path(tmp) / "t.jsonl"
@@ -228,6 +236,51 @@ def _t_worktree() -> None:  # U1, U2
         lines = (bdir / "usage.jsonl").read_text(encoding="utf-8").splitlines()
         assert len(lines) == 1 and json.loads(lines[0])["tokens"]["input"] == 7, lines  # U2
         assert not (wt / ".legion").exists()
+
+
+def _t_sessions() -> None:  # U-S1 a U-S4
+    import battle_state
+
+    def line(n):
+        return json.dumps({"type": "assistant", "message": {"usage": {
+            "input_tokens": n, "output_tokens": 0}, "content": []}}) + "\n"
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        for bid in ("A", "B"):
+            (root / ".legion" / "battles" / bid).mkdir(parents=True)
+            (root / ".legion" / "battles" / bid / "battle.json").write_text("{}", encoding="utf-8")
+        a_dir = root / ".legion" / "battles" / "A"
+        battle_state._write_pointer(root, "B")
+        battle_state.bind_session(root, "sidA", "A")
+        tp = root / "t.jsonl"
+        tp.write_text(line(4), encoding="utf-8")
+        sub = {"hook_event_name": "SubagentStop", "agent_type": "builder", "session_id": "sidA",
+               "agent_transcript_path": str(tp)}
+        got = _active_battle_dir(str(root), sub)
+        assert got is not None and got.name == "A", got
+        handle_subagent(sub, got)
+        assert len((a_dir / "usage.jsonl").read_text(encoding="utf-8").splitlines()) == 1  # U-S1
+        assert not (root / ".legion" / "battles" / "B" / "usage.jsonl").exists()
+        # U-S2 : session non liee alors que le pointeur est lie a une autre session
+        battle_state._write_pointer(root, "A")
+        assert _active_battle_dir(str(root), {"hook_event_name": "Stop", "session_id": "foreign"}) is None
+        # U-S3 : curseur par cle, deux sessions successives sur A (H2 : une seule liaison par battle)
+        for sid, totals in (("sidC", (10, 25)), ("sidD", (100, 130))):
+            battle_state.bind_session(root, sid, "A")
+            payload = {"hook_event_name": "Stop", "session_id": sid, "transcript_path": str(tp)}
+            for total in totals:
+                tp.write_text(line(total), encoding="utf-8")
+                handle_stop(payload, a_dir)
+        usage = [json.loads(x) for x in (a_dir / "usage.jsonl").read_text(encoding="utf-8").splitlines()]
+        mains = [u["tokens"]["input"] for u in usage if u["scope"] == "main"]
+        assert mains == [15, 30], mains  # delta juste, ni negatif ni fantome
+        assert (a_dir / ".usage-main-sidC.json").exists() and (a_dir / ".usage-main-sidD.json").exists()
+        # U-S4 : sans cle -> curseur historique
+        nokey = root / "t.x.jsonl"  # nom de transcript non conforme : aucune cle derivable
+        nokey.write_text(line(1), encoding="utf-8")
+        handle_stop({"hook_event_name": "Stop", "transcript_path": str(nokey)}, a_dir)
+        assert (a_dir / ".usage-main.json").exists()
 
 
 def _self_test() -> int:
@@ -254,6 +307,7 @@ def _self_test() -> int:
         # resolution de la battle active (lecteur partage)
         repo = Path(d) / "repo"
         (repo / ".legion" / "battles" / "b1").mkdir(parents=True)
+        (repo / ".legion" / "battles" / "b1" / "battle.json").write_text("{}", encoding="utf-8")  # resolve_battle exige un battle.json lisible
         battle_state._write_pointer(repo, "b1")
         assert _active_battle_dir(str(repo)).name == "b1"
         assert _active_battle_dir(str(Path(d) / "norepo")) is None
@@ -271,6 +325,7 @@ def _self_test() -> int:
             assert _active_battle_dir(str(repo)) is None
         finally:
             _IMPORT_ERROR = saved
+    _t_sessions()
     _t_worktree()
     print("OK: usage_track self-test passed", file=sys.stderr)
     return 0

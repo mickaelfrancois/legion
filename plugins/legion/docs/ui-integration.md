@@ -137,7 +137,7 @@ Un artefact **absent** = phase non encore atteinte (normal). Ne pas le considér
 comme une erreur.
 
 Le pointeur `<repo_path>/.legion/active-battle` contient l'`id` de la battle active
-du repo (utile si l'UI veut signaler « la battle en cours dans ce repo »).
+du repo (utile si l'UI veut signaler « la battle en cours dans ce repo »). Depuis les battles parallèles (#170), ce pointeur n'est qu'un repli : plusieurs battles peuvent être vivantes, et chaque session est liée à la sienne. `.legion/sessions/` est un détail interne du plugin, pas un contrat UI (#160) : l'UI ne doit pas le lire.
 
 ### 3.1 Schéma de `battle.json`
 

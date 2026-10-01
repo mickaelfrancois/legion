@@ -35,6 +35,15 @@ pointeur ni le cwd ; lit un seul `battle.json`). Le CLI, lui, part de
 `_repo_toplevel(cwd)` (GH#134 : racine du dépôt depuis un sous-dossier) ; ces deux fonctions
 restent inchangées pour les hooks.
 
+Battle par session (GH#170), lecture seule sauf mention, jamais d'exception sauf `bind_session` /
+`unbind_battle` (écrivent) : `session_keys(payload) -> list[str]` (clés de session du payload d'un
+hook : `session_id`, sinon dérivée du transcript), `bind_session(state_root, key, battle_id)` et
+`unbind_battle(state_root, battle_id) -> int` (liaisons `.legion/sessions/<clé>.json`),
+`session_battle_of(state_root, payload) -> (id, dict) | None`, `resolve_battle(state_root,
+payload) -> (id, dict, source)` avec `source` ∈ `session | pointer | foreign | none` (ordre :
+session, puis pointeur s'il n'appartient pas à une autre session), `probe(payload, state_root)`
+(sonde opt-in, noms de clés seulement).
+
 Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
 - `apply_transition(..., now_iso=None) -> battle` (copie ; lève `ValueError` si la transition est refusée) ;
@@ -206,7 +215,8 @@ CAP_TOTAL = 6
 SUBCOMMANDS: tuple[str, ...] = ("init", "transition", "approve-plan", "bump-autocorrect",
                                 "invalidate", "set-delivery", "set-guard", "set-meta",
                                 "set-slices", "slice", "next-slice", "check-cascade",
-                                "merge-reports", "activate", "close", "abort", "validate")
+                                "merge-reports", "activate", "close", "abort", "validate",
+                                "session-status")
 
 # Commandes encore permises sur une battle abandonnée (GH#75) : lecture de diagnostic seule.
 ABORT_ALLOWED: tuple[str, ...] = ("validate",)
@@ -1266,6 +1276,225 @@ def worktree_battle_of(state_root, path) -> tuple[str, dict] | None:
         return None
 
 
+# --- Battle par session (GH#170) -----------------------------------------------------------
+
+_SESSION_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _sessions_dir(root: Path) -> Path:
+    return Path(root) / ".legion" / "sessions"
+
+
+def _valid_key(key) -> bool:
+    return isinstance(key, str) and _SESSION_KEY_RE.fullmatch(key) is not None
+
+
+def _transcript_kind_key(path) -> tuple[str, str | None]:
+    """`(type, clé)` d'un chemin de transcript : `subagent` (`<sid>/subagents/agent-*.jsonl`),
+    `main` (`<sid>.jsonl`) ou `autre`. La clé n'est pas validée ici. Pur, sans exception."""
+    try:
+        if not isinstance(path, str) or not path:
+            return "absent", None
+        parts = [x for x in path.replace("\\", "/").split("/") if x]
+        if len(parts) >= 3 and parts[-2] == "subagents" and parts[-1].startswith("agent-") \
+                and parts[-1].endswith(".jsonl"):
+            return "subagent", parts[-3]
+        if parts and parts[-1].endswith(".jsonl") and len(parts[-1]) > len(".jsonl"):
+            return "main", parts[-1][:-len(".jsonl")]
+        return "autre", None
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return "autre", None
+
+
+def _transcript_keys(payload) -> list[str]:
+    """Clés dérivées des transcripts du payload : sous-agent d'abord, puis principal."""
+    out: list[str] = []
+    try:
+        found = [_transcript_kind_key(payload.get(f)) for f in ("agent_transcript_path", "transcript_path")]
+        for want in ("subagent", "main"):
+            for kind, key in found:
+                if kind == want and _valid_key(key) and key not in out:
+                    out.append(key)
+    except Exception:  # noqa: BLE001
+        return []
+    return out
+
+
+def session_keys(payload) -> list[str]:
+    """Clés de session d'un payload de hook, sans doublon, conformes à `^[A-Za-z0-9_-]{1,128}$`
+    (aucune traversée de chemin) : `session_id`, puis la clé dérivée du transcript (dossier parent
+    d'un `<sid>/subagents/agent-*.jsonl`, sinon nom de `<sid>.jsonl`). `[]` sans information.
+    Lecture seule, ne lève jamais."""
+    try:
+        if not isinstance(payload, dict):
+            return []
+        keys: list[str] = []
+        sid = payload.get("session_id")
+        if _valid_key(sid):
+            keys.append(sid)
+        for k in _transcript_keys(payload):
+            if k not in keys:
+                keys.append(k)
+        return keys
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return []
+
+
+def _read_binding(path: Path) -> tuple[str, dict] | None:
+    """`(battle_id, contenu)` d'un fichier de liaison lisible et conforme, sinon `None`."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        bid = data.get("battle") if isinstance(data, dict) else None
+        if isinstance(bid, str) and _ID_RE.fullmatch(bid):
+            return bid, data
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _live_data(root: Path, battle_id: str) -> dict | None:
+    """`battle.json` brut de la battle si elle est lisible et vivante, sinon `None`."""
+    try:
+        data = json.loads((battles_dir(Path(root)) / battle_id / "battle.json")
+                          .read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and _is_live(data) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _list_bindings(root: Path) -> list[tuple[Path, str | None, dict | None]]:
+    """`(fichier, battle_id | None, contenu | None)` pour chaque `*.json` de `.legion/sessions/`
+    (`None` si le fichier est illisible). Liste vide si le dossier est absent."""
+    out = []
+    try:
+        files = sorted(_sessions_dir(root).glob("*.json"))
+    except OSError:
+        return out
+    for f in files:
+        b = _read_binding(f)
+        out.append((f, b[0] if b else None, b[1] if b else None))
+    return out
+
+
+def bind_session(state_root: Path, key: str, battle_id: str) -> None:
+    """Lie la session `key` à `battle_id` : écrit `.legion/sessions/<key>.json` de façon atomique,
+    supprime les autres liaisons vers `battle_id` (une seule session pilote une battle : la
+    dernière activation l'emporte) et celles vers des battles mortes ou illisibles. Lève
+    `ValueError` si `key` ou `battle_id` est invalide, `OSError` si l'écriture échoue."""
+    if not _valid_key(key):
+        raise ValueError(f"clé de session invalide : {key!r}")
+    if not isinstance(battle_id, str) or not _ID_RE.fullmatch(battle_id):
+        raise ValueError(f"identifiant de battle invalide : {battle_id!r}")
+    sdir = _sessions_dir(state_root)
+    sdir.mkdir(parents=True, exist_ok=True)
+    mine = sdir / f"{key}.json"
+    _atomic_write(mine, {"battle": battle_id, "bound_at": _now_iso()})
+    for f, bid, _data in _list_bindings(state_root):
+        if f == mine:
+            continue
+        if bid is None or bid == battle_id or _live_data(state_root, bid) is None:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+
+def unbind_battle(state_root: Path, battle_id: str) -> int:
+    """Supprime toutes les liaisons vers `battle_id` ; renvoie leur nombre. Une erreur sur un
+    fichier est ignorée (il n'est alors pas compté)."""
+    n = 0
+    for f, bid, _data in _list_bindings(state_root):
+        if bid == battle_id:
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def session_battle_of(state_root, payload) -> tuple[str, dict] | None:
+    """`(id, battle.json brut)` de la première clé du payload liée à une battle vivante lisible,
+    sinon `None`. Lecture seule, ne lève jamais."""
+    try:
+        for key in session_keys(payload):
+            b = _read_binding(_sessions_dir(Path(state_root)) / f"{key}.json")
+            if b is None:
+                continue
+            data = _live_data(Path(state_root), b[0])
+            if data is not None:
+                return b[0], data
+        return None
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return None
+
+
+def resolve_battle(state_root, payload) -> tuple[str | None, dict | None, str]:
+    """`(id, battle.json brut, source)` de la battle d'une session de hook. Lecture seule, ne lève
+    jamais. `source` : `session` (liaison de la session) ; `pointer` (pointeur actif, comportement
+    historique : aussi sans clé, ou sans `.legion/sessions/`) ; `foreign` (le payload a une clé non
+    liée et le pointeur est lié à une autre session : `(None, None, "foreign")`) ; `none`."""
+    try:
+        root = Path(state_root)
+        if _sessions_dir(root).is_dir():
+            found = session_battle_of(root, payload)
+            if found is not None:
+                return found[0], found[1], "session"
+            pointed = active_battle_id(root)
+            if pointed and session_keys(payload) \
+                    and any(bid == pointed for _f, bid, _d in _list_bindings(root)):
+                return None, None, "foreign"
+        loaded = load_active_battle(root)
+        if loaded is not None:
+            return loaded[0], loaded[1], "pointer"
+        return None, None, "none"
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return None, None, "none"
+
+
+def _has_live_binding(root: Path) -> bool:
+    try:
+        return any(bid is not None and _live_data(root, bid) is not None
+                   for _f, bid, _d in _list_bindings(root))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def probe(payload, state_root) -> None:
+    """Sonde opt-in (`LEGION_HOOK_PROBE=1` ou fichier `.legion/hook-probe`) : ajoute une ligne à
+    `.legion/hook-probe.jsonl` avec seulement des **noms** de clés et des booléens/types (aucune
+    valeur de `session_id`, aucun chemin). Ne lève jamais."""
+    try:
+        root = Path(state_root)
+        if os.environ.get("LEGION_HOOK_PROBE") != "1" and not (root / ".legion" / "hook-probe").exists():
+            return
+        p = payload if isinstance(payload, dict) else {}
+        sid = p.get("session_id")
+        tkind = "absent"
+        for f in ("agent_transcript_path", "transcript_path"):
+            kind, _k = _transcript_kind_key(p.get(f))
+            if kind != "absent":
+                tkind = kind
+                break
+        derived = _transcript_keys(p)
+        event, agent = p.get("hook_event_name"), p.get("agent_type")
+        line = {
+            "at": _now_iso(),
+            "event": event if isinstance(event, str) and len(event) <= 40 else None,
+            "agent_type": agent if isinstance(agent, str) and len(agent) <= 80 else None,
+            "keys": sorted(str(k) for k in p)[:64],
+            "session_id_present": _valid_key(sid),
+            "transcript_kind": tkind,
+            "transcript_key_equals_session_id": bool(derived) and _valid_key(sid) and derived[0] == sid,
+        }
+        target = root / ".legion" / "hook-probe.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return
+
+
 def _pointer_taken(root: Path, new_id: str) -> tuple[str | None, list[str]]:
     """`(previous_active, warnings)` : si le pointeur nomme une autre battle vivante (GH#166)."""
     prev = active_battle_id(root)
@@ -1378,13 +1607,14 @@ def resolve_state_root(cwd: Path) -> Path:
     """Racine de l'état `.legion/` pour un `cwd` (GH#68). Lecture seule, ne lève jamais.
 
     Dans un worktree lié (`git rev-parse --git-dir --git-common-dir` : deux dossiers distincts),
-    renvoie le dépôt principal s'il a une battle active, sinon le `cwd`. Chemin rapide sans
+    renvoie le dépôt principal s'il a une battle active (pointeur, ou liaison de session vivante
+    dans `.legion/sessions/`, GH#170), sinon le `cwd`. Chemin rapide sans
     sous-processus quand `cwd/.git` est un dossier. Toute erreur (git absent, délai, code != 0,
     sortie incomplète) renvoie `cwd` tel quel. L'environnement git hérité est nettoyé.
     """
     try:
         main = _linked_main_root(cwd)
-        if main is not None and active_battle_id(main) is not None:
+        if main is not None and (active_battle_id(main) is not None or _has_live_binding(main)):
             return main
         return Path(cwd)
     except Exception:  # noqa: BLE001 - contrat : jamais d'exception
@@ -1511,7 +1741,7 @@ def _build_parser_parts():
     """Construit le parser ; retourne (parser, action des sous-parsers). `action.choices` (API
     publique d'argparse) donne les sous-commandes dans l'ordre de déclaration."""
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--battle", default=argparse.SUPPRESS, help="id (défaut : pointeur active-battle)")
+    common.add_argument("--battle", default=argparse.SUPPRESS, help="id (défaut : pointeur active-battle ; la doctrine passe toujours --battle)")
     common.add_argument("--repo", default=argparse.SUPPRESS, help="racine de l'état (défaut : racine du dépôt contenant le cwd, même depuis un sous-dossier ; depuis un worktree lié, dépôt principal — battle active pour les lectures/mutations, toujours pour init/activate ; hors dépôt, le cwd)")
     p = _Parser(prog="battle_state.py", parents=[common],
                 description="Transitions d'état déterministes de battle.json")
@@ -1581,6 +1811,7 @@ def _build_parser_parts():
     s = add("abort")
     s.add_argument("--reason", default=None)
     add("validate")
+    add("session-status")
     return p, sub
 
 
@@ -1868,6 +2099,15 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None, cwd=None) -> tuple
             _write_pointer(root, args.id)
             return 0, {"ok": True, "battle": args.id, "active": args.id,
                        "previous_active": previous, "warnings": taken}
+        elif args.cmd == "session-status":  # lecture seule : ni _save ni _sync_fleet (GH#170)
+            bid = explicit or _read_pointer(root)
+            if not bid:
+                raise _Refuse("aucune battle active (utiliser --battle <id> ou `activate`)")
+            _battle_dir(root, bid)
+            mine = [d for _f, b, d in _list_bindings(root) if b == bid]
+            stamps = sorted(str(d.get("bound_at")) for d in mine if isinstance(d, dict) and d.get("bound_at"))
+            return 0, {"ok": True, "battle": bid, "bound": bool(mine), "keys": len(mine),
+                       "bound_at": stamps[-1] if stamps else None}
         else:
             bid = explicit or _read_pointer(root)
             if not bid:
@@ -1899,9 +2139,11 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None, cwd=None) -> tuple
             _save(bdir, new)
             mutation_warnings = extra.pop("_warnings", [])
             result.update(battle=bid, **extra)
-            if args.cmd in ("close", "abort") and _read_pointer(root) == bid:
-                _write_pointer(root, "")
-                result["pointer_cleared"] = True
+            if args.cmd in ("close", "abort"):
+                result["unbound"] = unbind_battle(root, bid)
+                if _read_pointer(root) == bid:
+                    _write_pointer(root, "")
+                    result["pointer_cleared"] = True
 
         result["warnings"] = mutation_warnings + _sync_fleet(bdir, root, upsert, fleet_dir)
         return 0, result
@@ -2788,8 +3030,41 @@ def _t_doc_subcommands() -> None:
         m = re.search(r"(?:[Ss]ubcommands|sous-commandes)[:\s]*`init`.*?`validate`", text, re.S)
         assert m, f"liste de sous-commandes introuvable dans {d.name}"
         cited = set(re.findall(r"`([a-z][a-z-]*)`", m.group(0)))
-        assert cited == known, (d.name, sorted(cited ^ known))
+        # `session-status` (GH#170) suit `validate` dans SUBCOMMANDS : la doctrine le cite juste
+        # après la plage `init`..`validate`, vérifié ci-dessous.
+        assert cited == known - {"session-status"}, (d.name, sorted(cited ^ known))
+        if d.name == "battle.md":
+            assert "session-status" in text, "session-status non cité dans battle.md"
         assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
+
+
+def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
+    root = Path(__file__).resolve().parents[1]
+    names = ("battle", "retro", "freeze", "careful", "guard")
+    paths = {n: root / f"commands/{n}.md" for n in names}
+    if not all(p.is_file() for p in paths.values()):
+        print("SKIP: _t_doc_concurrent (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    docs = {n: p.read_text(encoding="utf-8") for n, p in paths.items()}
+    battle = docs["battle"]
+    assert "session-status" in battle, "session-status absent de battle.md"
+    assert "concurrent_battle" not in "".join(docs.values()), "concurrent_battle subsiste"
+    assert "in_place_live" in battle, "in_place_live non documenté"
+    # appels battle_state.py de freeze / careful / guard / retro : toujours --battle
+    for n in ("freeze", "careful", "guard", "retro"):
+        for line in docs[n].splitlines():
+            if "battle_state.py" not in line or "$CLAUDE_PLUGIN_ROOT" not in line:
+                continue
+            sub = line.split("battle_state.py\"", 1)[1].split()
+            if sub and sub[0] in ("init", "activate", "session-status", "validate"):
+                continue
+            assert "--battle" in line, f"{n}.md : appel sans --battle : {line.strip()}"
+    # §E : instantané et vérification par battle
+    e_sec = battle[battle.index("## §E — review / test gates"):battle.index("### Gate artifact delivery check")]
+    assert "tree-snapshot --battle" in e_sec or "tree-snapshot` --battle" in e_sec, "§E : tree-snapshot --battle absent"
+    assert "tree-verify --battle" in e_sec, "§E : tree-verify --battle absent"
+    assert "git fetch --no-tags origin" in battle, "fetch --no-tags absent de battle.md"
 
 
 def _t_doc_pr_tracking() -> None:
@@ -3320,7 +3595,7 @@ _CORE_TESTS = (
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
     _t_slice_report_names, _t_merge_nominal, _t_merge_missing_blank, _t_merge_out_of_scope,
-    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode,
+    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode, _t_doc_concurrent,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
@@ -4547,6 +4822,164 @@ def _t_resolve_root_ignores_git_dir_env() -> None:  # R9
     _with_fixture("_t_resolve_root_ignores_git_dir_env", body)
 
 
+# --- Battle par session (GH#170) ----------------------------------------------------------
+
+def _sess_files(root: Path) -> list[str]:
+    d = root / ".legion" / "sessions"
+    return sorted(f.name for f in d.glob("*.json")) if d.is_dir() else []
+
+
+def _t_session_keys() -> None:
+    assert session_keys({"session_id": "abc-1_X"}) == ["abc-1_X"]
+    base = "/h/.claude/projects/p"
+    assert session_keys({"transcript_path": f"{base}/sidM.jsonl"}) == ["sidM"]
+    sub = {"transcript_path": f"{base}/sidP/subagents/agent-a1.jsonl"}
+    assert session_keys(sub) == ["sidP"]
+    both = {"session_id": "sidP", "agent_transcript_path": f"{base}/sidP/subagents/agent-a1.jsonl",
+            "transcript_path": f"{base}/sidP.jsonl"}
+    assert session_keys(both) == ["sidP"]                         # sans doublon
+    assert session_keys({"session_id": "s1", "transcript_path": f"{base}/s2.jsonl"}) == ["s1", "s2"]
+    assert session_keys({"transcript_path": "C:\\x\\sidW\\subagents\\agent-1.jsonl"}) == ["sidW"]
+    for bad in ("../x", "", "a" * 200, "a/b", "a b", None, 7):
+        assert session_keys({"session_id": bad}) == [], bad
+    assert session_keys({"transcript_path": "/x/../.jsonl"}) == []
+    assert session_keys({"transcript_path": "/x/a b.jsonl"}) == []
+    assert session_keys({}) == [] and session_keys(None) == [] and session_keys("x") == []
+    assert session_keys({"transcript_path": 5, "agent_transcript_path": ["x"]}) == []
+
+
+def _t_bind_unbind() -> None:
+    with _Repo() as r:
+        r.init("a")
+        r.init("b")
+        bind_session(r.root, "k1", "a")
+        bind_session(r.root, "k2", "b")
+        assert _sess_files(r.root) == ["k1.json", "k2.json"]
+        bind_session(r.root, "k3", "a")                      # H2 : la dernière activation l'emporte
+        assert _sess_files(r.root) == ["k2.json", "k3.json"]
+        data = json.loads((r.root / ".legion" / "sessions" / "k3.json").read_text(encoding="utf-8"))
+        assert data["battle"] == "a" and data["bound_at"]
+        assert not list((r.root / ".legion" / "sessions").glob("*.tmp"))
+        r.ok("close", "--battle", "b")                       # close délie b
+        assert _sess_files(r.root) == ["k3.json"]
+        r.init("c")
+        (r.root / ".legion" / "sessions" / "junk.json").write_text("{pas json", encoding="utf-8")
+        (r.root / ".legion" / "sessions" / "ghost.json").write_text('{"battle": "nope"}', encoding="utf-8")
+        bind_session(r.root, "k4", "c")                      # purge : illisible, battle morte
+        assert _sess_files(r.root) == ["k3.json", "k4.json"]
+        r.ok("abort", "--battle", "c", "--reason", "x")
+        bind_session(r.root, "k5", "a")                      # c abandonnée : sa liaison est purgée
+        assert _sess_files(r.root) == ["k5.json"]
+        assert unbind_battle(r.root, "a") == 1 and unbind_battle(r.root, "a") == 0
+        for bad in (("../x", "a"), ("", "a"), ("k", "../a"), ("k", "")):
+            try:
+                bind_session(r.root, *bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(bad)
+        assert unbind_battle(r.root / "absent", "a") == 0
+
+
+def _t_resolve_battle() -> None:
+    with _Repo() as r:
+        ka, kb, kc = {"session_id": "sidA"}, {"session_id": "sidB"}, {"session_id": "sidC"}
+        r.init("a")
+        r.init("b")                                          # pointeur sur b
+        assert not (r.root / ".legion" / "sessions").exists()
+        assert resolve_battle(r.root, ka)[0::2] == ("b", "pointer")           # pas de dossier
+        bind_session(r.root, "sidA", "a")
+        bind_session(r.root, "sidB", "b")
+        got = resolve_battle(r.root, ka)
+        assert (got[0], got[2]) == ("a", "session") and got[1]["id"] == "a", got
+        assert resolve_battle(r.root, kb)[0::2] == ("b", "session")
+        assert resolve_battle(r.root, kc) == (None, None, "foreign")          # pointeur b lié ailleurs
+        assert resolve_battle(r.root, {})[0::2] == ("b", "pointer")           # sans clé : pointeur
+        assert resolve_battle(r.root, None)[0::2] == ("b", "pointer")
+        sub = {"transcript_path": "/x/sidA/subagents/agent-1.jsonl"}
+        assert resolve_battle(r.root, sub)[0::2] == ("a", "session")
+        r.ok("activate", "a")                                # pointeur a, lié à sidA
+        assert resolve_battle(r.root, kc) == (None, None, "foreign")
+        (r.root / ".legion" / "sessions" / "sidB.json").write_text("{pas json", encoding="utf-8")
+        assert resolve_battle(r.root, kb) == (None, None, "foreign")          # liaison illisible : repli
+        (r.root / ".legion" / "sessions" / "sidA.json").unlink()              # plus de liaison vers a
+        assert resolve_battle(r.root, kc)[0::2] == ("a", "pointer")
+        bind_session(r.root, "sidA", "a")
+        r.ok("close", "--battle", "a")
+        assert resolve_battle(r.root, ka) == (None, None, "none")             # pointeur vidé, liaison purgée
+        r.root.joinpath(".legion", "sessions", "sidZ.json").write_text('{"battle": "a"}', encoding="utf-8")
+        assert resolve_battle(r.root, {"session_id": "sidZ"})[2] == "none"    # battle close : ignorée
+        assert resolve_battle(r.root / "absent", ka) == (None, None, "none")
+
+
+def _t_state_root_sessions() -> None:
+    def body(main, wt, wt_out):
+        (main / ".legion" / "active-battle").write_text("", encoding="utf-8")
+        assert resolve_state_root(wt) == wt                                   # rien de vivant
+        bdir = main / ".legion" / "battles" / "A"
+        bdir.mkdir(parents=True)
+        (bdir / "battle.json").write_text(json.dumps({"id": "A", "phases": {}}), encoding="utf-8")
+        bind_session(main, "sidA", "A")
+        assert resolve_state_root(wt) == main                                 # liaison vivante
+        (bdir / "battle.json").write_text(json.dumps({"id": "A", "phases": {}, "aborted": {"at": "t"}}),
+                                          encoding="utf-8")
+        assert resolve_state_root(wt) == wt                                   # liaison sur battle morte
+    _with_fixture("_t_state_root_sessions", body)
+
+
+def _t_session_status_cli() -> None:
+    with _Repo() as r:
+        r.init("a")
+        res = r.ok("session-status", "--battle", "a")
+        assert res["bound"] is False and res["keys"] == 0 and res["battle"] == "a", res
+        bind_session(r.root, "k1", "a")
+        res = r.ok("session-status", "--battle", "a")
+        assert res["bound"] is True and res["keys"] == 1 and res["bound_at"], res
+        assert r.ok("session-status")["battle"] == "a"                        # pointeur
+        assert "invalide" in r.refused("session-status", "--battle", "../x")
+        res = r.ok("close", "--battle", "a")
+        assert res["unbound"] == 1 and res["pointer_cleared"] is True, res
+        r.init("b")
+        res = r.ok("abort", "--battle", "b", "--reason", "x")
+        assert res["unbound"] == 0, res
+        assert r.ok("session-status", "--battle", "b")["bound"] is False       # lecture seule sur abandonnée
+        assert "aucune battle active" in r.refused("session-status")
+
+
+def _t_probe() -> None:
+    with _Repo() as r:
+        payload = {"session_id": "secret-sid-123", "hook_event_name": "PreToolUse", "agent_type": "x:y",
+                   "transcript_path": "/home/u/secret-sid-123.jsonl", "tool_input": {"command": "x"}}
+        old = os.environ.pop("LEGION_HOOK_PROBE", None)
+        try:
+            probe(payload, r.root)
+            assert not (r.root / ".legion" / "hook-probe.jsonl").exists()      # désactivée
+            os.environ["LEGION_HOOK_PROBE"] = "1"
+            probe(payload, r.root)
+            probe(None, r.root)
+            probe(payload, r.root / "absent" / "x")
+        finally:
+            os.environ.pop("LEGION_HOOK_PROBE", None)
+            if old is not None:
+                os.environ["LEGION_HOOK_PROBE"] = old
+        text = (r.root / ".legion" / "hook-probe.jsonl").read_text(encoding="utf-8")
+        assert "secret-sid-123" not in text and "/home/u" not in text, text
+        rows = [json.loads(x) for x in text.splitlines()]
+        assert rows[0]["keys"] == sorted(payload) and rows[0]["session_id_present"] is True
+        assert rows[0]["transcript_kind"] == "main" and rows[0]["transcript_key_equals_session_id"] is True
+        assert rows[0]["event"] == "PreToolUse" and rows[0]["agent_type"] == "x:y"
+        (r.root / ".legion" / "hook-probe.jsonl").unlink()
+        (r.root / ".legion" / "hook-probe").write_text("", encoding="utf-8")   # activation par fichier
+        probe({"a": 1}, r.root)
+        assert len((r.root / ".legion" / "hook-probe.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+_SESSION_TESTS = (
+    _t_session_keys, _t_bind_unbind, _t_resolve_battle, _t_state_root_sessions,
+    _t_session_status_cli, _t_probe,
+)
+
+
 _RESOLVE_ROOT_TESTS = (
     _t_worktree_battle_of, _t_resolve_root_fast_path, _t_resolve_root_subdir, _t_resolve_root_worktree,
     _t_resolve_root_no_main_battle, _t_resolve_root_not_git, _t_resolve_root_git_failures,
@@ -4791,7 +5224,7 @@ _CLI_ROOT_TESTS = (
 
 def _self_test() -> int:
     failed = 0
-    tests = _CORE_TESTS + _INTEGRATION_TESTS + _RESOLVE_ROOT_TESTS + _CLI_ROOT_TESTS
+    tests = _CORE_TESTS + _INTEGRATION_TESTS + _RESOLVE_ROOT_TESTS + _CLI_ROOT_TESTS + _SESSION_TESTS
     for fn in tests:
         try:
             fn()
