@@ -101,7 +101,9 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   `build-report-<slice_id>.md` (one file per slice, so parallel builders never share a
   file); the orchestrator consolidates them into `build-report.md` with
   `battle_state.py merge-reports`. Not read-only, emits no verdict: its output is what the
-  gates review. A parallel builder works in its own worktree and does not commit there: the
+  gates review. A parallel (isolated) builder writes no report file: it returns its report in
+  its final message and the orchestrator writes `build-report-<slice_id>.md`; any refused write
+  is reported in `write_failures`. A parallel builder works in its own worktree and does not commit there: the
   orchestrator merges its delta back into the main tree (fan-in, `scripts/fan_in.py apply`,
   then `cleanup` once the project verification is green); a slice is `done` only after that.
   A parallel builder starts from the frozen main tree, not from `HEAD`: the orchestrator

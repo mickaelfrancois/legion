@@ -2698,6 +2698,34 @@ def _t_doc_worktree_state_root() -> None:
     assert m and "worktree" in m.group(1), "SKILL.md Guardrails"
 
 
+def _t_doc_isolated_report() -> None:
+    root = Path(__file__).resolve().parents[1]
+    docs = {n: root / p for n, p in (
+        ("battle", "commands/battle.md"), ("builder", "agents/builder.md"),
+        ("arch", "ARCHITECTURE.md"), ("skill", "skills/battle-workflow/SKILL.md"))}
+    if not all(d.is_file() for d in docs.values()):
+        print("SKIP: _t_doc_isolated_report (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    txt = {n: d.read_text(encoding="utf-8") for n, d in docs.items()}
+    b = txt["builder"]
+    assert "<<<BUILD-REPORT" in b and "<<<END BUILD-REPORT>>>" in b and "write_failures" in b, \
+        "builder.md : marqueurs / write_failures"
+    assert "entrée 6" in b.lower() and "y compris par" in b, "builder.md : lien entrée 6 / Bash"
+    bm = txt["battle"]
+    sec = bm[bm.index("**Mode — `--auto`.**"):bm.index("After build (either mode)")]
+    i_mark = sec.index("<<<BUILD-REPORT")
+    i_ver = sec.index("artifact_check.py\" verify")
+    i_base = sec.index("tree-verify --base")
+    i_merge = sec.index("merge-reports", sec.index("fan_in.py\" cleanup"))
+    assert i_mark < i_base and i_ver < i_base and i_ver < i_merge, "ordre rapport / tree-verify (§D)"
+    assert "An isolated builder writes its own `build-report-<slice_id>.md` at that absolute" not in bm, \
+        "ancienne règle du builder isolé encore présente"
+    assert "neither `battle.json` nor `.legion/active-battle`" in sec, "fenêtre S1 non documentée"
+    assert "rapport absent du retour du builder" in sec, "repli rapport absent"
+    assert "write_failures" in txt["skill"] and "write_failures" in txt["arch"], "SKILL/ARCHITECTURE"
+
+
 def _t_doc_abort_stale() -> None:
     root = Path(__file__).resolve().parents[1]
     battle_md, fleet_md = root / "commands/battle.md", root / "commands/fleet.md"
@@ -3046,7 +3074,7 @@ _CORE_TESTS = (
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
     _t_slice_report_names, _t_merge_nominal, _t_merge_missing_blank, _t_merge_out_of_scope,
-    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_abort_stale,
+    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,

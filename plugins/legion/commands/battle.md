@@ -480,10 +480,12 @@ as above. Write the slice report yourself: `build-report-<slice-id>.md` in the b
 path, `slice_id`, the `guard.allow` globs from `battle.json`, and — when set —
 `stack.build_target` (the explicit build target for a repo without a `.sln`). Pass the battle
 dir and the `plan.md` path as **absolute paths in the main repo** (`<main>/.legion/battles/<id>/`,
-`<main>` = the main checkout). An isolated builder writes its own `build-report-<slice_id>.md` at that absolute
-path, never into the `.legion/` of its own worktree; the hooks and the state CLIs (`battle_state.py`,
-`artifact_check.py --guard`) resolve the battle from the main
-repo (`git rev-parse --git-common-dir`). Each builder owns a distinct report file, so parallel builders never race on a shared file; the
+`<main>` = the main checkout). A sequential builder writes its own `build-report-<slice_id>.md` at that absolute
+path, never into the `.legion/` of a worktree. An isolated (parallel) builder writes **no** report file (the
+harness refuses it any write outside its worktree): it returns its report in its final message, between
+`<<<BUILD-REPORT <slice_id>>>>` and `<<<END BUILD-REPORT>>>`, and you write the file at step 2. The hooks and the
+state CLIs (`battle_state.py`, `artifact_check.py --guard`) resolve the battle from the main
+repo (`git rev-parse --git-common-dir`). Each slice owns a distinct report file, so parallel builders never race on a shared file; the
 missing-report check is done by `merge-reports` (below). Tell each builder it must not write another slice's report. For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep
 dependent slices sequential. **Sequential builders** are wrapped in the tree integrity
@@ -505,6 +507,25 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
    `<base>` and the absolute path of `fan_in.py`: the builder's first action is
    `fan_in.py align --base <base>`, which moves its worktree onto `<base>` (`reset --keep`, the
    harness branch is kept). If `align` fails the builder returns `build_ok: false` and stops.
+   **On each builder's return, write its report right away.** Extract the lines between the
+   line `<<<BUILD-REPORT <slice_id>>>>` and the **first following line** that is exactly
+   `<<<END BUILD-REPORT>>>` (each marker alone on its line; check the id in the marker
+   matches the slice) and write them **verbatim** with the Write tool to
+   `<main>/.legion/battles/<id>/build-report-<slice_id>.md` (overwriting any earlier version;
+   never edit or reword it). Then check it with
+   `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" verify <path>` (`exists` +
+   `non_empty`). This write touches neither `battle.json` nor `.legion/active-battle`, which
+   `tree-snapshot` excludes from its paths, so it is allowed between S1 and step 4 (it is not a
+   `battle_state.py` write). Error cases: a block that is absent or empty means the report is
+   absent from the builder's return: write a minimal `## <slice_id>` report yourself
+   (`build_ok`, `warnings`, files from the return, residual
+   "rapport absent du retour du builder"), relay a warning and flag it for the REFLECT. If your
+   Write is refused or `verify` fails, retry the write once, then fall back to the same minimal
+   report; if that also fails, the slice has no report and `merge-reports` (exit 2) blocks it
+   downstream. A corrective BUILD of an isolated builder returns the **full** report (old text
+   plus `### Correction (<gate>)`), so overwriting the file loses nothing. A return that is unreadable (no
+   `build_ok`) is treated as `build_ok == false` (step 5). A non-empty `write_failures` is relayed
+   to the user; with `build_ok: true` it is a non-blocking warning, flagged for the REFLECT.
 3. For each builder take its worktree path from `git worktree list --porcelain` (never from
    the builder's returned text), check it matches `^[A-Za-z0-9._/:\\ -]+$` (no `$`, backtick
    or `"`), then run `artifact_check.py tree-verify --base <base> --root "<worktree>" --guard`
@@ -550,7 +571,7 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
     slice. The `--files` list comes from the tool, not from the builder's return. Invariant:
     a slice is `done` only when its code is in the main tree. A slice whose worktree the harness
     removed (no change) skips `apply`: record it `done` with no files; `merge-reports` still
-    requires its report.
+    requires its report, which you already wrote at step 2.
 11. Verify the project **once** for the whole batch: the stack's build and tests (.NET:
     `dotnet build` + `dotnet test`; other stack: the repo's commands). If red:
     `transition build blocked`, escalation **case 7**, worktrees kept.
@@ -564,11 +585,11 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
     aligned worktree is left, re-run the batch from step 1.
 13. Continue with the classification below: `merge-reports`, then `transition build done`.
 
-Collect each `{ slice_id, build_ok, warnings, files_touched }` from the builders. For a
+Collect each `{ slice_id, build_ok, warnings, files_touched, write_failures }` from the builders. For a
 sequential builder, call `slice <id> in_progress` before delegating, and on its return
 `slice <id> done|blocked --warnings N --files …` with that result; a red build →
-`slice <id> blocked`, then `transition build blocked`. Each builder writes its own
-`build-report-<slice_id>.md`.
+`slice <id> blocked`, then `transition build blocked`. A sequential builder writes its own
+`build-report-<slice_id>.md`; an isolated builder's report is written by you at step 2.
 
 After build (either mode), **classify the result and record it immediately** with
 `transition` — for `all`, only after **every targeted slice** has a result:
@@ -593,8 +614,9 @@ After build (either mode), **classify the result and record it immediately** wit
   from the `build-report-<id>.md` files in the `battle.json.slices` order (plan order), with one
   final grouped `## Hors périmètre — candidats issue` section; it never writes `battle.json` and is
   idempotent. With no declared slice (aggregated BUILD) it only checks that `build-report.md` exists.
-  On **exit 2** (`missing: [ids]`, or a blank report): re-run the builder of each missing slice for
-  its report only, or write that `build-report-<id>.md` yourself (inline); if it is still missing,
+  On **exit 2** (`missing: [ids]`, or a blank report): for a slice of a parallel batch, do not re-run
+  its builder (its worktree may be gone): apply the step 2 fallback (minimal report). Otherwise re-run
+  the builder of each missing slice for its report only, or write that `build-report-<id>.md` yourself (inline); if it is still missing,
   `slice <id> blocked` then `transition build blocked`. Relay the script's `warnings` (injected
   title, undeclared extra report) to the user. For a legacy battle (slices `done` before this
   flow, no per-slice report), split `build-report.md` into per-slice files yourself, then re-run.
