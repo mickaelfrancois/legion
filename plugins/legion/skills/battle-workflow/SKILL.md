@@ -43,12 +43,14 @@ l'orchestrateur enchaîne directement BUILD → gates → DELIVER sans rendre la
 sauf escalade. En mode `step`, chaque transition de phase rend la main.
 
 **Optional pre-THINK: recon.** Before `start` consumes a rough issue, the `recon`
-skill (`/legion:recon <issue>`) can sharpen it first — a relentless interview (one
-question at a time, exploring the repo to answer its own questions) that appends a
-structured « Cadrage » section to the issue. It is **stateless**: it touches no
-`.legion/` state and starts no battle — it just makes the issue THINK reads already
-sharp, so `spec.md` seeds rich and the `architect` gate has less to push back on. No
-phase of its own in the diagram; it feeds THINK.
+skill (`/legion:recon <issue>`) can sharpen it first — a relentless interview that
+appends a structured « Cadrage » section to the issue. A coverage pre-scan picks the
+vague branches; rounds of up to 5 questions each carry a recommended answer, and the
+user only answers to deviate; the repo is explored to settle facts. The « Cadrage »
+logs a « Décisions » rubric that `start` copies into `spec.md`. It is **stateless**:
+it touches no `.legion/` state and starts no battle — it just makes the issue THINK
+reads already sharp, so `spec.md` seeds rich and the `architect` gate has less to push
+back on. No phase of its own in the diagram; it feeds THINK.
 
 **ADDRESS is optional and repeatable.** It runs only when the open PR draws human
 review comments: `/battle address` triages them (the `pr-triage` gate), loops fixes
