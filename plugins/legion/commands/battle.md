@@ -212,8 +212,10 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    The script refuses a path that is not `<state>/.claude/worktrees/<id>`, or an invalid branch
    name or base (exit `2`: relay the `reason`).
 
-   **Enter the worktree.** Try `EnterWorktree` with `name = <id>` (same path as the worktree
-   just created). If the tool is missing or refuses, go straight to the fallback. Then
+   **Enter the worktree.** Try `EnterWorktree` with `path = <path>` (the `path` from the
+   `create` JSON). Never pass `name`: it always creates a **new** worktree, cut from
+   `origin/<default>`, instead of entering this one. If the tool is missing or refuses, go
+   straight to the fallback. Then
    **verify**, whatever the tool answered:
 
    ```bash
@@ -445,7 +447,8 @@ aborted battle still accepts).
 **Re-enter the worktree.** If `battle.json` has a `worktree` block (worktree mode), run
 `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <battle-id>`. `ok: true`
 means the session is already in the worktree, on its branch. Otherwise, if `exists: true`,
-try `EnterWorktree` with `name = <battle-id>`, then run `where` again. Still `ok: false` (or the
+try `EnterWorktree` with `path = <worktree_path>` (never `name`, which creates a new
+worktree), then run `where` again. Still `ok: false` (or the
 tool is absent): same fallback as §A.1 step 2b — write no code, ask the user to relaunch
 `claude` from `worktree_path`, then `/legion:battle resume <battle-id>`. If `exists: false`, the
 worktree is gone: relay it and stop (escalation case 4). A battle **without** a `worktree`

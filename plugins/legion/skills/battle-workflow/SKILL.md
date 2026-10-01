@@ -330,7 +330,7 @@ context required. The active battle is pointed to by `.legion/active-battle`.
 **Mode worktree (défaut, `--in-place` pour l'ancien flux).** `/battle start` crée un worktree
 dédié `<repo>/.claude/worktrees/<id>` sur la branche `<me>/<token>` (`battle_worktree.py create`,
 puis `battle_state.py set-meta --worktree-path/--worktree-branch/--worktree-base`), et la session y
-entre (`EnterWorktree`, repli : relancer `claude` depuis ce chemin puis `/battle resume <id>`).
+entre (`EnterWorktree` avec `path`, jamais `name` qui crée un autre worktree ; repli : relancer `claude` depuis ce chemin puis `/battle resume <id>`).
 L'état (`.legion/`) reste dans le **dépôt principal** : tout chemin `.legion/` s'ancre sur la
 racine d'état `<state>` rendue par `battle_worktree.py where`. `battle.json` porte le bloc
 optionnel `worktree {path, branch, base, created_at}` (absent ou `null` = en place) et, après
