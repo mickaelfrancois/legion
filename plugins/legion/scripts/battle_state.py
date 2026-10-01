@@ -29,7 +29,9 @@ validité ; pur, ne lève jamais ; source unique de la forme valide, partagée a
 `resolve_state_root(cwd) -> Path` (GH#68 : racine de l'état `.legion/` ; dans un worktree lié, le
 dépôt principal si une battle y est active, sinon le cwd ; ne lève jamais), `main_repo_root(cwd)
 -> Path` (GH#128 : le dépôt principal d'un worktree lié même sans battle active, sinon le cwd ;
-utilisé par `init` / `activate`).
+utilisé par `init` / `activate`). Le CLI, lui, part de
+`_repo_toplevel(cwd)` (GH#134 : racine du dépôt depuis un sous-dossier) ; ces deux fonctions
+restent inchangées pour les hooks.
 
 Cœur pur :
 - `check_transition(battle, phase, status, verdict, fails, round_, threads) -> (ok, reason)` ;
@@ -79,8 +81,9 @@ regroupé en une section finale). Refus si un rapport manque ; sans slice décla
 existant (BUILD agrégé) est conservé tel quel.
 
 Usage (options globales `--battle <id>` défaut : pointeur `.legion/active-battle`, et
-`--repo <path>` défaut : dépôt principal depuis un worktree lié — battle active pour les
-lectures/mutations, toujours pour `init`/`activate` (GH#128) — sinon le cwd) :
+`--repo <path>` défaut : racine du dépôt contenant le cwd, même depuis un sous-dossier (GH#134) ;
+depuis un worktree lié, dépôt principal — battle active pour les lectures/mutations, toujours
+pour `init`/`activate` (GH#128) — sinon cette racine, ou le cwd hors dépôt) :
     python battle_state.py init <id> --ticket T --title T --profile P [--step] [--required-gates g…]
     python battle_state.py transition <phase> <status> [--verdict v] [--fails json]
                                       [--round n] [--threads json]
@@ -1228,6 +1231,31 @@ def _linked_main_root(cwd: Path) -> Path | None:
         return None
 
 
+def _repo_toplevel(cwd: Path) -> Path | None:
+    """Racine du dépôt (ou du worktree) contenant `cwd` (GH#134), chemin réel ; `None` pour garder
+    le `cwd`. Chemin rapide sans sous-processus quand `cwd/.git` existe (dossier ou fichier).
+    Sinon `git rev-parse --show-toplevel --show-superproject-working-tree` : code != 0, git
+    absent, délai, sortie vide ou seconde ligne non vide (sous-module) donnent `None`.
+    L'environnement git hérité est nettoyé. Ne lève jamais.
+    """
+    try:
+        cwd = Path(cwd)
+        if (cwd / ".git").exists():
+            return cwd
+        env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel", "--show-superproject-working-tree"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2, env=env)
+        if proc.returncode != 0:
+            return None
+        lines = [ln.strip() for ln in proc.stdout.splitlines()]
+        if not lines or not lines[0] or any(lines[1:]):
+            return None
+        return Path(os.path.realpath(lines[0]))
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return None
+
+
 def resolve_state_root(cwd: Path) -> Path:
     """Racine de l'état `.legion/` pour un `cwd` (GH#68). Lecture seule, ne lève jamais.
 
@@ -1256,14 +1284,17 @@ def main_repo_root(cwd: Path) -> Path:
 
 
 def _cli_root(args, cwd: Path) -> Path:
-    """Racine d'état du CLI (GH#128). `--repo` non vide l'emporte ; sinon `init` / `activate`
-    visent toujours le dépôt principal (`main_repo_root`), les autres `resolve_state_root`."""
+    """Racine d'état du CLI (GH#128, GH#134). `--repo` non vide l'emporte ; sinon on part de la
+    racine du dépôt contenant le cwd (`_repo_toplevel`, le cwd si inconnue), puis `init` /
+    `activate` visent toujours le dépôt principal (`main_repo_root`), les autres
+    `resolve_state_root`. Les hooks gardent leur propre résolution (cwd brut)."""
     repo = getattr(args, "repo", None)
     if repo:
         return Path(repo)
+    base = _repo_toplevel(cwd) or Path(cwd)
     if getattr(args, "cmd", None) in ("init", "activate"):
-        return main_repo_root(cwd)
-    return resolve_state_root(cwd)
+        return main_repo_root(base)
+    return resolve_state_root(base)
 
 
 def _write_pointer(root: Path, value: str) -> None:
@@ -1363,7 +1394,7 @@ def _build_parser_parts():
     publique d'argparse) donne les sous-commandes dans l'ordre de déclaration."""
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--battle", default=argparse.SUPPRESS, help="id (défaut : pointeur active-battle)")
-    common.add_argument("--repo", default=argparse.SUPPRESS, help="racine de l'état (défaut : dépôt principal depuis un worktree lié — battle active pour les lectures/mutations, toujours pour init/activate — sinon le cwd)")
+    common.add_argument("--repo", default=argparse.SUPPRESS, help="racine de l'état (défaut : racine du dépôt contenant le cwd, même depuis un sous-dossier ; depuis un worktree lié, dépôt principal — battle active pour les lectures/mutations, toujours pour init/activate ; hors dépôt, le cwd)")
     p = _Parser(prog="battle_state.py", parents=[common],
                 description="Transitions d'état déterministes de battle.json")
     sub = p.add_subparsers(dest="cmd", parser_class=_Parser)
@@ -4274,7 +4305,7 @@ def _t_cli_root_unit() -> None:                   # S8
         assert _cli_root(ns(cmd="init", repo="/x/r"), wt) == Path("/x/r")
         assert _cli_root(ns(cmd="init", repo=""), main) == main
         assert _cli_root(ns(cmd="init"), main) == main
-        assert _cli_root(ns(cmd="init"), main / "sub") == main / "sub"
+        assert _rp(_cli_root(ns(cmd="init"), main / "sub")) == _rp(main)   # GH#134
         assert _rp(_cli_root(ns(cmd="init"), wt)) == _rp(main)
         assert _rp(_cli_root(ns(cmd="activate"), wt)) == _rp(main)
         assert _rp(main_repo_root(wt_out)) == _rp(main)
@@ -4302,6 +4333,79 @@ def _t_cli_root_unit() -> None:                   # S8
             _sp.run = real
 
 
+def _t_cli_subdir_init() -> None:                 # T1 (GH#134)
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        (main / "sub").mkdir()
+        code, res = _cli(tmp, "init", "N", "--ticket", "GH#7", "--title", "T", "--profile", "feature", cwd=main / "sub")
+        assert code == 0, res
+        assert (main / ".legion" / "battles" / "N" / "battle.json").exists()
+        assert not (main / "sub" / ".legion").exists()
+        assert active_battle_id(main) == "N"
+        assert _bj(main, "N")["repo"] == "main"
+    _with_fixture("_t_cli_subdir_init", body)
+
+
+def _t_cli_subdir_mutations() -> None:            # T2 (GH#134)
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        (main / "sub").mkdir()
+        _seed_battle(tmp, main)
+        code, res = _cli(tmp, "transition", "think", "done", cwd=main / "sub")
+        assert code == 0, res
+        assert _bj(main, "B")["phases"]["think"]["status"] == "done"
+        code, res = _cli(tmp, "set-guard", "--allow", "src/**", cwd=main / "sub")
+        assert code == 0, res
+        assert _bj(main, "B")["guard"]["allow"] == ["src/**"]
+        assert not (main / "sub" / ".legion").exists()
+    _with_fixture("_t_cli_subdir_mutations", body)
+
+
+def _t_cli_worktree_subdir() -> None:             # T3 (GH#134)
+    def body(main, wt, wt_out):
+        tmp = str(main.parent)
+        (wt / "sub").mkdir()
+        _seed_battle(tmp, main)
+        code, res = _cli(tmp, "transition", "think", "done", cwd=wt / "sub")
+        assert code == 0, res
+        assert _bj(main, "B")["phases"]["think"]["status"] == "done"
+        assert not (wt / "sub" / ".legion").exists()
+        assert not (wt / ".legion").exists()
+    _with_fixture("_t_cli_worktree_subdir", body)
+
+
+def _t_cli_subdir_unit() -> None:                 # T4-T6 (GH#134)
+    import subprocess as _sp
+    ns = argparse.Namespace
+
+    def body(main, wt, wt_out):
+        (main / "sub").mkdir()
+        assert _rp(_cli_root(ns(cmd="init"), main / "sub")) == _rp(main)
+        assert _rp(_cli_root(ns(cmd="validate"), main / "sub")) == _rp(main)
+        assert _cli_root(ns(cmd="validate", repo="/x/r"), main / "sub") == Path("/x/r")
+    _with_fixture("_t_cli_subdir_unit", body)
+
+    def fail(code, out=""):
+        return lambda *a, **k: _sp.CompletedProcess(a, code, out, "")
+
+    def boom(exc):
+        def fake(*a, **k):
+            raise exc
+        return fake
+    real = _sp.run
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        try:
+            for fake in (boom(FileNotFoundError("git")), boom(_sp.TimeoutExpired("git", 2)),
+                         fail(128), fail(0, ""), fail(0, "/top\n/super\n")):
+                _sp.run = fake
+                assert _repo_toplevel(d) is None
+                assert _cli_root(ns(cmd="validate"), d) == d
+        finally:
+            _sp.run = real
+        assert _repo_toplevel(d) is None      # dossier non git
+
+
 def _t_cli_help_repo_default() -> None:           # S9
     parser = _build_parser()
     helps = [parser.format_help()]
@@ -4318,6 +4422,7 @@ _CLI_ROOT_TESTS = (
     _t_cli_init_from_worktree, _t_cli_init_switches_pointer, _t_cli_activate_from_worktree,
     _t_cli_default_unchanged, _t_cli_root_unit, _t_cli_help_repo_default,
     _t_merge_reports_worktree,
+    _t_cli_subdir_init, _t_cli_subdir_mutations, _t_cli_worktree_subdir, _t_cli_subdir_unit,
 )
 
 

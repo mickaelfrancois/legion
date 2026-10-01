@@ -56,6 +56,7 @@ commit donné (faute `[base]` sinon : worktree non aligné, jamais filtrable). F
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -242,8 +243,33 @@ def _parse_status(raw: bytes) -> list[tuple[str, str]]:
     return out
 
 
-def _is_legion(rel: str) -> bool:
-    return rel == ".legion" or rel.startswith(".legion/")   # casse exacte (FS sensible)
+@functools.lru_cache(maxsize=None)
+def _fs_case_insensitive_real(real_root: str) -> bool:
+    probe = os.path.join(real_root, ".git")
+    variant = os.path.join(real_root, ".GIT")
+    try:
+        return (os.path.lexists(probe) and os.path.lexists(variant)
+                and os.path.samefile(probe, variant))
+    except OSError:
+        return False
+
+
+def _fs_case_insensitive(root: str) -> bool:
+    """Le FS sous `root` ignore-t-il la casse ? Sonde `.git` vs `.GIT`, sans aucune écriture.
+
+    `samefile` évite le faux positif d'un FS sensible où les deux existeraient. Sans `.git`
+    sous `root` (ou en cas d'erreur) : `False` = comportement historique (casse exacte)."""
+    try:
+        return _fs_case_insensitive_real(os.path.realpath(root))
+    except OSError:
+        return False
+
+
+def _is_legion(rel: str, root: str | None = None) -> bool:
+    # casse exacte sur FS sensible ; casefold sur FS insensible (macOS/Windows)
+    if _fs_case_insensitive(root or os.getcwd()):
+        rel = rel.casefold()
+    return rel == ".legion" or rel.startswith(".legion/")
 
 
 def _read_state(root: str) -> dict:
@@ -301,7 +327,7 @@ def _collect(root: str, depth: int = 0, nested: bool = False) -> dict:
     paths: dict[str, str] = {}
     for xy, rel in entries:
         rel = rel.rstrip("/")
-        if not rel or _is_legion(rel):
+        if not rel or _is_legion(rel, root):
             continue
         if wts:
             real = os.path.realpath(os.path.join(root, *rel.split("/")))
@@ -593,7 +619,7 @@ def _ignored_control_files(root: str) -> dict:
     if not raw:
         return out
     for xy, rel in _parse_status(raw):
-        if xy != "!!" or _is_legion(rel.rstrip("/")):
+        if xy != "!!" or _is_legion(rel.rstrip("/"), root):
             continue
         rel = rel.rstrip("/") if rel.endswith("/") else rel
         cand = rel + "/.gitignore" if os.path.isdir(os.path.join(root, *rel.split("/"))) else (
@@ -1753,6 +1779,34 @@ def _t_tree_guard_from_worktree() -> None:
         assert rc == 2 and out["refused"] is True, out
 
 
+def _t_is_legion_case() -> None:
+    real = _fs_case_insensitive_real
+    orig = globals()["_fs_case_insensitive"]
+    try:
+        globals()["_fs_case_insensitive"] = lambda root: False       # T7 : FS sensible
+        assert _is_legion(".legion") and _is_legion(".legion/x")
+        for bad in (".LEGION/x", ".Legion", ".legionx", "x/.legion"):
+            assert not _is_legion(bad), bad
+        globals()["_fs_case_insensitive"] = lambda root: True        # T8 : FS insensible
+        for ok in (".LEGION/x", ".Legion", ".legion/x"):
+            assert _is_legion(ok), ok
+        for bad in (".legionx", "x/.LEGION"):
+            assert not _is_legion(bad), bad
+    finally:
+        globals()["_fs_case_insensitive"] = orig
+    real.cache_clear()
+    with tempfile.TemporaryDirectory() as tmp:                       # T9 : FS réel, sans écriture
+        os.makedirs(os.path.join(tmp, ".git"))
+        before = sorted(os.listdir(tmp))
+        truth = os.path.isdir(os.path.join(tmp, ".GIT"))
+        assert _fs_case_insensitive(tmp) is truth
+        assert sorted(os.listdir(tmp)) == before and os.listdir(os.path.join(tmp, ".git")) == []
+        with tempfile.TemporaryDirectory() as empty:                 # T10 : sans .git / racine absente
+            assert _fs_case_insensitive(empty) is False
+        assert _fs_case_insensitive(os.path.join(tmp, "absent")) is False
+    real.cache_clear()
+
+
 _TREE_TESTS = (
     _t_tree_git_state, _t_tree_refs_and_worktrees,
     _t_tree_git_config_and_hooks, _t_tree_forced_git_options, _t_tree_empty_commit_and_ignores,
@@ -1760,7 +1814,7 @@ _TREE_TESTS = (
     _t_tree_ignored_and_legion, _t_tree_state, _t_tree_index_mask, _t_tree_crlf,
     _t_tree_allow_filter, _t_tree_guard, _t_tree_usage, _t_tree_refusals, _t_tree_no_git,
     _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree,
-    _t_tree_stdout_bounded, _t_tree_nested_repo,
+    _t_tree_stdout_bounded, _t_tree_nested_repo, _t_is_legion_case,
 )
 
 _TESTS = (_t_absent, _t_empty, _t_not_canonical, _t_relative_equals_absolute,
