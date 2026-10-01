@@ -29,7 +29,9 @@ validité ; pur, ne lève jamais ; source unique de la forme valide, partagée a
 `resolve_state_root(cwd) -> Path` (GH#68 : racine de l'état `.legion/` ; dans un worktree lié, le
 dépôt principal si une battle y est active, sinon le cwd ; ne lève jamais), `main_repo_root(cwd)
 -> Path` (GH#128 : le dépôt principal d'un worktree lié même sans battle active, sinon le cwd ;
-utilisé par `init` / `activate`). Le CLI, lui, part de
+utilisé par `init` / `activate`), `worktree_battle_of(state_root, path) -> (id, dict) | None`
+(GH#166 : la battle vivante dont le worktree contient `path`, déduite du chemin seul, sans le
+pointeur ni le cwd ; lit un seul `battle.json`). Le CLI, lui, part de
 `_repo_toplevel(cwd)` (GH#134 : racine du dépôt depuis un sous-dossier) ; ces deux fonctions
 restent inchangées pour les hooks.
 
@@ -1226,6 +1228,59 @@ def active_battle_id(repo_root: Path) -> str | None:
     return value
 
 
+def _is_live(battle) -> bool:
+    """Vrai si la battle n'est ni abandonnée ni close (`reflect` pas `done`). Pur."""
+    return isinstance(battle, dict) and not is_aborted(battle) and _status(battle, "reflect") != "done"
+
+
+def worktree_battle_of(state_root, path) -> tuple[str, dict] | None:
+    """`(id, battle.json brut)` de la battle vivante dont le worktree contient `path`, ou `None`.
+
+    GH#166. Lecture seule, ne lève jamais, un seul `battle.json` lu (aucun balayage). Le résultat
+    ne dépend ni du cwd, ni du pointeur. Il faut, ensemble : `realpath(path)` sous
+    `realpath(<state>/.claude/worktrees/<seg>)` avec `<seg>` conforme à `_ID_RE` ; un
+    `<state>/.legion/battles/<seg>/battle.json` lisible et de type objet ;
+    `realpath(worktree.path)` égal à ce dossier ; la battle vivante (ni abandonnée, ni close).
+    """
+    try:
+        base = Path(os.path.realpath(Path(state_root) / ".claude" / "worktrees"))
+        target = Path(os.path.realpath(path))
+        rel = target.relative_to(base)
+        if not rel.parts:
+            return None
+        seg = rel.parts[0]
+        if not _ID_RE.fullmatch(seg):
+            return None
+        data = json.loads((battles_dir(Path(state_root)) / seg / "battle.json")
+                          .read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not _is_live(data):
+            return None
+        wt = data.get("worktree")
+        wt_path = wt.get("path") if isinstance(wt, dict) else None
+        if not isinstance(wt_path, str) or not wt_path:
+            return None
+        if Path(os.path.realpath(wt_path)) != base / seg:
+            return None
+        return seg, data
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return None
+
+
+def _pointer_taken(root: Path, new_id: str) -> tuple[str | None, list[str]]:
+    """`(previous_active, warnings)` : si le pointeur nomme une autre battle vivante (GH#166)."""
+    prev = active_battle_id(root)
+    if not prev or prev == new_id:
+        return None, []
+    try:
+        data = json.loads((_battle_dir(root, prev) / "battle.json").read_text(encoding="utf-8"))
+    except (_Refuse, OSError, ValueError, RecursionError):
+        return None, []
+    if not _is_live(data):
+        return None, []
+    return prev, [f"pointer_taken: la battle {prev} était active ; ses hooks et ses commandes "
+                  f"sans --battle visent désormais {new_id}"]
+
+
 def load_active_battle(repo_root: Path) -> tuple[str, dict] | None:
     """`(id, battle.json brut)` de la battle active, ou `None`.
 
@@ -1799,16 +1854,20 @@ def run_command(argv: list[str], upsert=None, fleet_dir=None, cwd=None) -> tuple
             _check_profile(args.profile)
             bdir.mkdir(parents=True, exist_ok=True)
             _save(bdir, _new_battle(root, args))
+            previous, mutation_warnings = _pointer_taken(root, args.id)
             _write_pointer(root, args.id)
             init_gates = _load(bdir)["required_gates"]
-            result.update(battle=args.id, profile=args.profile, required_gates=init_gates)
+            result.update(battle=args.id, profile=args.profile, required_gates=init_gates,
+                          previous_active=previous)
         elif args.cmd == "activate":
             bdir = _battle_dir(root, args.id)
             refusal = aborted_refusal(_load(bdir), "activate")
             if refusal:
                 raise _Refuse(refusal)
+            previous, taken = _pointer_taken(root, args.id)
             _write_pointer(root, args.id)
-            return 0, {"ok": True, "battle": args.id, "active": args.id}
+            return 0, {"ok": True, "battle": args.id, "active": args.id,
+                       "previous_active": previous, "warnings": taken}
         else:
             bid = explicit or _read_pointer(root)
             if not bid:
@@ -2880,10 +2939,36 @@ def _t_doc_worktree_mode() -> None:   # GH#152 : doctrine du mode worktree
     battle, retro = battle_md.read_text(encoding="utf-8"), retro_md.read_text(encoding="utf-8")
     for needle in ("battle_worktree.py\" create", "battle_worktree.py\" close-check",
                    "battle_worktree.py\" close --battle", "battle_worktree.py\" where",
-                   "--in-place", "set-meta --worktree-path", "EnterWorktree", "ExitWorktree",
-                   "close [<battle-id>]", "## §J"):
+                   "--in-place", "set-meta --worktree-path", "ExitWorktree",
+                   "close [<battle-id>]", "## §J", "worktree_branch", "reason",
+                   "Worktree mode — working from the main checkout", "pointer_taken"):
         assert needle in battle, f"{needle!r} absent de battle.md"
+    # GH#166 : la session reste dans le principal ; EnterWorktree seulement dans la ligne de reprise
+    rec_a = battle.index("**Recovery line.**")
+    rec_b = battle.index("From now on the session works **from the main checkout**")
+    assert rec_a < rec_b, "ligne de recuperation mal placee"
+    assert "EnterWorktree" not in battle[:rec_a] + battle[rec_b:], \
+        "EnterWorktree hors de la ligne de recuperation"
+    assert "EnterWorktree" not in retro, "EnterWorktree dans retro.md"
+    # §E : instantane et verification sur la racine du worktree ; §G : git -C
+    e_sec = battle[battle.index("## §E — review / test gates"):battle.index("### Gate artifact delivery check")]
+    assert e_sec.count('--root "<worktree>"') >= 2, '§E : --root "<worktree>" absent (snapshot et verify)'
+    g_sec = battle[battle.index("## §G — deliver"):battle.index("## §H — address")]
+    assert 'git -C "<worktree>"' in g_sec, "§G : git -C absent"
+    assert 'base_freshness.py --repo "<worktree>"' in g_sec, "§G : base_freshness --repo absent"
+    assert "--head <worktree.branch>" in g_sec, "§G : gh pr create --head absent"
+    # toute mutation battle_state.py porte --battle (hors init, activate, validate)
+    mut = r'battle_state\.py"? (transition|slice|set-meta|set-guard|set-slices|approve-plan|' \
+          r'bump-autocorrect|invalidate|set-delivery|merge-reports|check-cascade|next-slice|close|abort)\b'
+    for name, text in (("battle.md", battle), ("retro.md", retro)):
+        for n, line in enumerate(text.splitlines(), 1):
+            if re.search(mut, line):
+                assert "--battle" in line, f"{name}:{n} : mutation battle_state.py sans --battle"
     assert "<state>" in battle and "<state>" in retro, "ancrage <state> absent"
+    # GH#166 : l'en-tete ne doit pas inviter a muter sans --battle
+    assert "the active battle\n> there" not in battle and "the active battle there" not in battle, \
+        "en-tete : allusion a la battle active du principal"
+    assert "every\n> mutation after `init` carries `--battle <id>`" in battle, "en-tete : --battle apres init absent"
     # aucun chemin `.legion/` relatif dans un bloc shell (ancrage sur <state>)
     for name, text in (("battle.md", battle), ("retro.md", retro)):
         for block in re.findall(r"```.*?```", text, re.S):
@@ -3428,6 +3513,83 @@ def _t_activate_close() -> None:
         assert r.load("b1")["phases"]["reflect"]["status"] == "done" and res["pointer_cleared"]
         assert pointer.read_text(encoding="utf-8") == ""
         assert "aucune battle active" in r.refused("validate")
+
+
+def _t_worktree_battle_of() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fx = _git_worktree_fixture(Path(tmp))
+        if fx is None:
+            print("SKIP: _t_worktree_battle_of (git absent ou inutilisable)", file=sys.stderr)
+            return
+        main, wt, wt_out = fx
+        wts = main / ".claude" / "worktrees"
+
+        def put(bid, wt_path, **extra):
+            d = main / ".legion" / "battles" / bid
+            d.mkdir(parents=True, exist_ok=True)
+            data = {"id": bid, "phases": {}, "worktree": {"path": str(wt_path)}}
+            data.update(extra)
+            (d / "battle.json").write_text(json.dumps(data), encoding="utf-8")
+
+        put("w1", wt)
+        got = worktree_battle_of(main, wt / "src" / "x.py")
+        assert got is not None and got[0] == "w1" and got[1]["id"] == "w1", got
+        assert worktree_battle_of(main, wt)[0] == "w1"
+        assert worktree_battle_of(str(main), str(wt / "a"))[0] == "w1"   # str accepté
+        # None, sans exception
+        assert worktree_battle_of(main, wts / "agent-x" / "f") is None          # pas de battle.json
+        assert worktree_battle_of(main, main / "src" / "x.py") is None          # hors .claude/worktrees
+        assert worktree_battle_of(main, wts) is None                            # racine seule
+        assert worktree_battle_of(main, wts / "bad_id" / "f") is None           # id invalide
+        assert worktree_battle_of(main, wt_out / "f") is None                   # worktree hors arbre
+        put("w1", wt, aborted={"at": "t", "reason": "r"})
+        assert worktree_battle_of(main, wt / "f") is None                       # abandonnée
+        put("w1", wt, phases={"reflect": {"status": "done"}})
+        assert worktree_battle_of(main, wt / "f") is None                       # close
+        put("w1", wts / "autre")
+        assert worktree_battle_of(main, wt / "f") is None                       # worktree.path différent
+        put("w1", wt_out)
+        assert worktree_battle_of(main, wt / "f") is None
+        (main / ".legion" / "battles" / "w1" / "battle.json").write_text("[1]", encoding="utf-8")
+        assert worktree_battle_of(main, wt / "f") is None                       # racine non-dict
+        (main / ".legion" / "battles" / "w1" / "battle.json").write_text("{pas json", encoding="utf-8")
+        assert worktree_battle_of(main, wt / "f") is None                       # illisible
+        assert worktree_battle_of(None, None) is None
+        # lien symbolique : un dossier de .claude/worktrees pointant ailleurs
+        try:
+            link = wts / "lnk"
+            os.symlink(str(wt_out), str(link))
+        except (OSError, NotImplementedError):
+            return
+        put("lnk", link)
+        assert worktree_battle_of(main, link / "f") is None
+
+
+def _t_activate_pointer_taken() -> None:
+    with _Repo() as r:
+        res = r.init("b1")
+        assert res["previous_active"] is None and res["warnings"] == [], res
+        res = r.init("b2")                                   # b1 vivante est pointée
+        assert res["previous_active"] == "b1", res
+        assert any(w.startswith("pointer_taken:") and "b1" in w and "b2" in w
+                   for w in res["warnings"]), res
+        pointer = r.root / ".legion" / "active-battle"
+        assert pointer.read_text(encoding="utf-8") == "b2"
+        res = r.ok("activate", "b1")                         # b2 vivante
+        assert res["previous_active"] == "b2" and res["warnings"], res
+        assert pointer.read_text(encoding="utf-8") == "b1"
+        res = r.ok("activate", "b1")                         # même battle : pas d'avertissement
+        assert res["previous_active"] is None and res["warnings"] == [], res
+        r.ok("close", "--battle", "b2")                      # pointée b1, b2 close
+        pointer.write_text("b2", encoding="utf-8")
+        res = r.ok("activate", "b1")                         # pointée close : rien
+        assert res["previous_active"] is None and res["warnings"] == [], res
+        r.ok("abort", "--battle", "b1", "--reason", "x")
+        pointer.write_text("b1", encoding="utf-8")
+        r.init("b3")                                         # pointée abandonnée : rien
+        pointer.write_text("", encoding="utf-8")
+        res = r.ok("activate", "b3")                         # pointeur vide : rien
+        assert res["previous_active"] is None and res["warnings"] == [], res
 
 
 def _t_atomic_and_corrupt() -> None:
@@ -4236,7 +4398,7 @@ _INTEGRATION_TESTS = (
     _t_security_hits, _t_security_auto_slice,
     _t_init_profiles, _t_set_meta_profile, _t_set_meta_worktree, _t_set_delivery_head_fields,
     _t_validate_profile, _t_hotfix_e2e,
-    _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_atomic_and_corrupt,
+    _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_activate_pointer_taken, _t_atomic_and_corrupt,
     _t_fleet_sync_called, _t_phases_cs, _t_cli_exit_codes, _t_import_no_side_effect,
     _t_id_whitelist, _t_atomic_keeps_mode, _t_fleet_sync_explicit_path,
     _t_bump_build_failure_keeps_fails, _t_invalidate_cli, _t_slices_cli,
@@ -4386,7 +4548,7 @@ def _t_resolve_root_ignores_git_dir_env() -> None:  # R9
 
 
 _RESOLVE_ROOT_TESTS = (
-    _t_resolve_root_fast_path, _t_resolve_root_subdir, _t_resolve_root_worktree,
+    _t_worktree_battle_of, _t_resolve_root_fast_path, _t_resolve_root_subdir, _t_resolve_root_worktree,
     _t_resolve_root_no_main_battle, _t_resolve_root_not_git, _t_resolve_root_git_failures,
     _t_pick_state_root_pure, _t_resolve_root_ignores_git_dir_env,
 )

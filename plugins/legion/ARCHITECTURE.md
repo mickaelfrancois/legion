@@ -236,7 +236,12 @@ lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 
 **Battle en worktree.** Par défaut (`--in-place` pour l'ancien flux), la battle travaille dans
 `<repo>/.claude/worktrees/<id>` sur la branche `<me>/<token>`, tandis que `.legion/` reste dans le
-dépôt principal. Deux ajouts rétrocompatibles dans `battle.json` : le bloc optionnel
+dépôt principal et que la session y reste du `start` au `close` (code, build, tests, commit et push
+visent le worktree par chemin absolu ou `git -C`). Le guard et `tree-verify --guard` retrouvent la
+battle d'une cible par son chemin (`battle_state.worktree_battle_of` : `.claude/worktrees/<id>/…`,
+battle vivante, `worktree.path` conforme) : `allow` / `deny` sont ceux de cette battle propriétaire,
+relatifs à son worktree, quel que soit le pointeur `active-battle`. La règle C8 (code du principal
+fermé) est inchangée. Deux ajouts rétrocompatibles dans `battle.json` : le bloc optionnel
 `worktree {path, branch, base, created_at}` (écrit par `battle_state.py set-meta --worktree-path
 --worktree-branch --worktree-base`, les trois ensemble ; absent ou `null` = en place), et
 `delivery.head_ref` / `delivery.head_oid` (lus du JSON de `gh pr view`, posés par `set-delivery

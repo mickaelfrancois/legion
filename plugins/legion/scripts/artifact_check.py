@@ -50,8 +50,11 @@ protégé est lu à la racine d'**état** (dépôt principal) et l'empreinte ajo
 principal (HEAD + `status -uall`, `.legion/` et `.claude/worktrees/` exclus) : toute écriture
 d'une gate dans le principal est la faute `[main-tree]`. `tree-verify` recalcule et compare.
 `--fingerprint` (retenu par l'orchestrateur) protège le fichier `--before` contre une
-réécriture. `--guard` lit `allow`/`deny` de la battle active de la racine d'état
-(`battle_state.resolve_state_root` : dépôt principal depuis un worktree lié, comme `guard.py`) ;
+réécriture. `--guard` lit `allow`/`deny` de la battle propriétaire de `--root` quand c'est le
+worktree d'une battle vivante (`battle_state.worktree_battle_of`, GH#166), sinon de la battle
+active de la racine d'état (`battle_state.resolve_state_root` : dépôt principal depuis un
+worktree lié, comme `guard.py`). `tree-snapshot --root <wt>` et `tree-verify --root <wt>`
+peuvent être lancés depuis le dépôt principal (la session y reste) ;
 `--base` compare un worktree à un arbre propre au commit donné, dont le HEAD doit descendre du
 commit donné (faute `[base]` sinon : worktree non aligné, jamais filtrable). Fail-closed : hors dépôt,
 `git` absent, fichier illisible → refus (exit 2), jamais `ok`.
@@ -775,12 +778,14 @@ def tree_snapshot(out: str, root_arg: str | None) -> dict:
     return {"ok": True, "fingerprint": fp, "count": len(core["paths"])}
 
 
-def _load_guard_filter() -> dict:
-    """`allow`/`deny` de la battle active de la racine d'état (`--guard`).
+def _load_guard_filter(root_arg: str | None = None) -> dict:
+    """`allow`/`deny` de la battle visée (`--guard`).
 
     Racine d'état = `battle_state.resolve_state_root(cwd)` : dépôt principal depuis un worktree
     lié, sinon le cwd. Distincte de la racine d'arbre (`_toplevel`, racine d'édition).
-    `_Refuse` si illisible/invalide."""
+    GH#166 : si `root_arg` (`--root`) est le worktree d'une battle vivante
+    (`battle_state.worktree_battle_of`), c'est le guard de cette battle propriétaire, quel que
+    soit le pointeur ; sinon celui de la battle active (pointeur). `_Refuse` si illisible/invalide."""
     try:
         if _SCRIPTS_DIR not in sys.path:
             sys.path.insert(0, _SCRIPTS_DIR)
@@ -788,7 +793,13 @@ def _load_guard_filter() -> dict:
         from pathlib import Path
     except Exception as exc:  # noqa: BLE001
         raise _Refuse(f"battle_state.py inimportable ({type(exc).__name__}: {exc})") from exc
-    active = bs.load_active_battle(bs.resolve_state_root(Path(os.getcwd())))
+    state = bs.resolve_state_root(Path(os.getcwd()))
+    active = None
+    if root_arg:
+        owner = getattr(bs, "worktree_battle_of", None)
+        active = owner(state, root_arg) if owner else None
+    if active is None:
+        active = bs.load_active_battle(state)
     if active is None:
         raise _Refuse("--guard : aucune battle active lisible (fail-closed)")
     guard, valid = bs.guard_of(active[1])
@@ -875,7 +886,7 @@ def tree_verify(before_path: str | None, fingerprint: str | None, base: str | No
                 batch_worktrees: bool = False) -> dict:
     flt = None
     if guard:
-        flt = _load_guard_filter()
+        flt = _load_guard_filter(root_arg)
     elif allow is not None:
         flt = {"allow": allow, "deny": [], "armed": True}
     if base is not None:
@@ -1879,6 +1890,45 @@ def _t_tree_worktree_battle() -> None:
             assert json.load(fh)["main"] is None
 
 
+def _t_tree_wt_from_main() -> None:
+    """GH#166 : session dans le principal, `--root <wt>` ; `--guard` lit la battle propriétaire."""
+    with _TreeRepo() as r:
+        wt = os.path.join(r.root, ".claude", "worktrees", "W")
+        r.git("worktree", "add", "-q", "-b", "wtw", wt)
+        r.battle({"allow": ["a/**"]})                  # pointeur : battle in-place B, autre allow
+        bd = os.path.join(r.root, ".legion", "battles", "W")
+        os.makedirs(bd, exist_ok=True)
+        _write(os.path.join(bd, "battle.json"), json.dumps(
+            {"id": "W", "worktree": {"path": wt, "branch": "wtw"},
+             "guard": {"allow": ["src/**"]}}).encode())
+        snap = os.path.join(r.root, ".legion", "_wtm-before.json")
+
+        def take() -> str:
+            rc, out = r.run("tree-snapshot", "--out", snap, "--root", wt)
+            assert rc == 0 and out["ok"] is True, (rc, out)
+            return out["fingerprint"]
+
+        def verify(fp: str) -> tuple[int, dict]:
+            return r.run("tree-verify", "--before", snap, "--fingerprint", fp,
+                         "--root", wt, "--guard")
+
+        fp = take()
+        os.makedirs(os.path.join(wt, "src"), exist_ok=True)
+        _write(os.path.join(wt, "src", "n.txt"), b"1")           # dans allow de W (pas de B)
+        rc, out = verify(fp)
+        assert rc == 0 and out["ok"] is True, out
+        os.makedirs(os.path.join(wt, "docs"), exist_ok=True)
+        _write(os.path.join(wt, "docs", "z.txt"), b"1")          # hors allow de W
+        rc, out = verify(fp)
+        assert rc == 2 and out["out_of_scope"] == ["docs/z.txt"], out
+        os.remove(os.path.join(wt, "docs", "z.txt"))
+        os.remove(os.path.join(wt, "src", "n.txt"))
+        fp = take()
+        _write(os.path.join(r.root, "src", "a.txt"), b"hacked\n")   # écriture dans le principal
+        rc, out = verify(fp)
+        assert rc == 2 and "[main-tree]" in out["changed"], out
+
+
 def _t_is_legion_case() -> None:
     real = _fs_case_insensitive_real
     orig = globals()["_fs_case_insensitive"]
@@ -1914,7 +1964,7 @@ _TREE_TESTS = (
     _t_tree_ignored_and_legion, _t_tree_state, _t_tree_index_mask, _t_tree_crlf,
     _t_tree_allow_filter, _t_tree_guard, _t_tree_usage, _t_tree_refusals, _t_tree_no_git,
     _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree,
-    _t_tree_worktree_battle, _t_tree_stdout_bounded, _t_tree_nested_repo, _t_is_legion_case,
+    _t_tree_worktree_battle, _t_tree_wt_from_main, _t_tree_stdout_bounded, _t_tree_nested_repo, _t_is_legion_case,
 )
 
 _TESTS = (_t_absent, _t_empty, _t_not_canonical, _t_relative_equals_absolute,

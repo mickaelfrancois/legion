@@ -331,8 +331,15 @@ context required. The active battle is pointed to by `.legion/active-battle`.
 
 **Mode worktree (défaut, `--in-place` pour l'ancien flux).** `/battle start` crée un worktree
 dédié `<repo>/.claude/worktrees/<id>` sur la branche `<me>/<token>` (`battle_worktree.py create`,
-puis `battle_state.py set-meta --worktree-path/--worktree-branch/--worktree-base`), et la session y
-entre (`EnterWorktree` avec `path`, jamais `name` qui crée un autre worktree ; repli : relancer `claude` depuis ce chemin puis `/battle resume <id>`).
+puis `battle_state.py set-meta --worktree-path/--worktree-branch/--worktree-base`). La session
+**reste dans le dépôt principal** du `start` au `close` : elle n'entre pas dans le worktree
+(`EnterWorktree` n'est plus utilisé ; récupération seulement : session déjà dans un worktree →
+`ExitWorktree(keep)`, puis continuer depuis le principal). Le code, le build, les tests, le commit
+et le push visent `worktree.path` par chemin absolu ou par l'option de répertoire de l'outil
+(`git -C`, `--root`, `--repo`), jamais par un `cd` nu ; le cwd de la session ne bouge pas. Les
+gates reçoivent `worktree.path` comme **Racine du code** et écrivent leur artefact sous
+`<state>/.legion/`. `battle_worktree.py where` vérifie le worktree : `ok` = il existe et sa branche
+est `worktree.branch` (`reason` : `missing`, `wrong_branch` ou `null`).
 L'état (`.legion/`) reste dans le **dépôt principal** : tout chemin `.legion/` s'ancre sur la
 racine d'état `<state>` rendue par `battle_worktree.py where`. `battle.json` porte le bloc
 optionnel `worktree {path, branch, base, created_at}` (absent ou `null` = en place) et, après
@@ -377,12 +384,16 @@ armed. The same hook filters a **gate's** Bash / PowerShell writes (redirections
 which also catches what the filter cannot see (`python -c`, `bash -c`) and checks the
 builder against `guard.allow` (`--guard`). The hooks and the state CLIs use **two roots**: the battle state
 (`.legion/`) is read from the **main repo**, even from a worktree, while the `guard.allow` /
-`deny` globs stay relative to the **worktree** the agent works in.
+`deny` globs stay relative to the **worktree** the agent works in. When the session stays in the main
+repo, the worktree is found **from the target path** (`battle_state.worktree_battle_of`): a write under
+`.claude/worktrees/<id>/…` is judged by the **owner battle** `<id>` (its `allow` / `deny`, relative to
+its `worktree.path`), whatever the active-battle pointer says. `tree-verify --guard` does the same
+from `--root <worktree>`.
 
 **Rule C8 (battle in worktree mode).** When `battle.json.worktree.path` exists, `guard.py` blocks
 (exit 2) every write under the main checkout that is outside that worktree and outside `.legion/**`,
 whether or not the perimeter guard is armed and whether the session is in the worktree or in the main
-repo (fallback). The tree integrity check also fingerprints the main checkout when the state root
+repo. Writes to the worktree by absolute path stay allowed, judged by the owner battle. The tree integrity check also fingerprints the main checkout when the state root
 differs from the tree (fault `[main-tree]`) and reads the protected state at the state root.
 
 ## Conventions

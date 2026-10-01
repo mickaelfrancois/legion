@@ -56,6 +56,13 @@ Regles :
   quel que soit l'appelant non-gate. Bypass `LEGION_GUARD_OFF=1`. Bloc absent / `null` / chemin
   disparu / `battle.json` illisible : regle sans effet (le fail-closed existant s'applique ensuite).
   Evaluee apres le confinement des gates et la regle `.legion/` du builder, avant `_load_active_guard`.
+- **Battle proprietaire de la cible (GH#166, C4-A)** : apres C8, une cible sous
+  `<etat>/.claude/worktrees/<id>/` est jugee par la battle `<id>` (`battle_state.worktree_battle_of` :
+  vivante, `worktree.path` conforme) : ses `allow`/`deny`, racine d'edition = son `worktree.path`
+  (`.gitignore` autorise a cette racine), bloc `guard` invalide = fail-closed. Independant du
+  cwd et du pointeur : une session restee dans le principal ecrit dans le worktree en chemin
+  absolu. Pas de proprietaire (ex. `agent-*`) : guard du pointeur, racine = cwd, comme avant.
+  Repli d'import sans `worktree_battle_of` : comportement d'avant.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -115,6 +122,8 @@ try:
     from battle_state import active_battle_id, battles_dir, guard_of, load_active_battle
     # Racine d'etat (GH#68) : depot principal depuis un worktree lie, sinon le cwd.
     from battle_state import resolve_state_root
+    # Battle proprietaire d'une cible sous `.claude/worktrees/<id>/` (GH#166, C4-A).
+    from battle_state import worktree_battle_of
     # Matcher de globs partage avec `artifact_check.py tree-verify --guard` (GH#66, C6).
     from battle_state import glob_match as _glob_match
     # Nom de rapport par slice (GH#129) : source unique partagee avec `merge-reports`.
@@ -128,6 +137,9 @@ except Exception as _exc:  # ImportError, SyntaxError du module... jamais plante
     _IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
     GATE_ARTIFACT = {}
     PRODUCER_ARTIFACT = {}
+
+    def worktree_battle_of(state_root, path):  # repli : pas de battle proprietaire (comportement d'avant)
+        return None
 
     def resolve_state_root(cwd):  # repli : pas de resolution (les decisions ferment de toute facon)
         return cwd
@@ -1110,10 +1122,34 @@ def _worktree_main_decision(
     return 2, (
         f"BLOQUE : la battle {battle_id} travaille dans le worktree `{wt_path}` ; "
         f"le checkout principal (`{state}`) est protege.\n"
-        f"Tentative : `{rel_main}`. Ecris dans le worktree (relance `claude` depuis `{wt_path}` "
-        f"si la session est restee dans le principal).\n"
+        f"Tentative : `{rel_main}`. Ecris sous `{wt_path}` en chemin absolu "
+        f"(la session reste dans le principal).\n"
         f"Bypass delibere : LEGION_GUARD_OFF=1"
     )
+
+
+def _owner_of_target(state: Path, repo_root: Path, file_path: str):
+    """(battle_id, data, racine d'edition) de la battle proprietaire de la cible, ou None (GH#166).
+
+    Ne leve jamais : toute erreur -> None (comportement d'avant). La racine d'edition est le
+    `worktree.path` de la battle (deja valide par `worktree_battle_of`).
+    """
+    if not file_path:
+        return None
+    try:
+        target = Path(file_path)
+        if not target.is_absolute():
+            target = repo_root / target
+        found = worktree_battle_of(state, target)
+        if found is None:
+            return None
+        battle_id, odata = found
+        wt_path = (odata.get("worktree") or {}).get("path")
+        if not isinstance(wt_path, str) or not wt_path.strip():
+            return None
+        return battle_id, odata, Path(wt_path)
+    except Exception:
+        return None
 
 
 def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tuple[int, str]:
@@ -1199,11 +1235,32 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
     if wt_block is not None:
         return wt_block
 
-    active = _load_active_guard(state)
+    # Battle proprietaire de la cible (GH#166, C4-A) : une cible sous `.claude/worktrees/<id>/`
+    # est jugee par le guard de CETTE battle, relativement a son worktree, quel que soit le
+    # pointeur ou le cwd. Sinon : guard de la battle du pointeur, racine = cwd du hook.
+    edit_root = repo_root
+    owner = _owner_of_target(state, repo_root, file_path)
+    if owner is not None:
+        battle_id, odata, edit_root = owner
+        oguard, ovalid = guard_of(odata)
+        if ovalid and not (oguard.get("allow") or []):
+            owner = None  # proprietaire non armee : n'elargit pas les droits, chemin d'avant
+            edit_root = repo_root
+        elif ovalid:
+            active = (battle_id, oguard.get("allow") or [], oguard.get("deny") or [], True, False)
+        else:
+            active = (battle_id, [], [], False, False)
+    if owner is None:
+        active = _load_active_guard(state)
     if active is None:
         return 0, ""
     battle_id, allow, deny, valid, unreadable = active
     if not valid:
+        if owner is not None:  # racine d'edition = worktree de la battle proprietaire, chemin absolu
+            abs_path = file_path if Path(file_path).is_absolute() else str(repo_root / file_path)
+            return _invalid_guard_decision(
+                data, edit_root, battle_id, abs_path, unreadable=unreadable, state_root=state
+            )
         return _invalid_guard_decision(
             data, repo_root, battle_id, file_path, unreadable=unreadable, state_root=state
         )
@@ -1216,7 +1273,8 @@ def _decide(data: dict, repo_root: Path, state_root: Path | None = None) -> tupl
     if _is_claude_memory(file_path):
         return 0, ""  # memoire de Claude : hors perimetre repo, jamais bloquee
 
-    rel = _relative(repo_root, file_path)
+    target_abs = file_path if Path(file_path).is_absolute() else str(repo_root / file_path)
+    rel = _relative(edit_root, target_abs)
     # `.legion/**` (racine d'etat) et `.gitignore` (racine d'edition) : AVANT le blocage « hors du
     # repo », pour que la session principale ecrive `<principal>/.legion/**` depuis un worktree.
     if _always_allowed(rel, _rel_state(repo_root, state, file_path)):
@@ -2120,6 +2178,75 @@ def _t_guard_wt_main_protected(bs) -> None:
     _with_wt(bs, "_t_guard_wt_main_protected", body)
 
 
+def _owner_battle_json(main: Path, wt: Path, bid: str = "w1", guard=None) -> None:
+    """`battle.json` de la battle proprietaire `bid` (= dernier segment de `wt`), mode worktree (GH#166)."""
+    bdir = main / ".legion" / "battles" / bid
+    bdir.mkdir(parents=True, exist_ok=True)
+    doc = {"guard": guard if guard is not None else {"allow": ["src/**"]},
+           "worktree": {"path": str(wt), "branch": "me/1", "base": "0" * 40,
+                        "created_at": "2026-10-01T00:00:00Z"}}
+    (bdir / "battle.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _t_guard_wt_main_session(bs) -> None:
+    """GH#166 G-WT1..G-WT7 : session dans le principal (cwd=main), cible sous le worktree de la battle `w1`."""
+    def body(main, wt, wt_out):
+        _wt_battle_json(main, wt)             # pointeur : B, mode worktree (C8 actif), meme worktree
+        _owner_battle_json(main, wt)          # proprietaire de `wt` : w1, allow src/**
+        def ed(p, a="claude"):
+            return _ev("Edit", a, str(p))
+        assert _decide(ed(wt / "src" / "x"), main)[0] == 0                          # G-WT1
+        code, msg = _decide(ed(wt / "docs" / "x"), main)                            # G-WT2
+        assert code == 2 and "`docs/x`" in msg and "/freeze" in msg, (code, msg)
+        assert _decide(ed(main / "src" / "x"), main)[0] == 2                        # G-WT3 (C8)
+        assert "protege" in _decide(ed(main / "src" / "x"), main)[1]
+        assert _decide(ed(wt / ".gitignore"), main)[0] == 0                         # G-WT5
+        assert _decide(ed(wt / "src" / "x", "legion:builder"), main)[0] == 0        # builder idem
+        assert _decide(ed(wt / "src" / "x", "legion:lint"), main)[0] == 2           # gate : confinement inchange
+        # sous-processus reel du hook, cwd = principal
+        code, err = _run_hook(ed(wt / "src" / "x"), main)
+        assert code == 0, (code, err)
+        code, err = _run_hook(ed(wt / "docs" / "x"), main)
+        assert code == 2 and "hors du perimetre" in err, (code, err)
+        code, err = _run_hook(ed(main / "src" / "x"), main)
+        assert code == 2 and "protege" in err, (code, err)
+        # G-WT4 : deny de la battle proprietaire
+        _owner_battle_json(main, wt, guard={"allow": ["src/**"], "deny": ["src/secret/**"]})
+        assert _decide(ed(wt / "src" / "secret" / "k"), main)[0] == 2
+        assert _decide(ed(wt / "src" / "ok"), main)[0] == 0
+        # G-WT7 : bloc guard invalide -> fail-closed
+        _owner_battle_json(main, wt, guard=["x"])
+        assert _decide(ed(wt / "src" / "x"), main)[0] == 2
+        assert _decide(ed(wt / ".gitignore"), main)[0] == 0
+    _with_wt(bs, "_t_guard_wt_main_session", body)
+
+
+def _t_guard_wt_owner_vs_pointer(bs) -> None:
+    """GH#166 G-WT6 : le pointeur vise une battle in-place A ; la cible est jugee par la proprietaire B."""
+    def body(main, wt, wt_out):
+        _wt_guard_json(main, '{"allow":["a/**"]}')   # `B` (pointeur), in-place, allow a/**
+        _owner_battle_json(main, wt)                  # `w1`, allow src/**
+        assert _decide(_ev("Edit", "claude", str(wt / "src" / "x")), main)[0] == 0
+        assert _decide(_ev("Edit", "claude", str(wt / "a" / "x")), main)[0] == 2
+        assert _decide(_ev("Edit", "claude", str(main / "a" / "x")), main)[0] == 0   # hors worktree : pointeur
+        assert _decide(_ev("Edit", "claude", str(main / "src" / "x")), main)[0] == 2
+        # relatif depuis le principal : ancre sur le cwd du hook, pas sur le worktree
+        assert _decide(_ev("Edit", "claude", "a/x"), main)[0] == 0
+        # battle abandonnee : plus de proprietaire -> guard du pointeur
+        data = json.loads((main / ".legion/battles/w1/battle.json").read_text(encoding="utf-8"))
+        data["aborted"] = {"at": "2026-10-01T00:00:00Z"}
+        (main / ".legion/battles/w1/battle.json").write_text(json.dumps(data), encoding="utf-8")
+        assert _decide(_ev("Edit", "claude", str(wt / "src" / "x")), main)[0] == 2
+        # G-WT8 : proprietaire vivante NON armee -> n'elargit pas les droits ; guard de la pointee
+        data["aborted"] = None
+        data["guard"] = {}
+        (main / ".legion/battles/w1/battle.json").write_text(json.dumps(data), encoding="utf-8")
+        _wt_guard_json(main, '{"allow":["src/**"],"deny":[".env"]}')
+        assert _decide(_ev("Edit", "claude", str(wt / ".env")), main)[0] == 2
+        assert _decide(_ev("Edit", "claude", str(wt / "src" / "x")), main)[0] == 2   # hors allow de la pointee
+    _with_wt(bs, "_t_guard_wt_owner_vs_pointer", body)
+
+
 def _t_guard_wt_main_inactive(bs) -> None:
     """C8 sans effet : bloc absent / null / chemin disparu / invalide ; battle.json illisible = fail-closed existant."""
     def body(main, wt, wt_out):
@@ -2314,6 +2441,8 @@ def _self_test() -> int:
     _t_guard_wt_compat(battle_state)
     _t_guard_wt_main_protected(battle_state)
     _t_guard_wt_main_inactive(battle_state)
+    _t_guard_wt_main_session(battle_state)
+    _t_guard_wt_owner_vs_pointer(battle_state)
 
     print("OK: guard self-test passed", file=sys.stderr)
     return 0

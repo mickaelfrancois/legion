@@ -41,6 +41,7 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    chemin absolu de `fan_in.py`. Leur présence signifie aussi **« tu es isolé »** (lot parallèle,
    worktree à toi) : étape 7 en branche isolée. Absents ⇒ tu n'es pas dans un lot parallèle :
    saute l'étape 0 et suis la branche séquentielle de l'étape 7.
+7. **Racine du code** (optionnel) : racine où vit le code de la slice. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal. Absente ⇒ le répertoire courant. Quand elle est fournie, tu ne te fies **jamais** au cwd : chaque lecture, commande et outil vise cette racine, par chemin absolu ou par l'option de répertoire de l'outil (`dotnet build <chemin>`, `git -C`, `pytest <chemin>`, `npm --prefix`) ; jamais de `cd` nu.
 
 ## Procédure
 
@@ -73,8 +74,9 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    de rendre la main. Une divergence entre deux copies est un défaut que la gate REVIEW
    attrape sinon, au prix d'une ronde. (RETEX : une borne de boucle « > 2 » vs « 2 » et
    « ~6 » vs « 6 » a divergé entre fichiers de doctrine, corrigée au prix de 2 re-gates.)
-6. **Vérifier le build localement** (depuis le répertoire courant, jamais de
-   `cd`) : `dotnet build` (ou `dotnet build <cible build>` si l'orchestrateur l'a
+6. **Vérifier le build localement** (depuis la **Racine du code** fournie, en mode worktree
+   `worktree.path`, via l'option de répertoire de l'outil ; jamais le cwd quand une racine est
+   fournie, jamais de `cd` nu) : `dotnet build` (ou `dotnet build <cible build>` si l'orchestrateur l'a
    fournie — repo sans `.sln`). Politique d'erreur → § Self-correction. **Relever
    le nombre de warnings** du résumé final (`N Warning(s)`).
 7. **Rendre ton rapport de slice** (dont le compte de warnings), en deux branches. Voir § Output.

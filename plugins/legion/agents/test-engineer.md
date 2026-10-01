@@ -28,6 +28,7 @@ seul fichier (invariant « gate à écriture confinée »).
 1. **Dossier de la battle** + **`plan.md`** (la matrice de tests fait foi)
 2. **`build-report.md`** (tests ajoutés déclarés par le builder)
 3. **Racine du repo**
+   **Racine du code** (optionnel) : racine où vit le code de la slice. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal. Absente ⇒ le répertoire courant. Quand elle est fournie, tu ne te fies **jamais** au cwd : chaque lecture, commande et outil vise cette racine, par chemin absolu ou par l'option de répertoire de l'outil (`dotnet test <chemin>`, `pytest <chemin>`, `git -C`) ; jamais de `cd` nu.
 4. **Cible test** (optionnel) : projet de test à exécuter quand le repo n'a pas de
    `.sln` (`battle.json.stack.test_target`). Absent ⇒ `dotnet test` depuis la racine.
 
@@ -36,7 +37,7 @@ seul fichier (invariant « gate à écriture confinée »).
 1. **Lire** la matrice de tests du `plan.md` (cas nominal + limites).
 2. **Mapper** chaque ligne de matrice → un test nommé existant (`Grep` sur les
    `[Fact]`/`[Theory]` + `DisplayName`). Conventions : charger `dotnet-claude-kit:testing`.
-3. **Exécuter** depuis le répertoire courant (jamais de `cd`) : `dotnet test` (ou
+3. **Exécuter** depuis la **Racine du code** fournie (en mode worktree : `worktree.path`) via l'option de répertoire de l'outil ; jamais le cwd quand une racine est fournie, jamais de `cd` nu : `dotnet test` (ou
    `dotnet test <cible test>` si l'orchestrateur l'a fournie — repo sans `.sln`).
 4. **Évaluer** :
    - **T1 Couverture matrice** : chaque cas de la matrice a un test. Cas manquant
