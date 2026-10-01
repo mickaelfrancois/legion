@@ -28,6 +28,7 @@ confinée »).
 1. **Dossier de la battle** + **`build-report.md`** (fichiers touchés, résiduel signalé)
 2. **`plan.md`** (décision d'archi à faire respecter)
 3. **Racine du repo**
+4. **Racine du code** (optionnel) : racine sous laquelle tu lis les fichiers touchés. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal (le principal ne porte pas le code de la battle). Absente ⇒ le répertoire courant. Quand elle est fournie, tu lis sous elle par chemin absolu, jamais sous le cwd.
 
 ## Procédure
 

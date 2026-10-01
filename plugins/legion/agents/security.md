@@ -34,6 +34,7 @@ prudent et exhaustif → **opus**.
 
 1. **Dossier de la battle** + **`build-report.md`** (fichiers touchés)
 2. **Racine du repo**
+3. **Racine du code** (optionnel) : racine où vit le code de la slice. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal. Absente ⇒ le répertoire courant. Quand elle est fournie, tu ne te fies **jamais** au cwd : chaque lecture, commande et outil vise cette racine, par chemin absolu ou par l'option de répertoire de l'outil (`dotnet list <chemin> package`, `git -C`) ; jamais de `cd` nu.
 
 ## Procédure
 
@@ -50,7 +51,7 @@ slice** et ajoute la précision ci-dessous :
    placeholders (`<your-key>`, `changeme`, `xxx`), fixtures de test, secrets déjà
    externalisés (user-secrets, Key Vault, variable d'env).
 2. **S2 NuGet vulnérables** : `dotnet list package --vulnerable --include-transitive`
-   (depuis le répertoire courant). Vulnérabilité **High/Critical introduite par la
+   (depuis la **Racine du code** fournie, en mode worktree `worktree.path`, via l'option de répertoire de l'outil ; le cwd seulement si aucune racine n'est fournie). Vulnérabilité **High/Critical introduite par la
    slice** = **FAIL** (cite le GHSA/CVE et la version) ; transitive ou Moderate
    **préexistante** → **WARN** (cf. discipline d'imputation ci-dessous).
 3. **S3 Auth/autz** : tout endpoint nouveau/modifié porte un contrôle **explicite**

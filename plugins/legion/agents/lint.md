@@ -37,6 +37,7 @@ formaté, avant les gates de raisonnement plus coûteuses.
 
 1. **Dossier de la battle** + **`build-report.md`** (fichiers touchés par la slice)
 2. **Racine du repo**
+   **Racine du code** (optionnel) : racine où vit le code de la slice. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal. Absente ⇒ le répertoire courant. Quand elle est fournie, tu ne te fies **jamais** au cwd : chaque lecture, commande et outil vise cette racine, par chemin absolu ou par l'option de répertoire de l'outil (`dotnet format <chemin>`, `git -C`) ; jamais de `cd` nu.
 3. **Cible de format** (optionnel) : projet/solution à formater quand le repo n'a pas
    de `.sln` (`battle.json.stack.build_target`). Absent ⇒ `dotnet format` depuis la
    racine. Un `.csproj` direct marche sur tout SDK ; un `.slnx` n'est reconnu que par
@@ -56,15 +57,17 @@ formaté, avant les gates de raisonnement plus coûteuses.
    vérifier dans le périmètre : écris-le dans `gate-lint.md`, rends `accept` et
    **arrête-toi**.
 3. **Résoudre la cible** (contexte de compilation pour `dotnet format`) : `<cible>` =
-   la cible de format fournie (`stack.build_target`), sinon le répertoire courant
-   (**jamais de `cd`**).
+   la cible de format fournie (`stack.build_target`), sinon la **Racine du code** fournie
+   (en mode worktree : `worktree.path`), sinon le répertoire courant (**jamais de `cd`** ;
+   jamais le cwd quand une racine est fournie).
 4. **Détecter `.editorconfig`** (`Glob '**/.editorconfig'`) :
    - **Présent** → la gate le **respecte** (`dotnet format` l'applique nativement).
    - **Absent** → la gate tourne **quand même** (règles de formatage SDK par défaut) ;
      elle ne **n'impose jamais** d'`.editorconfig`.
 5. **Exécuter, scopé au diff** :
    `dotnet format <cible> --include <fichiers .NET du diff> --verify-no-changes`
-   depuis le répertoire courant. **Le `--include` est essentiel** : il restreint le
+   depuis la **Racine du code** fournie (via l'option de répertoire de l'outil ; le cwd seulement
+   si aucune racine n'est fournie). **Le `--include` est essentiel** : il restreint le
    contrôle aux **seuls fichiers produits par la slice**, jamais au formatage
    **préexistant** hors-scope. Le mode `--verify-no-changes` est **non-mutant** :
    exit `0` = rien à reformater, exit non-nul = des fichiers **du diff** seraient

@@ -19,8 +19,11 @@ active) :
   `path_exists`, `concurrent_battle`, `no_commit`, `invalid`. Idempotent : worktree déjà conforme
   (bon chemin, bonne branche, `HEAD` == base) -> `created:false`.
 - `where [--battle <id>]` : `{state_root, mode, worktree_path, branch, exists, inside,
-  cwd_toplevel, current_branch}`. `ok` vaut vrai si la session est bien dans le worktree, sur
-  sa branche (mode worktree) ; toujours vrai en mode `in_place` ou `none`. Lecture seule.
+  cwd_toplevel, current_branch, worktree_branch, main_branch, reason}`. En mode worktree, `ok`
+  vaut vrai si le worktree existe, est enregistré et est sur `worktree.branch` (la session reste
+  dans le principal : `inside`, `cwd_toplevel` et `current_branch` sont informatifs). `reason` :
+  `missing`, `wrong_branch` ou `null` si `ok`. Toujours vrai en mode `in_place` ou `none`.
+  Lecture seule.
 - `close-check --battle <id>` : contrôles `pr_merged`, `contained`, `worktree_clean`, `not_inside`.
   `contained` : la branche locale est ancêtre de `origin/<default>`, **ou** la PR est mergée et
   `delivery.head_oid` == tip local (merge squash / rebase). Lecture seule.
@@ -350,7 +353,10 @@ def _where(cwd: str, battle_id: str | None) -> dict:
     rc, cur, _ = _run(cwd, "branch", "--show-current")
     current = cur.strip() if rc == 0 else None
     res = {"ok": True, "state_root": main, "mode": "none", "worktree_path": None, "branch": None,
-           "exists": False, "inside": False, "cwd_toplevel": top, "current_branch": current}
+           "exists": False, "inside": False, "cwd_toplevel": top, "current_branch": current,
+           "worktree_branch": None, "main_branch": None, "reason": None}
+    rc, mcur, _ = _run(main, "branch", "--show-current")
+    res["main_branch"] = mcur.strip() if rc == 0 else None
     if battle is None:
         return res
     wt = _wt_block(battle)
@@ -362,7 +368,13 @@ def _where(cwd: str, battle_id: str | None) -> dict:
     res.update(mode="worktree", worktree_path=path, branch=branch,
                exists=os.path.isdir(path) and path in _registered(main),
                inside=_is_under(cwd, path))
-    res["ok"] = bool(res["inside"] and top == path and branch and current == branch)
+    if not res["exists"]:
+        res.update(ok=False, reason="missing")
+        return res
+    rc, wcur, _ = _run(path, "branch", "--show-current")
+    res["worktree_branch"] = wcur.strip() if rc == 0 else None
+    res["ok"] = bool(branch and res["worktree_branch"] == branch)
+    res["reason"] = None if res["ok"] else "wrong_branch"
     return res
 
 
@@ -724,13 +736,23 @@ def _t_where(tmp: str) -> None:
     fx.battle(worktree=fx.wt_block(res))
     wt = res["path"]
     sub = os.path.join(wt, "src")
-    for cwd, inside, ok in ((wt, True, True), (sub, True, True), (fx.main, False, False)):
+    for cwd, inside in ((wt, True), (sub, True), (fx.main, False)):
         w = where(cwd, "B")
         assert w["state_root"] == fx.main and w["inside"] is inside and w["mode"] == "worktree", (cwd, w)
-        assert w["ok"] is ok and w["exists"] and w["branch"] == "me/7", (cwd, w)
+        assert w["ok"] is True and w["reason"] is None and w["exists"] and w["branch"] == "me/7", (cwd, w)
+        assert w["worktree_branch"] == "me/7" and w["main_branch"] == fx.git(fx.main, "branch", "--show-current").strip(), w
     assert where(wt, "B")["cwd_toplevel"] == wt and where(wt, "B")["current_branch"] == "me/7"
     fx.battle("L")
     assert where(fx.main, "L")["mode"] == "in_place"
+    assert where(fx.main, "L")["ok"] is True and where(fx.main, "L")["reason"] is None
+    fx.git(wt, "switch", "-q", "-c", "autre")
+    w = where(fx.main, "B")
+    assert w["ok"] is False and w["reason"] == "wrong_branch" and w["worktree_branch"] == "autre", w
+    fx.git(wt, "switch", "-q", "me/7")
+    assert where(fx.main, "B")["ok"] is True
+    shutil.rmtree(wt)
+    w = where(fx.main, "B")
+    assert w["ok"] is False and w["reason"] == "missing" and w["exists"] is False, w
 
 
 def _t_close_check_states(tmp: str) -> None:
@@ -939,6 +961,79 @@ def _t_cross_state_guard(tmp: str) -> None:
     code, msg = guard._decide(ev(str(main_p / "src" / "x.txt")), wt_p, main_p)
     assert code == 2 and "protege" in msg and str(wt_p) in msg, (code, msg)
     assert "protege" not in guard._decide(ev(str(wt_p / "src" / "x.txt")), wt_p, main_p)[1]
+
+
+def _t_cross_main_session(tmp: str) -> None:
+    """Test croise GH#166 : session dans le principal (cwd=main), vrais CLI et vrai hook, vrai worktree."""
+    fx = _Fx(tmp)
+    scripts = Path(_SCRIPTS_DIR)
+    hook = scripts.parent / "hooks" / "guard.py"
+    main_p = Path(fx.main)
+    clean_env = {k: v for k, v in os.environ.items()
+                 if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "LEGION_GUARD_OFF")}
+
+    def cli(script: str, *args: str, ok: bool = True) -> dict:
+        p = subprocess.run([sys.executable, str(scripts / script), *args], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, cwd=fx.main, env=clean_env)
+        assert (p.returncode == 0) == ok, (script, args, p.returncode, p.stdout, p.stderr)
+        return json.loads(p.stdout) if p.stdout.strip().startswith("{") else {"raw": p.stdout}
+
+    def edit(path: str) -> tuple[int, str]:
+        payload = {"tool_name": "Edit", "agent_type": "claude", "tool_input": {"file_path": path}}
+        p = subprocess.run([sys.executable, str(hook)], input=json.dumps(payload), capture_output=True,
+                           text=True, cwd=fx.main, env=clean_env, timeout=60)
+        return p.returncode, p.stderr
+
+    # 1. init / create / set-meta / set-guard, tous depuis le principal
+    (main_p / ".legion" / "battles" / "B" / "battle.json").unlink()
+    cli("battle_state.py", "init", "B", "--ticket", "GH#7", "--title", "t", "--profile", next(iter(bs.PROFILES)),
+        "--repo", fx.main)
+    res = cli("battle_worktree.py", "create", "--battle", "B")
+    assert res["ok"] and res["created"], res
+    wt = res["path"]
+    cli("battle_state.py", "set-meta", "--worktree-path", wt, "--worktree-branch", res["branch"],
+        "--worktree-base", res["base"], "--repo", fx.main, "--battle", "B")
+    cli("battle_state.py", "set-guard", "--allow", "src/**", "--repo", fx.main, "--battle", "B")
+
+    # 2. where : ok depuis le principal, hors du worktree
+    w = cli("battle_worktree.py", "where", "--battle", "B")
+    assert w["ok"] and w["reason"] is None and w["inside"] is False and w["mode"] == "worktree", w
+
+    # 3. decisions du hook reel (cwd = principal)
+    assert edit(os.path.join(wt, "src", "x.txt"))[0] == 0                     # G-WT1
+    code, msg = edit(os.path.join(wt, "docs", "x.txt"))                       # G-WT2
+    assert code == 2 and "docs/x.txt" in msg, (code, msg)
+    code, msg = edit(os.path.join(fx.main, "src", "x.txt"))                   # G-WT3 (C8)
+    assert code == 2 and "protege" in msg, (code, msg)
+
+    # 4. tree-snapshot / tree-verify --root <wt> --guard, depuis le principal
+    snap = os.path.join(tmp, "snap.json")
+    s = cli("artifact_check.py", "tree-snapshot", "--out", snap, "--root", wt)
+    assert s["ok"], s
+    fx.write(wt, "src/x.txt", "x\n")
+    v = cli("artifact_check.py", "tree-verify", "--before", snap, "--fingerprint", s["fingerprint"],
+            "--root", wt, "--guard")
+    assert v["ok"] is True, v
+    fx.write(wt, "docs/y.txt", "y\n")
+    v = cli("artifact_check.py", "tree-verify", "--before", snap, "--fingerprint", s["fingerprint"],
+            "--root", wt, "--guard", ok=False)
+    assert v["ok"] is False and "docs/y.txt" in json.dumps(v), v
+    os.unlink(os.path.join(wt, "docs", "y.txt"))
+
+    # 5. commit dans le worktree : la branche et HEAD du principal ne bougent pas
+    head, branch = fx.git(fx.main, "rev-parse", "HEAD"), fx.git(fx.main, "branch", "--show-current")
+    fx.git(wt, "add", "src/x.txt")
+    fx.git(wt, "commit", "-q", "-m", "x")
+    assert (fx.git(fx.main, "rev-parse", "HEAD"), fx.git(fx.main, "branch", "--show-current")) == (head, branch)
+    assert cli("battle_worktree.py", "where", "--battle", "B")["ok"] is True
+
+    # 6. deux battles : une autre battle in-place pointee ne change rien pour le worktree de B
+    other = cli("battle_state.py", "init", "C", "--ticket", "GH#8", "--title", "t",
+                "--profile", next(iter(bs.PROFILES)), "--repo", fx.main)
+    assert any("pointer_taken" in m for m in other.get("warnings", [])), other
+    cli("battle_state.py", "set-guard", "--allow", "c/**", "--repo", fx.main, "--battle", "C")
+    assert edit(os.path.join(wt, "src", "x.txt"))[0] == 0                     # battle proprietaire = B
+    assert edit(os.path.join(wt, "c", "x.txt"))[0] == 2
 
 
 if __name__ == "__main__":

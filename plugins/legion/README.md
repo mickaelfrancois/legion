@@ -128,7 +128,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 |---|---|
 | `/legion:issues` | *(avant THINK)* Liste les issues GitHub ouvertes du repo courant (`#id  titre  [labels]`) ; rappelle `/legion:recon <n>` et `/legion:battle start <n>`. |
 | `/legion:recon <issue>` | *(avant THINK, optionnel)* Affine une issue floue par un interrogatoire serré + exploration du repo, puis ajoute une section « Cadrage » à l'issue (confirmation avant écriture). |
-| `/legion:battle start <issue\|slug> [--in-place]` | Démarre une battle. `<issue>` numérique = issue GitHub (tirée auto) ; sinon libellé libre. Par défaut, crée un worktree dédié `.claude/worktrees/<id>` (branche `<moi>/<n>`) et y entre ; `--in-place` garde l'ancien flux dans le dépôt courant. |
+| `/legion:battle start <issue\|slug> [--in-place]` | Démarre une battle. `<issue>` numérique = issue GitHub (tirée auto) ; sinon libellé libre. Par défaut, crée un worktree dédié `.claude/worktrees/<id>` (branche `<moi>/<n>`) ; la session reste dans le dépôt principal et le code est écrit dans le worktree par chemin absolu ; `--in-place` garde l'ancien flux dans le dépôt courant. |
 | `/legion:battle close [<id>]` | Clôt une battle livrée, depuis le dépôt principal : vérifie que la PR est mergée et la branche contenue dans `origin/<default>`, puis supprime le worktree et la branche locale (jamais `--force`). |
 | `/legion:battle build [slice\|all] [--auto]` | Code une slice (toi en direct, ou l'agent builder). |
 | `/legion:battle review` / `test` | Lance les gates lint → reviewer → test-engineer → security. |

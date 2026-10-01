@@ -290,7 +290,7 @@ invisible. Un écart de config, de hooks ou d'attributs est une faute nommée (`
 `[git-hooks]`, `[git-attributes]`), jamais filtrable. Un `HEAD` qui bouge sans chemin
 (commit vide, `reset --soft`) est la faute `[HEAD]`. `tree-verify` recalcule l'empreinte après
 l'agent. Pour une gate, tout changement est une faute. Pour un builder, `--guard` ne
-signale que les chemins hors de `guard.allow` (ou dans `deny`), lus dans la battle active de la racine d'état (dépôt principal depuis un worktree).
+signale que les chemins hors de `guard.allow` (ou dans `deny`), lus dans la battle propriétaire de `--root` quand `--root` est un worktree de battle (`.claude/worktrees/<id>`, vivante, `worktree.path` conforme ; lancé depuis le principal ou le worktree), sinon dans la battle active de la racine d'état.
 Quand la battle tourne en worktree (racine d'état = dépôt principal, différente de l'arbre vérifié),
 l'état protégé (`.legion/active-battle`, `battle.json`) est lu à la racine d'**état** : la réécriture
 de `<principal>/.legion/battles/<id>/battle.json` depuis le worktree est donc vue. L'empreinte
