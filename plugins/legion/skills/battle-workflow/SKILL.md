@@ -327,7 +327,7 @@ projects `tokens_total` + `skills` into the shard for the UI (plus `slices_done`
 > from memory would leave `skills` empty.
 
 A new session **resumes** a battle by reading `battle.json` — no conversational
-context required. The active battle is pointed to by `.legion/active-battle`.
+context required. A battle is resolved **by target** first (a path under `.claude/worktrees/<id>/`), then **by session** (`.legion/sessions/<key>.json`, written by the `session_bind.py` hook), then by the `.legion/active-battle` pointer, which is only a fallback (a session with no binding, an old harness). Several battles can therefore run in parallel, each in its own worktree. Doctrine always passes `--battle <id>` to `battle_state.py`; `session-status --battle <id>` tells whether the session is bound.
 
 **Mode worktree (défaut, `--in-place` pour l'ancien flux).** `/battle start` crée un worktree
 dédié `<repo>/.claude/worktrees/<id>` sur la branche `<me>/<token>` (`battle_worktree.py create`,
@@ -387,7 +387,7 @@ builder against `guard.allow` (`--guard`). The hooks and the state CLIs use **tw
 `deny` globs stay relative to the **worktree** the agent works in. When the session stays in the main
 repo, the worktree is found **from the target path** (`battle_state.worktree_battle_of`): a write under
 `.claude/worktrees/<id>/…` is judged by the **owner battle** `<id>` (its `allow` / `deny`, relative to
-its `worktree.path`), whatever the active-battle pointer says. `tree-verify --guard` does the same
+its `worktree.path`), whatever the active-battle pointer says. The tree fingerprint is **per battle** (`tree-snapshot --battle <id>`, `tree-verify --battle <id>`): it protects that battle's `battle.json` and bindings, not the pointer, and ignores the other battles' worktrees and branches. `tree-verify --guard` does the same
 from `--root <worktree>`.
 
 **Rule C8 (battle in worktree mode).** When `battle.json.worktree.path` exists, `guard.py` blocks

@@ -209,7 +209,8 @@ Deux niveaux : **par repo** (la battle) et **global** (le fleet).
 
 ```
 .legion/
-├── active-battle          # pointeur : id de la battle active (lu par les hooks)
+├── active-battle          # pointeur de repli : id de la dernière battle activée (écrit par le CLI)
+├── sessions/              # liaisons session → battle : <clé>.json {battle, bound_at} (écrites par le hook session_bind.py, effacées par le CLI à close/abort)
 └── battles/
     └── 2026-06-08-GH-1234/
         ├── battle.json        # métadonnées + profil + statut des phases (écrit par battle_state.py seul)
@@ -240,7 +241,7 @@ dépôt principal et que la session y reste du `start` au `close` (code, build, 
 visent le worktree par chemin absolu ou `git -C`). Le guard et `tree-verify --guard` retrouvent la
 battle d'une cible par son chemin (`battle_state.worktree_battle_of` : `.claude/worktrees/<id>/…`,
 battle vivante, `worktree.path` conforme) : `allow` / `deny` sont ceux de cette battle propriétaire,
-relatifs à son worktree, quel que soit le pointeur `active-battle`. La règle C8 (code du principal
+relatifs à son worktree, quel que soit le pointeur `active-battle`. Ordre de résolution de la battle d'un hook : la cible (worktree), puis la liaison de la session (`.legion/sessions/`, `battle_state.resolve_battle`), puis le pointeur, qui n'est plus qu'un repli (`foreign` : session non liée face à un pointeur lié à une autre session). La règle C8 (code du principal
 fermé) est inchangée. Deux ajouts rétrocompatibles dans `battle.json` : le bloc optionnel
 `worktree {path, branch, base, created_at}` (écrit par `battle_state.py set-meta --worktree-path
 --worktree-branch --worktree-base`, les trois ensemble ; absent ou `null` = en place), et
@@ -251,9 +252,9 @@ PR mergée et la branche contenue dans `origin/<default>` (ou PR mergée avec `h
 local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`.
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
-`scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
+`scripts/battle_state.py` (le pointeur et la déliaison des sessions à `close` / `abort` ; la liaison `.legion/sessions/<clé>.json` est écrite par le hook `hooks/session_bind.py` via `battle_state.bind_session`) (sous-commandes `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
-`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`). Sans `--repo`, le CLI part de la racine du dépôt contenant le cwd (`git rev-parse --show-toplevel`, GH#134), donc jamais d'un sous-dossier ; depuis un worktree lié, la racine d'état est le dépôt principal (battle active) ; `init` et `activate` visent toujours le dépôt principal ; `--repo` explicite prime. Les hooks gardent leur propre résolution, à partir du cwd brut. `build done` exige que toutes les
+`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, plus la lecture seule `session-status`). Sans `--repo`, le CLI part de la racine du dépôt contenant le cwd (`git rev-parse --show-toplevel`, GH#134), donc jamais d'un sous-dossier ; depuis un worktree lié, la racine d'état est le dépôt principal (battle active) ; `init` et `activate` visent toujours le dépôt principal ; `--repo` explicite prime. Les hooks gardent leur propre résolution, à partir du cwd brut. `build done` exige que toutes les
 slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
 pendant un re-plan ouvert (`approved_at` à `null`) ou tant que `build` est `pending`
 (déclarer les slices **avant** `approve-plan`) ; sans id, elle vide la liste (BUILD agrégé,
@@ -324,7 +325,7 @@ PreToolUse(Edit|Write|MultiEdit) :   (+ Bash|PowerShell, voir « Filtre Bash » 
      principal même depuis un worktree) : le rapport (`build-report.md` / `build-report-<slice_id>.md`) du dépôt principal est
      autorisé depuis un worktree, tout autre `.legion/` (y compris celui du worktree)
      est bloqué. L'outil `Bash` est traité à part (filtre Bash ci-dessous).
-  1. Lire la battle active (.legion/active-battle → battle.json → guard.allow/deny).
+  1. Lire la battle de la session (cible, puis .legion/sessions/, puis repli .legion/active-battle → battle.json → guard.allow/deny).
   2. Le file_path visé est-il dans `allow` et hors `deny` ?
      - oui  → exit 0 (autorisé)
      - non  → exit 2 + message : "hors périmètre de la battle <id>. /freeze actif."
@@ -335,7 +336,7 @@ PreToolUse(Edit|Write|MultiEdit) :   (+ Bash|PowerShell, voir « Filtre Bash » 
      absent (non armé). Même branche si le pointeur désigne une battle dont `battle.json`
      existe mais est illisible (JSON invalide ou trop imbriqué, racine non-dict) : `set-guard`
      et `close` refusent aussi ce fichier, donc réparer le fichier (`git checkout` ou à la main,
-     `.legion/**` reste modifiable) ou vider `.legion/active-battle`. Toute exception imprévue
+     `.legion/**` reste modifiable) ou vider `.legion/active-battle` (et la liaison de session). Toute exception imprévue
      de la décision → exit 2 (jamais exit 1). Entrée stdin : vide ou blanche → exit 0 ; illisible
      ou non-objet JSON → exit 2 ; jamais exit 1 (hors `--self-test`).
   2c. BATTLE EN MODE WORKTREE (règle C8, `_worktree_main_decision`, actif même guard non armé).
@@ -425,9 +426,10 @@ plugins/legion/
 │   ├── security.md              # gate sécurité
 │   └── pr-triage.md             # gate ADDRESS (triage des retours de PR)
 ├── hooks/
-│   ├── hooks.json               # PreToolUse: guard (Edit|Write|MultiEdit, Bash|PowerShell), careful (Bash|PowerShell) · PostToolUse: fleet_sync · Stop/SubagentStop: usage_track
+│   ├── hooks.json               # PreToolUse: guard (Edit|Write|MultiEdit, Bash|PowerShell), careful (Bash|PowerShell) · PostToolUse: fleet_sync, session_bind (Bash|PowerShell) · Stop/SubagentStop: usage_track
 │   ├── guard.py                 # périmètre d'écriture + confinement gates + artefact non vide + filtre Bash des gates (exit 2 = block)
 │   ├── careful.py               # avertit sur commandes destructrices (warn)
+│   ├── session_bind.py          # PostToolUse : lie la session à la battle après un `init` / `activate` réussi (`.legion/sessions/<clé>.json`, exit 0 toujours)
 │   ├── fleet_sync.py            # écrit le shard fleet.d/<battle> à chaque écriture de battle.json (PHASE_ORDER dérivé de battle_state)
 │   └── usage_track.py           # append tokens + skills réels à la battle active
 ├── scripts/

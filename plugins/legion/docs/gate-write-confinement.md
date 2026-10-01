@@ -246,7 +246,7 @@ comblent ce trou.
 
 **Couche 1 — empreinte de l'arbre (la garantie).** `artifact_check.py tree-snapshot` prend
 une empreinte : `HEAD`, entrées de `git status` avec le hash de leur contenu, état protégé
-(`.legion/active-battle`, `battle.json`), masques d'index, config git locale et worktree,
+(`battle.json`, plus le pointeur `.legion/active-battle` sans `--battle` ; avec `--battle <id>` : le `battle.json` de cette battle et ses liaisons `.legion/sessions/`, jamais le pointeur), masques d'index, config git locale et worktree,
 hooks (dossier réel et `core.hooksPath`), `info/attributes`, `.gitignore` eux-mêmes ignorés, la
 config git globale et système, les fichiers `attributes`/`ignore` effectifs (explicites ou XDG)
 et **l'état du dossier git** (voir ci-dessous).
@@ -292,11 +292,16 @@ invisible. Un écart de config, de hooks ou d'attributs est une faute nommée (`
 l'agent. Pour une gate, tout changement est une faute. Pour un builder, `--guard` ne
 signale que les chemins hors de `guard.allow` (ou dans `deny`), lus dans la battle propriétaire de `--root` quand `--root` est un worktree de battle (`.claude/worktrees/<id>`, vivante, `worktree.path` conforme ; lancé depuis le principal ou le worktree), sinon dans la battle active de la racine d'état.
 Quand la battle tourne en worktree (racine d'état = dépôt principal, différente de l'arbre vérifié),
-l'état protégé (`.legion/active-battle`, `battle.json`) est lu à la racine d'**état** : la réécriture
+l'état protégé (`battle.json`, et le pointeur sans `--battle`) est lu à la racine d'**état** : la réécriture
 de `<principal>/.legion/battles/<id>/battle.json` depuis le worktree est donc vue. L'empreinte
 ajoute alors le checkout **principal** (`HEAD` et `status -uall` avec hash des contenus, `.legion/`,
 `.claude/worktrees/` et worktrees enregistrés exclus) : toute écriture d'une gate dans le principal
 est la faute nommée `[main-tree]`, jamais filtrable. Le mode `--base` reste inchangé.
+
+*Avec `--battle <id>` (battles parallèles, #170).* L'empreinte exclut les autres battles : leurs worktrees, leurs branches (`branch.<b>.*`) et `refs/remotes/**`. Trois limites assumées :
+- **R3** : le pointeur n'étant plus hashé, une gate qui le réécrirait n'est plus vue par `tree-verify`. Le guard la bloque : `Write` est confiné à l'artefact et le shell est analysé.
+- **R4** : une gate qui recréerait un worktree au chemin exact d'une battle close, sur sa branche, n'est pas vue (risque jugé faible).
+- **R6** : des tags rapatriés par un `fetch` pendant une gate restent une faute (tags protégés). En concurrence, utiliser `git fetch --no-tags origin`.
 Un builder isolé en worktree se vérifie avec `--base <sha> --root <worktree>`. L'orchestrateur
 retient l'empreinte de `tree-snapshot` et la passe à `tree-verify --fingerprint` : un
 snapshot réécrit est refusé. Une faute de gate rend le verdict caduc (escalade cas 6).

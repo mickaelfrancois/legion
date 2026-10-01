@@ -16,8 +16,10 @@ active) :
   réguliers, jamais de lien symbolique, rien sous `.legion/` ni `.claude/`, jamais d'écrasement).
   Refus (`reason`) : `aborted`, `dirty` (principal modifié ou fichiers non suivis non ignorés),
   `not_ignored` (`.legion/` ou `.claude/worktrees/<id>` non ignoré), `branch_exists`,
-  `path_exists`, `concurrent_battle`, `no_commit`, `invalid`. Idempotent : worktree déjà conforme
-  (bon chemin, bonne branche, `HEAD` == base) -> `created:false`.
+  `path_exists`, `no_commit`, `invalid`. Plus de refus `concurrent_battle` : les battles en parallèle
+  sont permises ; le résultat porte `concurrent: [ids]` (autres battles avec worktree actif) et un
+  `warnings` `in_place_live` si une autre battle vit dans le principal (sans worktree). Idempotent :
+  worktree déjà conforme (bon chemin, bonne branche, `HEAD` == base) -> `created:false`.
 - `where [--battle <id>]` : `{state_root, mode, worktree_path, branch, exists, inside,
   cwd_toplevel, current_branch, worktree_branch, main_branch, reason}`. En mode worktree, `ok`
   vaut vrai si le worktree existe, est enregistré et est sur `worktree.branch` (la session reste
@@ -224,12 +226,15 @@ def _ignored(main: str, rel: str) -> bool:
     return _run(main, "check-ignore", "-q", "--no-index", rel)[0] == 0
 
 
-def _concurrent(main: str, battle_id: str) -> str | None:
+def _others(main: str, battle_id: str) -> tuple[list[str], list[str]]:
+    """Autres battles vivantes : `(avec worktree actif, en place dans le principal)`."""
     bdir = Path(main) / ".legion" / "battles"
     try:
         names = sorted(p.name for p in bdir.iterdir() if p.is_dir())
     except OSError:
-        return None
+        return [], []
+    with_wt: list[str] = []
+    in_place: list[str] = []
     for name in names:
         if name == battle_id:
             continue
@@ -240,9 +245,15 @@ def _concurrent(main: str, battle_id: str) -> str | None:
         if not isinstance(other, dict) or other.get("aborted") is not None or _reflect_done(other):
             continue
         wt = _wt_block(other)
-        if wt and os.path.isdir(wt["path"]):
-            return name
-    return None
+        if wt is None:
+            in_place.append(name)
+        elif os.path.isdir(wt["path"]):
+            with_wt.append(name)
+    return with_wt, in_place
+
+
+def _concurrent(main: str, battle_id: str) -> list[str]:
+    return _others(main, battle_id)[0]
 
 
 def _copy_local(main: str, wt: str) -> tuple[list[str], list[dict]]:
@@ -310,9 +321,11 @@ def _create(cwd: str, battle_id: str) -> dict:
             return {"ok": True, "path": path, "branch": branch, "base": base, "created": False,
                     "copied": [], "skipped": []}
         raise _Refusal("path_exists", f"{path} existe déjà et ne correspond pas (branche/base)")
-    other = _concurrent(main, battle_id)
-    if other:
-        raise _Refusal("concurrent_battle", f"la battle {other} a un worktree actif (une seule à la fois)")
+    concurrent, live = _others(main, battle_id)
+    warnings: list[str] = []
+    if live:
+        warnings.append("in_place_live : battle(s) " + ", ".join(live)
+                        + " en place dans le principal (sans worktree) : le principal reste partagé")
     bad = [r for r in (".legion/x", f".claude/worktrees/{battle_id}/x") if not _ignored(main, r)]
     if bad:
         raise _Refusal("not_ignored", "à ignorer dans .gitignore : " + ", ".join(b[:-2] for b in bad))
@@ -327,7 +340,7 @@ def _create(cwd: str, battle_id: str) -> dict:
     _git(main, "worktree", "add", "-q", "-b", branch, path, head)
     copied, skipped = _copy_local(main, path)
     return {"ok": True, "path": path, "branch": branch, "base": head, "created": True,
-            "copied": copied, "skipped": skipped}
+            "copied": copied, "skipped": skipped, "concurrent": concurrent, "warnings": warnings}
 
 
 # --- where ---------------------------------------------------------------------------------
@@ -722,9 +735,19 @@ def _t_create_concurrent_and_aborted(tmp: str) -> None:
     os.makedirs(other)
     fx.battle("C", worktree={"path": other, "branch": "me/9", "base": "0" * 40})
     res = create(fx.main, "B")
-    assert not res["ok"] and res["reason"] == "concurrent_battle", res
+    assert res["ok"] and res["concurrent"] == ["C"] and res["warnings"] == [], res
+    fx.battle("P")  # battle vivante en place (sans worktree)
+    fx.git(fx.main, "worktree", "remove", "--force", res["path"])
+    fx.git(fx.main, "branch", "-D", res["branch"])
+    res = create(fx.main, "B")
+    assert res["ok"] and res["concurrent"] == ["C"], res
+    assert any("in_place_live" in w and "P" in w for w in res["warnings"]), res
+    fx.git(fx.main, "worktree", "remove", "--force", res["path"])
+    fx.git(fx.main, "branch", "-D", res["branch"])
     fx.battle("C", worktree={"path": other}, aborted={"at": "T", "reason": None})
-    assert create(fx.main, "B")["ok"]
+    fx.battle("P", aborted={"at": "T", "reason": None})
+    res = create(fx.main, "B")
+    assert res["ok"] and res["concurrent"] == [] and res["warnings"] == [], res
     fx.battle("D", aborted={"at": "T", "reason": None})
     res = create(fx.main, "D")
     assert not res["ok"] and res["reason"] == "aborted", res
@@ -1034,6 +1057,187 @@ def _t_cross_main_session(tmp: str) -> None:
     cli("battle_state.py", "set-guard", "--allow", "c/**", "--repo", fx.main, "--battle", "C")
     assert edit(os.path.join(wt, "src", "x.txt"))[0] == 0                     # battle proprietaire = B
     assert edit(os.path.join(wt, "c", "x.txt"))[0] == 2
+
+
+def _t_cross_two_battles(tmp: str) -> None:
+    """Test croise GH#170 : deux battles en worktree, deux sessions (sidA, sidB) et une session non liee
+    (sidC), cwd = principal. Vrais CLI et vrais hooks (sous-processus, sources du depot), vrai remote nu."""
+    if shutil.which("git") is None:
+        print("SKIP: _t_cross_two_battles (git absent)", file=sys.stderr)
+        return
+    fx = _Fx(tmp)
+    scripts = Path(_SCRIPTS_DIR)
+    hooks = scripts.parent / "hooks"
+    main_p = Path(fx.main)
+    bs_py = str(scripts / "battle_state.py")
+    clean_env = {k: v for k, v in os.environ.items()
+                 if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "LEGION_GUARD_OFF",
+                              "LEGION_HOOK_PROBE")}
+    profile = next(iter(bs.PROFILES))
+
+    def run(script: Path, *args: str, ok: bool = True) -> subprocess.CompletedProcess:
+        p = subprocess.run([sys.executable, str(script), *args], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, cwd=fx.main, env=clean_env, timeout=120)
+        assert (p.returncode == 0) == ok, (script.name, args, p.returncode, p.stdout, p.stderr)
+        return p
+
+    def cli(script: str, *args: str, ok: bool = True) -> dict:
+        p = run(scripts / script, *args, ok=ok)
+        return json.loads(p.stdout) if p.stdout.strip().startswith("{") else {"raw": p.stdout}
+
+    def hook(name: str, payload: dict) -> tuple[int, str]:
+        p = subprocess.run([sys.executable, str(hooks / name)], input=json.dumps(payload), capture_output=True,
+                           text=True, cwd=fx.main, env=clean_env, timeout=60)
+        return p.returncode, p.stderr
+
+    def bsc(*args: str, ok: bool = True) -> dict:
+        return cli("battle_state.py", *args, "--repo", fx.main, ok=ok)
+
+    def write(path: str, sid: str | None = "sidA", agent: str = "legion:architect", **extra) -> tuple[int, str]:
+        payload = {"tool_name": "Write", "agent_type": agent, "cwd": fx.main,
+                   "tool_input": {"file_path": path, "content": "x"}, **extra}
+        if sid:
+            payload["session_id"] = sid
+        return hook("guard.py", payload)
+
+    def bash_guard(command: str, sid: str | None) -> tuple[int, str]:
+        payload = {"tool_name": "Bash", "agent_type": "claude", "cwd": fx.main, "tool_input": {"command": command}}
+        if sid:
+            payload["session_id"] = sid
+        return hook("guard.py", payload)
+
+    def edit(path: str, sid: str | None) -> tuple[int, str]:
+        payload = {"tool_name": "Edit", "agent_type": "claude", "cwd": fx.main, "tool_input": {"file_path": path}}
+        if sid:
+            payload["session_id"] = sid
+        return hook("guard.py", payload)
+
+    def pointer() -> str:
+        f = main_p / ".legion" / "active-battle"
+        return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
+
+    def plan_of(x: str) -> str:
+        return str(main_p / ".legion" / "battles" / x / "plan.md")
+
+    # 1. init + session_bind + create + set-meta + set-guard, pour A (sidA) puis B (sidB)
+    (main_p / ".legion" / "battles" / "B" / "battle.json").unlink()
+    wts: dict[str, dict] = {}
+    for x, sid, ticket in (("A", "sidA", "GH#7"), ("B", "sidB", "GH#8")):
+        cmd = f"python {bs_py} init {x} --ticket {ticket} --title t --profile {profile} --repo {fx.main}"
+        out = run(Path(bs_py), "init", x, "--ticket", ticket, "--title", "t", "--profile", profile,
+                  "--repo", fx.main)
+        code, err = hook("session_bind.py", {
+            "hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id": sid, "cwd": fx.main,
+            "tool_input": {"command": cmd}, "tool_response": {"stdout": out.stdout}})
+        assert code == 0, err
+        res = cli("battle_worktree.py", "create", "--battle", x)
+        assert res["ok"] and res["created"], res                                 # la 2e create reussit
+        wts[x] = res
+        bsc("set-meta", "--worktree-path", res["path"], "--worktree-branch", res["branch"],
+            "--worktree-base", res["base"], "--battle", x)
+        bsc("set-guard", "--allow", "src/**", "--battle", x)
+    assert wts["B"]["concurrent"] == ["A"], wts["B"]
+    assert pointer() == "B", pointer()
+    wtA, wtB = wts["A"]["path"], wts["B"]["path"]
+
+    # 2. session-status
+    st = bsc("session-status", "--battle", "A")
+    assert st["bound"] is True and st["keys"] == 1, st
+    assert bsc("session-status", "--battle", "B")["bound"] is True
+
+    # 3. gate architect : confinee a l'artefact de la battle de la session, malgre le pointeur sur B
+    assert write(plan_of("A"), "sidA")[0] == 0
+    code, msg = write(plan_of("B"), "sidA")
+    assert code == 2, (code, msg)
+    assert write(plan_of("B"), "sidB")[0] == 0
+    assert write(plan_of("A"), "sidB")[0] == 2
+
+    # 4. sous-agent sans session_id : cle derivee du transcript
+    sub = {"transcript_path": str(Path(tmp) / "sidA" / "subagents" / "agent-1.jsonl")}
+    assert write(plan_of("A"), None, **sub)[0] == 0
+    assert write(plan_of("B"), None, **sub)[0] == 2
+
+    # 5. guard de la session : C8 de A (principal protege), sidC non liee
+    assert edit(os.path.join(wtA, "src", "x"), "sidA")[0] == 0
+    code, msg = edit(os.path.join(fx.main, "src", "x"), "sidA")
+    assert code == 2 and "protege" in msg, (code, msg)
+    assert edit(os.path.join(fx.main, "src", "x"), "sidC")[0] == 0           # foreign : pas le guard de B
+
+    # 6. careful de A : avertit sidA, silence pour sidB
+    bsc("set-guard", "--careful", "on", "--battle", "A")
+    rm = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": fx.main,
+          "tool_input": {"command": "rm -rf x"}}
+    code, err = hook("careful.py", {**rm, "session_id": "sidA"})
+    assert code == 0 and "[careful]" in err, (code, err)
+    code, err = hook("careful.py", {**rm, "session_id": "sidB"})
+    assert code == 0 and err == "", (code, err)
+
+    # 7. usage_track : la ligne va dans A
+    tp = Path(tmp) / "agent-usage.jsonl"
+    tp.write_text(json.dumps({"type": "assistant", "message": {"usage": {
+        "input_tokens": 5, "output_tokens": 2}, "content": []}}) + "\n", encoding="utf-8")
+    code, err = hook("usage_track.py", {"hook_event_name": "SubagentStop", "agent_type": "builder",
+                                        "session_id": "sidA", "agent_transcript_path": str(tp), "cwd": fx.main})
+    assert code == 0, err
+    ua = main_p / ".legion" / "battles" / "A" / "usage.jsonl"
+    assert ua.is_file() and len(ua.read_text(encoding="utf-8").splitlines()) == 1
+    assert not (main_p / ".legion" / "battles" / "B" / "usage.jsonl").exists()
+
+    # 8. empreinte de A pendant que B vit sa vie, jusqu'a sa cloture
+    snap = os.path.join(tmp, "snap.json")
+    s = cli("artifact_check.py", "tree-snapshot", "--out", snap, "--root", wtA, "--battle", "A")
+    assert s["ok"], s
+
+    def verify(ok: bool = True) -> dict:
+        return cli("artifact_check.py", "tree-verify", "--before", snap, "--fingerprint", s["fingerprint"],
+                   "--root", wtA, "--battle", "A", "--guard", ok=ok)
+
+    fx.commit_in(wtB, "b.txt")
+    fx.git(wtB, "push", "-q", "-u", "origin", wts["B"]["branch"])
+    fx.git(fx.main, "fetch", "-q", "--no-tags", "origin")
+    bsc("activate", "B")
+    assert verify()["ok"] is True
+    fx.git(fx.main, "worktree", "remove", "--force", wtB)
+    bj = main_p / ".legion" / "battles" / "B" / "battle.json"
+    body = json.loads(bj.read_text(encoding="utf-8"))
+    body.setdefault("phases", {})["reflect"] = {"status": "done"}
+    bj.write_text(json.dumps(body), encoding="utf-8")
+    closed = bsc("close", "--battle", "B")
+    assert closed["ok"] and closed.get("unbound") == 1, closed
+    assert verify()["ok"] is True
+    fx.write(wtA, "docs/x", "x\n")
+    v = verify(ok=False)
+    assert v["ok"] is False and "docs/x" in json.dumps(v), v
+    os.unlink(os.path.join(wtA, "docs", "x"))
+    fx.write(fx.main, "x", "x\n")
+    v = verify(ok=False)
+    assert v["ok"] is False and "main-tree" in json.dumps(v), v
+    os.unlink(os.path.join(fx.main, "x"))
+
+    # 9. garde-fou des mutations : le pointeur est sur une autre battle (D) que celle de sidA
+    bsc("init", "D", "--ticket", "GH#9", "--title", "t", "--profile", profile)
+    assert pointer() == "D", pointer()
+    code, msg = bash_guard(f"python {bs_py} set-guard --allow y --repo {fx.main}", "sidA")
+    assert code == 2 and "A" in msg and "--battle" in msg, (code, msg)
+    assert bash_guard(f"python {bs_py} set-guard --allow y --repo {fx.main} --battle A", "sidA")[0] == 0
+
+    # 10. payloads sans cle (ancien harnais) : le pointeur decide comme avant
+    assert write(plan_of("D"), None)[0] == 0
+    assert write(plan_of("A"), None)[0] == 2
+
+    # 11. close A : la liaison de sidA disparait
+    assert bsc("session-status", "--battle", "A")["bound"] is True
+    abj = main_p / ".legion" / "battles" / "A" / "battle.json"
+    body = json.loads(abj.read_text(encoding="utf-8"))
+    body.setdefault("phases", {})["reflect"] = {"status": "done"}
+    abj.write_text(json.dumps(body), encoding="utf-8")
+    fx.git(fx.main, "worktree", "remove", "--force", wtA)
+    closed = bsc("close", "--battle", "A")
+    assert closed["ok"] and closed.get("unbound") == 1, closed
+    sdir = main_p / ".legion" / "sessions"
+    left = [f.name for f in sdir.glob("*.json")
+            if json.loads(f.read_text(encoding="utf-8")).get("battle") == "A"] if sdir.is_dir() else []
+    assert left == [], left
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ session's context.
 > `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" <sub> …` (fall back to
 > `python3`, same interpreter as the other script calls). Subcommands: `init`,
 > `transition`, `approve-plan`, `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`,
-> `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`. The script prints one JSON object on
+> `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, plus the read-only `session-status`. The script prints one JSON object on
 > stdout; **read it**. Exit code `2` means **refused** (or invalid usage): relay the
 > `reason` to the user and **do not advance**. The script enforces the phase
 > preconditions and the auto-correction budgets; you no longer re-check them by hand.
@@ -156,8 +156,14 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    ```
 
    `init` creates `.legion/battles/<id>/` in the current repo, writes a minimal
-   `battle.json` and points `.legion/active-battle` at the new id — this pointer is
-   what the `guard.py` / `careful.py` hooks read to know which battle is active.
+   `battle.json` and points `.legion/active-battle` at the new id. That pointer is only the
+   fallback: the `session_bind.py` PostToolUse hook also binds **this session** to the battle
+   (`.legion/sessions/<key>.json`) once `init` succeeds, and the `guard.py` / `careful.py` /
+   `usage_track.py` hooks resolve the battle by target, then by session, then by pointer.
+   **Right after `init`** (and after `activate`, §B) run
+   `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" session-status --battle <id>`
+   (read-only). `bound: false` means the harness gave no session key: warn the user
+   « single-session mode (pointer): do not start another battle in parallel » and go on.
    `<ticket>` is `GH#<n>` for a numeric intake, else the slug token. The title is
    refined at step 3 (`set-meta --title`), so a provisional one (the id) is fine.
    `--step` sets `run.mode = "step"`, otherwise `"autonomous"` (see step 4).
@@ -192,16 +198,18 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    of the main checkout, then copies the local files declared in `.worktreeinclude` at the
    repo root (gitignore syntax; only regular files that git ignores, never a symlink, never
    anything under `.legion/` or `.claude/`, never an overwrite). The main checkout keeps its
-   `HEAD`, branch and index. It prints `{ ok, path, branch, base, created, copied, skipped }`.
+   `HEAD`, branch and index. It prints `{ ok, path, branch, base, created, copied, skipped, concurrent, warnings }`.
    `created: false` means a previous run already made a matching worktree (idempotent): go on.
+   Concurrent battles are supported, each in its own worktree: `concurrent` lists the other live
+   worktree battles (information only, never a refusal). `warnings` may carry `in_place_live: <id>`:
+   a live `--in-place` battle writes in the main checkout and makes the `[main-tree]` check fault
+   for the others; relay it and advise finishing that battle first.
    Exit `2` (refused) carries `reason`; relay it and **do not advance**:
    - `dirty` (modified or untracked files in the main checkout): list them, ask the user to
      commit or stash them, or to restart with `--in-place`;
    - `not_ignored`: see §A.preflight item 4;
    - `branch_exists` / `path_exists`: a stale branch or directory. The user removes or renames
      it; never delete it yourself, never reuse it;
-   - `concurrent_battle`: another battle already owns a live worktree. Parallel battles are
-     not supported yet: finish or `close` that one, or use `--in-place`;
    - `aborted`, `no_commit`, `invalid`: relay the message.
 
    Then record the block, with the three values **taken from the `create` JSON** (all three
@@ -477,7 +485,9 @@ statuses and the last verdict. Announce the next pending phase and what it needs
 use `Read` and `… battle_state.py validate --battle <battle-id>` (the only command an
 aborted battle still accepts).
 `activate` prints `previous_active` and `warnings`: relay a `pointer_taken` warning and ask
-the user before going on (§A.1 step 2b).
+the user before going on (§A.1 step 2b). The `session_bind.py` hook binds this session to the
+resumed battle: run `… battle_state.py session-status --battle <battle-id>` and, on
+`bound: false`, warn « single-session mode (pointer): do not start another battle in parallel ».
 **Check the worktree.** There is no re-entry: the session stays in the main checkout. If
 `battle.json` has a `worktree` block (worktree mode), run
 `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <battle-id>`. `ok: true`
@@ -627,7 +637,7 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
    `HEAD`; on a clean tree it returns `HEAD` itself. It touches no ref, no `HEAD` and no index.
    It refuses (exit 2) on a nested repository. Never use `git rev-parse HEAD` here: a foundation
    slice that is still uncommitted would be invisible to the builders. Then take the snapshot S1
-   of the main tree: `tree-snapshot --out <state>/.legion/battles/<id>/_tree-before.json`. No
+   of the main tree: `tree-snapshot --battle <id> --out <state>/.legion/battles/<id>/_tree-before.json`. No
    `battle_state.py` write between this snapshot and step 4.
 2. Launch the builders in parallel (`isolation: worktree`). Each builder prompt carries
    `<base>` and the absolute path of `fan_in.py`: the builder's first action is
@@ -654,11 +664,11 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
    to the user; with `build_ok: true` it is a non-blocking warning, flagged for the REFLECT.
 3. For each builder take its worktree path from `git worktree list --porcelain` (never from
    the builder's returned text), check it matches `^[A-Za-z0-9._/:\\ -]+$` (no `$`, backtick
-   or `"`), then run `artifact_check.py tree-verify --base <base> --root "<worktree>" --guard`
+   or `"`), then run `artifact_check.py tree-verify --base <base> --battle <id> --root "<worktree>" --guard`
    (the script also checks the path against `git worktree list`). In `--base` mode it also
    requires `<base>` to be an ancestor of the worktree `HEAD` (fault `[base]`): this proves the
    builder aligned. It follows the same path as any other fault of this step (step 5).
-4. On the main tree run `tree-verify --before S1 --fingerprint F1 --batch-worktrees`
+4. On the main tree run `tree-verify --battle <id> --before S1 --fingerprint F1 --batch-worktrees`
    **without a filter**: no isolated builder may touch the main tree, and a fault is charged to
    the whole batch. The fingerprint includes the list of registered worktrees and every branch
    except those checked out in a registered worktree, so a worktree that appeared or disappeared
@@ -685,7 +695,7 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
    `{ ok, applied:[{ slice, worktree, committed, files:[{ status, path }] }] }`. Exit 2: JSON with
    `refused` + `out_of_scope`, or `conflict:{ slice, kind, files }`, or `fault`; the main tree is
    unchanged. Exit 1: usage error.
-8. Run `tree-verify --before S2 --fingerprint F2 --guard` on the main tree (no
+8. Run `tree-verify --battle <id> --before S2 --fingerprint F2 --guard` on the main tree (no
    `--batch-worktrees`: the worktrees did not move). A fault: `slice <id> blocked` for every
    slice of the batch, then `transition build blocked`, escalation **case 3**. The worktrees are
    kept (no `cleanup`), and the changes `apply` wrote stay in the working tree for diagnosis.
@@ -779,13 +789,13 @@ fault. `<id>` is the validated battle id, never `$ARGUMENTS`.
 
 1. **Snapshot.** After `transition <phase-key> in_progress` (or `slice <id> in_progress`)
    and **before** `Agent`, run
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" tree-snapshot --out "<state>/.legion/battles/<id>/_tree-before.json"`.
+   `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" tree-snapshot --battle <id> --out "<state>/.legion/battles/<id>/_tree-before.json"`.
    **Worktree mode:** add `--root "<worktree>"` (`<worktree>` = `worktree.path`) so the snapshot
    covers the battle's worktree, not the main checkout; run it from the main checkout.
    Keep the `fingerprint` it prints; it must match `^[0-9a-f]{64}$`. A refusal (exit `2`)
    → do not launch the agent, **escalation case 5**.
 2. **Verify.** After the return and **before** the delivery check (below), run
-   `artifact_check.py tree-verify --before "<state>/.legion/battles/<id>/_tree-before.json" --fingerprint <fingerprint>`.
+   `artifact_check.py tree-verify --battle <id> --before "<state>/.legion/battles/<id>/_tree-before.json" --fingerprint <fingerprint>`.
    **Worktree mode:** add `--root "<worktree>"` here too. Gates receive the **Code root**
    = `worktree.path` and still write their artifact under `<state>/.legion/`.
    For a builder (or any BUILD), add `--guard`. Passing the fingerprint back protects the
@@ -806,9 +816,12 @@ fault. `<id>` is the validated battle id, never `$ARGUMENTS`.
    otherwise `lint` / `test-engineer` fault. The escalation then advises completing the
    `.gitignore`.
 9. **Never write `battle.json` between `tree-snapshot` and `tree-verify`.** The protected
-   state (`.legion/active-battle`, the active `battle.json`) is part of the fingerprint, so
-   any `battle_state.py` call in that window (`transition`, `slice`, `verdict`…) raises a
-   false fault. For a batch of gates run in parallel, take the snapshot **after** the
+   state with `--battle <id>` is the `battle.json` of **that** battle and the session bindings
+   that point at it; the `.legion/active-battle` pointer is not hashed, and the worktrees,
+   branches and `branch.<b>.*` config keys of the **other** battles are excluded, as is
+   `refs/remotes/**`. So any `battle_state.py` call on this battle in that window
+   (`transition`, `slice`, `verdict`…) raises a false fault, while another session's
+   `activate` or commits do not. For a batch of gates run in parallel, take the snapshot **after** the
    `in_progress` calls, run the `tree-verify` for the batch, and record **all** the
    verdicts (`verdict …` / `transition …`) only **after** it. The same order holds for
    builders: `tree-verify` first, then `slice <id> done|blocked`.
@@ -1067,7 +1080,7 @@ session stays in the main checkout, so every git command of this section targets
 `git -C "<worktree>" add`, `git -C "<worktree>" commit`, `git -C "<worktree>" push`,
 `git -C "<worktree>" diff` / `status` / `rebase`, and
 `base_freshness.py --repo "<worktree>"`. The PR is opened with `gh pr create --head <worktree.branch>`.
-The branch of the main checkout never moves. `git fetch origin` can run from either checkout.
+The branch of the main checkout never moves. `git fetch origin` can run from either checkout; with concurrent battles use `git fetch --no-tags origin` (a tag fetched during a gate is a `[git-state]` fault).
 
 0. **Pre-branch safety nets.** Before branching, two checks:
 
@@ -1457,13 +1470,15 @@ correct, then pass each value as its own quoted argument:
 python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" abort [--battle "<battle-id>"] [--reason "<text>"]
 ```
 
-Without `<battle-id>` the script targets the active battle (the `.legion/active-battle`
-pointer). Without `--reason` the reason is stored as `null`.
+Always pass `--battle <battle-id>` (the id of this session's battle): without it the script
+targets the `.legion/active-battle` pointer, which may belong to another session. Likewise
+`close`. Without `--reason` the reason is stored as `null`.
 
 1. **Run the script and read its JSON.** Exit `2` means **refused** (the battle is
    already closed, already aborted, or does not exist): relay the `reason` and stop.
 2. **On success** the script wrote `aborted = { at, reason }` in `battle.json`, cleared
-   `.legion/active-battle` if it pointed at this battle, and resynced the fleet shard
+   `.legion/active-battle` if it pointed at this battle, dropped the session bindings to it
+   (`unbound: n`), and resynced the fleet shard
    (`battle_status = "aborted"`). From now on every command except `validate` is refused
    for this battle (`activate` and `next-slice` included).
 3. **Release the issue** (only if `ticket` is `GH#<n>`; best-effort, never blocking):
@@ -1512,7 +1527,7 @@ tool is absent: ask the user to relaunch `claude` from the main repo (`state_roo
    This records `delivery.head_ref` and `delivery.head_oid` too: `close` needs `head_oid` to
    prove that a squash or rebase merge lost no local commit. No `gh` or no `pr_url`: the PR
    cannot be proven merged, so stop and say so.
-2. **Fetch**: `git fetch origin` (the scripts never use the network).
+2. **Fetch**: `git fetch --no-tags origin` (the scripts never use the network).
 3. **Check**: `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" close-check --battle <id>`.
    It is read-only and prints `{ ok, checks:[{name, ok, detail}], modified, untracked }`. The
    controls are `pr_merged`, `contained` (the branch is an ancestor of `origin/<default>`, or the

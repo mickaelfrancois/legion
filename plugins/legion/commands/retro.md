@@ -5,8 +5,12 @@ argument-hint: (no args = active battle) | <battle-id>
 
 Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
-1. **Resolve the battle**: the given `<battle-id>`, else the active one
-   (`.legion/active-battle`, read in the **main repo**). No battle → say so and stop.
+1. **Resolve the battle**: the given `<battle-id>`, else the battle of **this session** (the id
+   known from the conversation; its binding is `.legion/sessions/<key>.json`, checked with
+   `battle_state.py session-status --battle <id>`). The `.legion/active-battle` pointer (read in
+   the **main repo**) is only a last fallback: with concurrent battles it may name another
+   session's battle. No battle → say so and stop. Every `battle_state.py` call below carries
+   `--battle <id>`.
 
    **State root `<state>`.** A battle may run in a dedicated worktree
    (`<main>/.claude/worktrees/<id>`), but its state lives in the **main repo**. Every
@@ -102,8 +106,9 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" close --battle <id>
    ```
    It sets `phases.reflect.status = "done"` (and resyncs the fleet, dropping the
-   battle from the active view), and clears `<state>/.legion/active-battle` when it points at
-   this battle (the guard relaxes — the battle is over). Never edit `battle.json` by
+   battle from the active view), clears `<state>/.legion/active-battle` when it points at
+   this battle, and drops the session bindings to it (`unbound: n`) — the guard relaxes, the
+   battle is over. Never edit `battle.json` by
    hand; exit `2` = refused → relay the JSON `reason`. `retro.md` lives under `.legion/` (always
    writable), so it is already persisted by step 3 regardless of order.
 
