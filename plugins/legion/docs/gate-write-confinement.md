@@ -19,7 +19,7 @@ en contexte isolé, puis ne garde que ce que le sous-agent **retourne**. Or il y
 
 | Acteur | Écrit son artefact ? | Ce qui remonte dans la session orchestratrice | Poids |
 |---|---|---|---|
-| `builder` (producteur) | **Oui** (`build-report-<slice_id>.md`, ou `build-report.md` pour un BUILD agrégé ; consolidé ensuite par `merge-reports`) | un retour JSON court `{slice_id, build_ok, warnings, …}` | **maigre** |
+| `builder` (producteur) | **Oui** (`build-report-<slice_id>.md`, ou `build-report.md` pour un BUILD agrégé ; consolidé ensuite par `merge-reports`). En lot parallèle, le builder isolé rend son rapport dans son retour (le harnais lui refuse l'écriture hors worktree) ; l'orchestrateur écrit le fichier | un retour JSON court `{slice_id, build_ok, warnings, …}` | **maigre** |
 | Les **gates** (lecture seule) | **Non** | verdict court **+ le contenu COMPLET** de `gate-*.md` / `plan.md` / `pr-feedback.md` | **lourd** |
 
 La cause : l'invariant historique « **gates pures** » impose que *seul l'orchestrateur

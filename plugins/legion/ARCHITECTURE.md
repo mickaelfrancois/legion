@@ -191,8 +191,10 @@ Deux modes : *inline* (la session principale code, défaut) ; *autonome*
 worktrees). Un builder parallèle part de l'arbre principal figé, pas de `HEAD` : l'orchestrateur
 fige la base du lot (`fan_in.py base`, travail non commité compris, commit sans ref) et le
 builder aligne son worktree dessus avant de coder (`fan_in.py align`) ; `tree-verify --base`
-en prouve l'alignement (faute `[base]`). Depuis un worktree, le builder reçoit le dossier de la battle en chemin
-absolu du dépôt principal et y écrit son rapport de slice. Le delta d'un worktree ne
+en prouve l'alignement (faute `[base]`). Le builder séquentiel reçoit le dossier de la battle en chemin
+absolu du dépôt principal et y écrit son rapport de slice ; le builder isolé (lot parallèle) n'écrit
+aucun fichier de rapport : il le rend dans son retour (entre marqueurs), l'orchestrateur l'écrit, et tout
+refus d'écriture remonte dans `write_failures`. Le delta d'un worktree ne
 revient pas seul dans l'arbre principal : l'orchestrateur le réintègre (fan-in,
 `scripts/fan_in.py apply`, tout-ou-rien, sous `tree-verify --guard`), puis supprime les
 worktrees par `fan_in.py cleanup` une fois la vérification du projet verte.
