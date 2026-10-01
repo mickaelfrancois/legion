@@ -368,16 +368,20 @@ def _where(cwd: str, battle_id: str | None) -> dict:
 
 # --- close-check / close -------------------------------------------------------------------
 
-def _tip_and_branch(main: str, battle_id: str, battle: dict) -> tuple[str | None, str, dict | None]:
+def _tip_and_branch(main: str, battle_id: str,
+                    battle: dict) -> tuple[str | None, str, dict | None, str]:
+    """Tip, nom de branche, bloc worktree et provenance du nom (`worktree`, `head_ref` ou `derived`).
+
+    `derived` = nom recalculé depuis `git config` : il peut différer de la branche livrée (GH#161)."""
     wt = _wt_block(battle)
     delivery = _dict(battle.get("delivery"))
     if wt and isinstance(wt.get("branch"), str):
-        branch = wt["branch"]
+        branch, source = wt["branch"], "worktree"
     elif isinstance(delivery.get("head_ref"), str) and delivery["head_ref"]:
-        branch = delivery["head_ref"]
+        branch, source = delivery["head_ref"], "head_ref"
     else:
-        branch = _branch_name(main, battle_id, battle)
-    return _branch_tip(main, branch), branch, wt
+        branch, source = _branch_name(main, battle_id, battle), "derived"
+    return _branch_tip(main, branch), branch, wt, source
 
 
 def close_check(cwd: str, battle_id: str) -> dict:
@@ -391,7 +395,7 @@ def _close_check(cwd: str, battle_id: str) -> tuple[dict, dict]:
     main = _main_root(cwd)
     battle = _load_battle(main, battle_id)
     delivery = _dict(battle.get("delivery"))
-    tip, branch, wt = _tip_and_branch(main, battle_id, battle)
+    tip, branch, wt, source = _tip_and_branch(main, battle_id, battle)
     default = _default_branch(main)
     merged = delivery.get("pr_state") == "merged"
     checks = [{"name": "pr_merged", "ok": merged,
@@ -401,7 +405,12 @@ def _close_check(cwd: str, battle_id: str) -> tuple[dict, dict]:
     checks.append({"name": "branch_safe", "ok": shape_ok,
                    "detail": "forme attendue, distincte de la branche par défaut" if shape_ok else
                              f"branche à supprimer {branch!r} : branche par défaut ({default}) ou nom invalide"})
-    if tip is None:
+    if tip is None and source == "derived":
+        contained = {"name": "contained", "ok": False,
+                     "detail": f"branche {branch} absente, mais ce nom est déduit de git config, pas de la "
+                               "PR : rafraîchir la PR (gh pr view … headRefName,headRefOid puis "
+                               "set-delivery --pr-json) avant close"}
+    elif tip is None:
         contained = {"name": "contained", "ok": True, "detail": f"branche {branch} absente (déjà supprimée)"}
     else:
         rc, _, _ = _run(main, "merge-base", "--is-ancestor", tip, f"refs/remotes/origin/{default}")
@@ -867,6 +876,36 @@ def _t_close_default_branch_refused(tmp: str) -> None:
     assert _branch_tip(fx.main, "main") is not None
     fx.battle(delivery={"pr_state": "merged", "head_ref": "-bad"}, phases={"reflect": {"status": "done"}})
     assert close(fx.main, "B")["reason"] == "branch_safe"
+
+
+def _t_close_derived_name_absent(tmp: str) -> None:
+    """GH#161 : un nom déduit de git config qui ne correspond à aucune branche n'est pas « déjà supprimée »."""
+    fx = _Fx(os.path.join(tmp, "a"))
+    fx.git(fx.main, "checkout", "-q", "-b", "livree/7")       # branche livrée != nom déduit (me/7)
+    fx.commit_in(fx.main, "f1.txt")
+    fx.merge_to_origin("livree/7")
+    fx.git(fx.main, "checkout", "-q", "main")
+    fx.battle(delivery={"pr_state": "merged"}, phases={"reflect": {"status": "done"}})
+    cc = close_check(fx.main, "B")
+    checks = {c["name"]: c for c in cc["checks"]}
+    assert not cc["ok"] and not checks["contained"]["ok"], cc
+    assert "headRefName" in checks["contained"]["detail"], cc
+    out = close(fx.main, "B")
+    assert not out["ok"] and out["reason"] == "contained", out
+    assert _branch_tip(fx.main, "livree/7") is not None, out
+    fx = _Fx(os.path.join(tmp, "b"))                        # nom déduit présent : comportement inchangé
+    fx.git(fx.main, "checkout", "-q", "-b", "me/7")
+    fx.commit_in(fx.main, "f1.txt")
+    fx.merge_to_origin("me/7")
+    fx.git(fx.main, "checkout", "-q", "main")
+    fx.battle(delivery={"pr_state": "merged"}, phases={"reflect": {"status": "done"}})
+    assert close_check(fx.main, "B")["ok"]
+    out = close(fx.main, "B")
+    assert out["ok"] and out["branch_deleted"] and _branch_tip(fx.main, "me/7") is None, out
+    fx = _Fx(os.path.join(tmp, "c"))                        # nom prouvé (head_ref) absent : idempotent
+    fx.battle(delivery={"pr_state": "merged", "head_ref": "livree/7"}, phases={"reflect": {"status": "done"}})
+    cc = close_check(fx.main, "B")
+    assert cc["ok"] and "déjà supprimée" in {c["name"]: c for c in cc["checks"]}["contained"]["detail"], cc
 
 
 def _t_cross_state_guard(tmp: str) -> None:
