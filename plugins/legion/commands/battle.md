@@ -246,6 +246,11 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      steps are usually in the body). The ticket `GH#1234` was already recorded by
      `init` (step 2); record the real issue title with
      `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-meta --title "<issue title>"`.
+     - **Recon decisions.** If the body carries a `## Cadrage` section (written by
+       `/legion:recon`) with a `**Décisions.**` rubric, copy its lines **verbatim**
+       (deviation marks included) into `spec.md` under `## Décisions de cadrage`, after
+       the assumptions. The `architect` reads only `spec.md`, so this is how the
+       decisions taken during recon reach PLAN. No such rubric → no such section.
      - If `gh` is missing/unauthenticated or the issue can't be read → **warn**,
        fall back to inline intake, and note the degradation at the top of `spec.md`.
 
@@ -264,7 +269,9 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 
    In both cases `spec.md` must contain: a systematic **`## En bref`** section at the
    top (1-3 lines, reusing the "Intention" seed), then intent, in-scope, explicitly
-   out-of-scope, assumptions, acceptance criteria. Apply the **writing charter**
+   out-of-scope, assumptions, acceptance criteria — plus `## Décisions de cadrage`
+   (after the assumptions) when the issue's « Cadrage » carries a `**Décisions.**`
+   rubric (numeric intake only, see above). Apply the **writing charter**
    (`battle-workflow` § « Charte de style des documents ») — simple, precise language;
    reference it, do not copy it. **Write it in French**
    (identifiers & file names stay English). Before locking the plan, reread `spec.md`

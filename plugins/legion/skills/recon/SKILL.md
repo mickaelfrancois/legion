@@ -26,6 +26,10 @@ back as a **« Cadrage »** section on the issue. The payoff is downstream:
   `/legion:battle deliver`). Never edit silently.
 - **French for the brief, English for identifiers.** The « Cadrage » prose is written
   in French (legion convention for artifacts); type/file/symbol names stay English.
+- **Stays on the WHAT.** `recon` sharpens *what* to build — intent, scope, criteria.
+  It never proposes a technical approach (layers, design, implementation choices):
+  that is the `architect`'s job at PLAN. Exploring the repo to establish facts stays
+  allowed.
 
 ## §1 — Preflight
 
@@ -60,21 +64,61 @@ back as a **« Cadrage »** section on the issue. The payoff is downstream:
 ## §2 — The recon (core loop)
 
 Interview the user **relentlessly** about the feature until you reach a **shared
-understanding**. Walk down each branch of the decision tree, resolving dependencies
-between decisions one at a time.
+understanding**. Map the decisions as a tree: each decision opens the ones that
+depend on it. Ask in **rounds**, and let the user answer only where they disagree.
 
-**The discipline (this is what makes it work):**
+### Pre-scan (coverage) — before the first round
 
-- **One question at a time.** Wait for the answer before the next question. Asking
-  several at once is bewildering — never batch them.
-- **Recommend an answer to every question.** Don't ask blank questions; propose your
-  recommended answer (and why), so the user reacts to a concrete proposal rather than
-  starting from nothing.
+Rate each of the seven branches from the issue as it stands: **intent**, **in scope**,
+**out of scope**, **assumptions**, **acceptance criteria**, **edge cases**,
+**risks / dependencies**. Each gets one rating:
+
+- **Clear** — settled by the issue (or the repo); no question needed.
+- **Partial** — present but ambiguous or incomplete.
+- **Missing** — absent.
+
+Show the ratings as a compact table (branch | rating | one-line reason) before the
+first round, and let the user correct it ("non, le périmètre est Partial"). A branch
+wrongly rated Clear would never be questioned, so the table is the user's check.
+**Only Partial and Missing branches are questioned.** On the create path (§1, no issue
+yet), every branch is Missing.
+
+### Rounds
+
+- **A round asks every question that depends on no open answer.** A question whose
+  answer hinges on another question still open goes to a **later** round, never the
+  same one. Resolve a decision before asking the ones that depend on it; surface
+  trade-offs as you go.
+- **Number the questions; at most 5 per round.** If more than 5 can be asked, keep the
+  5 with the highest impact on scope or acceptance criteria and carry the rest to the
+  next round. There is no cap on the number of rounds.
+- **Recommend an answer to every question, with a short justification.** Don't ask
+  blank questions: the user reacts to a concrete proposal rather than starting from
+  nothing.
+- **Plain text, not `AskUserQuestion`.** A text round lets the user answer only the
+  numbers they want to change; the tool forces one interaction per question.
+- **Format of a round:**
+  ```markdown
+  **Q1 — <titre court>.** <la question, avec ses options si besoin>
+  ➡️ Recommandé : <réponse> — <justification courte>
+
+  **Q2 — …**
+  ```
+  End the round with one line: « Réponds `ok`, ou seulement les numéros à changer. »
+
+### Answers by exception
+
+- **`ok` accepts the whole round.** A question left unanswered in a reply **accepts
+  its recommendation**. The user only answers to deviate (« 2: B »).
+- **An answer that contradicts an earlier decision reopens that branch** in the next
+  round: its « Décisions » line is **replaced**, never duplicated, and the questions
+  that depended on it are asked again.
+
+### Discipline
+
 - **Explore the repo instead of asking** whenever a question can be settled from the
   code. Use `Grep`/`Glob`/`Read` to find the existing pattern, the affected files, the
   current behaviour — then bring the finding to the user, don't make them recite it.
-- **One branch at a time.** Resolve a decision before opening the next that depends on
-  it; surface trade-offs as you go.
 - **Verify every code-level claim before it enters the « Cadrage ».** A file, symbol, or
   current-behaviour statement you write into the brief must be checked with `Read`/`Grep`
   first. If you cannot verify it, frame it as an **assumption to confirm in PLAN** —
@@ -88,15 +132,21 @@ between decisions one at a time.
   it the same way. (RETEX: a lint rule « repo not formatted → revise » left its scope
   unstated; the implicit whole-repo default was wrong, fixed only in PR review.)
 
-**Cover every branch** (skip a branch only once it is genuinely settled): the
-underlying problem/intent, what is **in scope**, what is **explicitly out of scope**,
-the **assumptions** being made, the **acceptance criteria** (must be checkable), edge
-cases, and dependencies / risks.
+**Cover every Partial and Missing branch** of the pre-scan (skip a branch only once it
+is genuinely settled): the underlying problem/intent, what is **in scope**, what is
+**explicitly out of scope**, the **assumptions** being made, the **acceptance criteria**
+(must be checkable), edge cases, and dependencies / risks.
 
 **Stop when** (completion criterion — all must hold): the scope is unambiguous, the
 acceptance criteria are checkable, the out-of-scope is stated explicitly, and the open
 dependencies are resolved. That is "shared understanding" — don't stop earlier, don't
 drag past it.
+
+**Nothing to sharpen.** If every branch is Clear (after any correction of the table),
+run no round: go to §3 and write a **minimal « Cadrage »** built from the issue, without
+a new « Décisions » line — but if the issue already carries a `**Décisions.**` rubric
+(re-run), keep it as is (see §3). It still goes through §4 — same OK, same `legion-recon`
+label — so the issue carries the structured rubrics `start` seeds `spec.md` from.
 
 ## §3 — Synthesize the « Cadrage »
 
@@ -119,6 +169,10 @@ _Affiné via `/legion:recon` le <AAAA-MM-JJ>._
 **Hypothèses.**
 - <hypothèses retenues pendant le cadrage>
 
+**Décisions.**
+- <question courte> → <réponse retenue>
+- <question courte> → <réponse retenue> _(écart : reco « <recommandation> »)_
+
 **Critères d'acceptation.**
 - [ ] <critère vérifiable>
 
@@ -129,6 +183,21 @@ _Affiné via `/legion:recon` le <AAAA-MM-JJ>._
 Keep the date placeholder filled with today's date. Omit a rubric only if it would be
 empty (except *Hors périmètre*, which must always be explicit — state "Rien d'autre
 pour l'instant" rather than leaving it blank).
+
+**The `**Décisions.**` rubric** logs one line per question settled during the rounds:
+`- <question courte> → <réponse retenue>`. When the answer departs from your
+recommendation, append ` _(écart : reco « <recommandation> »)_`, so the `architect`
+sees the rejected recommendation without reading the issue. Keep the label
+**exactly** `**Décisions.**`: `/legion:battle start` looks for it to copy these lines
+into `spec.md`. Omit the rubric when no question was asked **and** the issue carries
+no earlier `**Décisions.**` rubric — an earlier one is always kept (see the re-run
+rule below).
+
+**Re-run on an issue already framed.** If the issue already carries a `## Cadrage` with
+a `**Décisions.**` rubric, **start from its lines**: add the new decisions, and replace
+a line whose decision this session contradicts — never duplicate it. The pre-scan rates
+the branches already settled Clear, so dropping the old lines would silently lose
+decisions the `architect` must still see.
 
 ## §4 — Update the issue (outward — confirm first)
 
@@ -161,7 +230,12 @@ pour l'instant" rather than leaving it blank).
 ## Guardrails (recap)
 
 - Pre-THINK and stateless: nothing under `.legion/`, no battle started.
-- One question at a time, recommended answer each, explore the repo before asking.
+- Pre-scan shown first; only Partial / Missing branches are questioned.
+- Rounds of ≤5 independent numbered questions, a recommended answer + short
+  justification each; `ok` or silence = recommendation accepted; explore the repo
+  before asking.
+- A contradicting answer reopens its branch and replaces its « Décisions » line.
+- Stays on the WHAT: no technical approach, that is the `architect`'s job.
 - « Cadrage » in French; identifiers English.
 - Confirm before the `gh issue edit`; degrade to paste-ready output if `gh` is absent.
 - Pose the `legion-recon` label at the outward write (both the `gh issue edit` and the
