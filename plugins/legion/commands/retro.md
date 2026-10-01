@@ -6,25 +6,34 @@ argument-hint: (no args = active battle) | <battle-id>
 Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
 1. **Resolve the battle**: the given `<battle-id>`, else the active one
-   (`.legion/active-battle`). No battle → say so and stop.
+   (`.legion/active-battle`, read in the **main repo**). No battle → say so and stop.
+
+   **State root `<state>`.** A battle may run in a dedicated worktree
+   (`<main>/.claude/worktrees/<id>`), but its state lives in the **main repo**. Every
+   `.legion/…` path below means `<state>/.legion/…`, where `<state>` is the `state_root` printed
+   by `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>` (JSON,
+   read-only, no network; `<id>` validated as in step 1b). Check it is an existing absolute
+   directory and use **absolute** paths in shell commands and in `Read` / `Write`, never a path
+   built from the cwd. This retrospective **removes nothing**: the worktree and the branch stay
+   until `/legion:battle close <battle-id>` (after the PR is merged).
 
 1b. **Check the PR state.** Validate `<battle-id>` (from `$ARGUMENTS`) against
    `^[A-Za-z0-9][A-Za-z0-9-]*$` before any shell call; never substitute `$ARGUMENTS` raw.
    If `battle.json` has `delivery.pr_url`, refresh it as in `/legion:battle status` (§C):
    take `<n>` from the tail of `pr_url` (`^[0-9]+$`), run
    ```bash
-   gh pr view <n> --json state,mergedAt,statusCheckRollup,url > ".legion/battles/<id>/pr-status.json"
+   gh pr view <n> --json state,mergedAt,statusCheckRollup,url,headRefName,headRefOid > "<state>/.legion/battles/<id>/pr-status.json"
    ```
    and, only if `gh` exited `0`:
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json ".legion/battles/<id>/pr-status.json" --battle <id>
+   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
    ```
    - `open` → warn that the PR is not merged and **ask for confirmation** before going on.
    - `closed` → note it in `retro.md` (`Outcome`: `Shipped: no — PR fermée sans merge`).
    - `merged` → `Shipped: yes`.
    - No `gh`, or `gh` fails → warn and go on.
 
-2. **Read its artifacts** under `.legion/battles/<id>/`: `spec.md`, `plan.md`,
+2. **Read its artifacts** under `<state>/.legion/battles/<id>/`: `spec.md`, `plan.md`,
    every `gate-*.md`, `build-report.md`, `pr-body.md`, and `pr-feedback.md` when the
    battle went through ADDRESS (its rounds show what human review caught). Reconstruct the story: what
    shipped, what got blocked and why (gate `revise`/`reject` + the FAILs), how
@@ -93,7 +102,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" close --battle <id>
    ```
    It sets `phases.reflect.status = "done"` (and resyncs the fleet, dropping the
-   battle from the active view), and clears `.legion/active-battle` when it points at
+   battle from the active view), and clears `<state>/.legion/active-battle` when it points at
    this battle (the guard relaxes — the battle is over). Never edit `battle.json` by
    hand; exit `2` = refused → relay the JSON `reason`. `retro.md` lives under `.legion/` (always
    writable), so it is already persisted by step 3 regardless of order.
@@ -118,13 +127,13 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
 6. **Persist the Plugin RETEX to the central journal** (tooling improvement loop).
    From the `Plugin RETEX` section, write the structured items to
-   `.legion/battles/<id>/plugin-retex.json` (a JSON array of
+   `<state>/.legion/battles/<id>/plugin-retex.json` (a JSON array of
    `{plugin, area, severity, observation, suggestion, title, intent, phase, profile}`),
    then append them to the cross-battle journal:
 
    ```bash
    python "$CLAUDE_PLUGIN_ROOT/scripts/plugin_retex.py" append \
-     --file ".legion/battles/<id>/plugin-retex.json" --battle "<id>" --repo "<repo>"
+     --file "<state>/.legion/battles/<id>/plugin-retex.json" --battle "<id>" --repo "<repo>"
    ```
 
    **Embed the battle context in each item** so the entry stays self-contained once
@@ -163,7 +172,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
       covers. A loose filter spams the repo; be strict.
 
    c. **Build the candidate list + fetch existing issues.** Write the kept candidates to
-      `.legion/battles/<id>/opportunities.json` (under the battle dir — always writable,
+      `<state>/.legion/battles/<id>/opportunities.json` (under the battle dir — always writable,
       git-ignored), each entry `{ title, zone, kind, observation, out_of_scope, lead,
       phase }` (the section's sub-template). Fetch existing issues in **one** call:
 
@@ -172,10 +181,10 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
       ```
 
       Write `{ "candidates": [...], "issues": [...] }` to
-      `.legion/battles/<id>/opp-dedup-in.json`, then classify (deterministic, offline):
+      `<state>/.legion/battles/<id>/opp-dedup-in.json`, then classify (deterministic, offline):
 
       ```bash
-      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" dedup --file ".legion/battles/<id>/opp-dedup-in.json"
+      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" dedup --file "<state>/.legion/battles/<id>/opp-dedup-in.json"
       ```
 
       It returns `{ to_create, duplicates, probable }`. **`duplicates`** (fingerprint
@@ -187,7 +196,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
       marker (`<!-- legion-opportunity: <fp> -->`), the pivot of the anti-duplicate net:
 
       ```bash
-      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> --out ".legion/battles/<id>/opp-<fingerprint>.md"
+      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> --out "<state>/.legion/battles/<id>/opp-<fingerprint>.md"
       ```
 
    e. **CONFIRM (outward effect).** Show the user the list to create — each title + body,
@@ -199,7 +208,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
       ```bash
       gh label create legion-opportunity --description "Opportunité hors-scope repérée par une battle legion" --color BFD4F2
-      gh issue create --label legion-opportunity --title "<title>" --body-file ".legion/battles/<id>/opp-<fingerprint>.md"
+      gh issue create --label legion-opportunity --title "<title>" --body-file "<state>/.legion/battles/<id>/opp-<fingerprint>.md"
       ```
 
       `gh label create` fails harmlessly if the label already exists — ignore that error.

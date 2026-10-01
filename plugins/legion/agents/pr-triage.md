@@ -44,7 +44,7 @@ fiablement que haiku.
    humain : `[{thread_id, file, line, comments:[{id, author, content}]}]`. `thread_id`
    est l'identifiant de nœud GraphQL du thread (opaque — tu le recopies tel quel).
 3. **Racine du repo** (pour lire le code visé par `file:line`).
-4. **Branche de PR** (`<me>/<token>`) — contexte, tu ne la modifies pas.
+4. **Branche de PR** (`<me>/<token>`, `battle.json.worktree.branch` en mode worktree, `delivery.head_ref` sinon) — contexte, tu ne la modifies pas.
 
 ## Procédure
 

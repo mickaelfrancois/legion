@@ -234,6 +234,17 @@ trace pérenne vit dans la PR + l'issue). Une nouvelle session reprend la battle
 lisant `battle.json`, sans contexte conversationnel. Schéma : voir
 [`docs/ui-integration.md §3.1`](docs/ui-integration.md).
 
+**Battle en worktree.** Par défaut (`--in-place` pour l'ancien flux), la battle travaille dans
+`<repo>/.claude/worktrees/<id>` sur la branche `<me>/<token>`, tandis que `.legion/` reste dans le
+dépôt principal. Deux ajouts rétrocompatibles dans `battle.json` : le bloc optionnel
+`worktree {path, branch, base, created_at}` (écrit par `battle_state.py set-meta --worktree-path
+--worktree-branch --worktree-base`, les trois ensemble ; absent ou `null` = en place), et
+`delivery.head_ref` / `delivery.head_oid` (lus du JSON de `gh pr view`, posés par `set-delivery
+--pr-json`). `scripts/battle_worktree.py` (`create`, `where`, `close-check`, `close`) fait les
+opérations git locales sans jamais écrire `battle.json`. `close` exige `phases.reflect` `done`, la
+PR mergée et la branche contenue dans `origin/<default>` (ou PR mergée avec `head_oid` == tip
+local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`.
+
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (sous-commandes `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
@@ -322,6 +333,11 @@ PreToolUse(Edit|Write|MultiEdit) :   (+ Bash|PowerShell, voir « Filtre Bash » 
      `.legion/**` reste modifiable) ou vider `.legion/active-battle`. Toute exception imprévue
      de la décision → exit 2 (jamais exit 1). Entrée stdin : vide ou blanche → exit 0 ; illisible
      ou non-objet JSON → exit 2 ; jamais exit 1 (hors `--self-test`).
+  2c. BATTLE EN MODE WORKTREE (règle C8, `_worktree_main_decision`, actif même guard non armé).
+     Si `battle.json.worktree.path` existe : toute écriture sous la racine d'état (checkout
+     principal), hors de `worktree.path`, hors `.legion/**`, hors `.claude/worktrees/**` et hors
+     mémoire Claude → exit 2 (bypass `LEGION_GUARD_OFF=1`). Sans bloc `worktree` (ou chemin
+     disparu) : sans effet. Évaluée après 0b, avant la lecture du périmètre.
   3. `.legion/**` toujours autorisé (sauf builder, cf. 0b). Bypass délibéré : env var LEGION_GUARD_OFF=1.
 ```
 
@@ -416,6 +432,7 @@ plugins/legion/
 │   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
 │   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`base` fige l'arbre principal, `align` aligne un worktree, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
+│   ├── battle_worktree.py       # worktree dédié d'une battle : `create` / `where` / `close-check` / `close` (opérations locales, jamais `battle.json`, jamais le réseau) (--self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
 └── skills/

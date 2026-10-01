@@ -45,7 +45,10 @@ Contrôle d'intégrité de l'arbre (GH#66, couche 1). Une gate (lecture seule) o
 compris par Bash. `tree-snapshot` prend une empreinte (HEAD, branche, entrées de
 `git status -uall` avec le hash de leur contenu, état protégé `.legion/active-battle` +
 `battle.json`, masques d'index `assume-unchanged`/`skip-worktree` + `info/exclude`) ; `.legion/`
-et les worktrees enregistrés sont exclus des chemins. `tree-verify` recalcule et compare.
+et les worktrees enregistrés sont exclus des chemins. Depuis le worktree d'une battle, l'état
+protégé est lu à la racine d'**état** (dépôt principal) et l'empreinte ajoute le checkout
+principal (HEAD + `status -uall`, `.legion/` et `.claude/worktrees/` exclus) : toute écriture
+d'une gate dans le principal est la faute `[main-tree]`. `tree-verify` recalcule et compare.
 `--fingerprint` (retenu par l'orchestrateur) protège le fichier `--before` contre une
 réécriture. `--guard` lit `allow`/`deny` de la battle active de la racine d'état
 (`battle_state.resolve_state_root` : dépôt principal depuis un worktree lié, comme `guard.py`) ;
@@ -306,8 +309,48 @@ def _status_no_stat_cache(root: str) -> bytes:
                     "--ignore-submodules=none", index=tmp)
 
 
-def _collect(root: str, depth: int = 0, nested: bool = False) -> dict:
-    """Empreinte brute de l'arbre à `root` (I/O). `nested` : dépôt imbriqué (sans état)."""
+def _state_root_of(root: str) -> str:
+    """Racine de l'état protégé pour l'arbre `root` (`battle_state.resolve_state_root` : dépôt
+    principal depuis un worktree lié ayant une battle active, sinon `root`). Ne lève jamais :
+    toute erreur renvoie `root` (comportement historique)."""
+    real = os.path.realpath(root)
+    try:
+        if _SCRIPTS_DIR not in sys.path:
+            sys.path.insert(0, _SCRIPTS_DIR)
+        import battle_state as bs
+        from pathlib import Path
+        return os.path.realpath(str(bs.resolve_state_root(Path(real))))
+    except Exception:  # noqa: BLE001 - repli : l'arbre lui-même
+        return real
+
+
+def _collect_main(main: str) -> dict:
+    """Empreinte du checkout **principal** vu depuis le worktree de la battle (`[main-tree]`) :
+    HEAD + entrées de `status -uall` avec leur hash. `.legion/`, `.claude/worktrees/` et les
+    worktrees enregistrés sont exclus (l'état est suivi à part, les worktrees bougent)."""
+    head_raw = _git_ok(main, "rev-parse", "-q", "--verify", "HEAD")
+    head = head_raw.decode().strip() if head_raw and head_raw.strip() else None
+    me = os.path.realpath(main)
+    wts = [w for w in _worktrees(main) if w != me]
+    paths: dict[str, str] = {}
+    for xy, rel in _parse_status(_status_no_stat_cache(main)):
+        rel = rel.rstrip("/")
+        if not rel or _is_legion(rel, main):
+            continue
+        if rel == ".claude/worktrees" or rel.startswith(".claude/worktrees/"):
+            continue
+        real = os.path.realpath(os.path.join(main, *rel.split("/")))
+        if any(real == w or real.startswith(w + os.sep) for w in wts):
+            continue
+        paths[rel] = f"{xy}:{_hash_entry(main, rel, 0)}"
+    return {"root": me, "head": head, "paths": paths}
+
+
+def _collect(root: str, depth: int = 0, nested: bool = False, legacy_state: bool = False) -> dict:
+    """Empreinte brute de l'arbre à `root` (I/O). `nested` : dépôt imbriqué (sans état).
+    L'état protégé est lu à la racine d'**état** (dépôt principal depuis le worktree d'une
+    battle) ; quand elle diffère de `root`, l'empreinte porte aussi le checkout principal
+    (`main`). `legacy_state` (mode `--base`, builder isolé) : état lu à `root`, sans `main`."""
     head_raw = _git_ok(root, "rev-parse", "-q", "--verify", "HEAD")
     head = head_raw.decode().strip() if head_raw and head_raw.strip() else None
     br_raw = _git_ok(root, "symbolic-ref", "-q", "HEAD")
@@ -340,8 +383,13 @@ def _collect(root: str, depth: int = 0, nested: bool = False) -> dict:
         if len(f) > 2 and (f[:1].islower() or f[:1] == b"S"):
             masked.append(f[:1].decode() + " " + os.fsdecode(f[2:]))
     excl = _hash_git_path(root, "info/exclude")
+    state_root, main = root, None
+    if not nested and not legacy_state:
+        state_root = _state_root_of(root)
+        if state_root != os.path.realpath(root):
+            main = _collect_main(state_root)
     return {"root": os.path.realpath(root), "head": head, "branch": branch, "paths": paths,
-            "state": {} if nested else _read_state(root),
+            "state": {} if nested else _read_state(state_root), "main": main,
             "masks": {"paths": sorted(masked), "exclude": excl,
                       "ignore_files": _ignored_control_files(root)},
             "gitcfg": {} if nested else _git_config_state(root)}
@@ -634,7 +682,7 @@ def _ignored_control_files(root: str) -> dict:
     return out
 
 
-_CORE_KEYS = ("root", "head", "branch", "paths", "state", "masks", "gitcfg")
+_CORE_KEYS = ("root", "head", "branch", "paths", "state", "masks", "gitcfg", "main")
 
 
 def _fingerprint(core: dict) -> str:
@@ -663,6 +711,8 @@ def _tree_diff(before: dict, after: dict, committed: list[str] | None) -> dict:
         faults.append(".legion/active-battle")
     if bs.get("battle.json") != as_.get("battle.json"):
         faults.append(".legion/battles/<active>/battle.json")
+    if before.get("main") != after.get("main"):
+        faults.append("main-tree")
     if before.get("masks") != after.get("masks"):
         faults.append("index-mask")
     bg, ag = before.get("gitcfg") or {}, after.get("gitcfg") or {}
@@ -834,7 +884,7 @@ def tree_verify(before_path: str | None, fingerprint: str | None, base: str | No
         root = os.path.realpath(root_arg or "")
         if root not in _worktrees(cur):
             raise _Refuse("--root n'est pas un worktree enregistré du dépôt courant")
-        after = _collect(root)
+        after = _collect(root, legacy_state=True)
         if after.get("gitcfg"):
             after["gitcfg"] = dict(after["gitcfg"], gitstate=_git_state(root, base_mode=True))
         before = {"head": base, "branch": after.get("branch"), "paths": {},
@@ -1779,6 +1829,56 @@ def _t_tree_guard_from_worktree() -> None:
         assert rc == 2 and out["refused"] is True, out
 
 
+def _t_tree_worktree_battle() -> None:
+    """Battle en worktree : état protégé lu au principal, checkout principal dans l'empreinte."""
+    with _TreeRepo() as r:
+        wt = os.path.join(r.root, ".claude", "worktrees", "w1")
+        r.git("worktree", "add", "-q", "-b", "wt1", wt)
+        r.battle({"allow": ["src/**"]})
+        bj = os.path.join(r.root, ".legion", "battles", "B", "battle.json")
+        snap = os.path.join(r.root, ".legion", "_wt-before.json")
+
+        def take() -> str:
+            rc, out = r.run("tree-snapshot", "--out", snap, cwd=wt)
+            assert rc == 0 and out["ok"] is True, (rc, out)
+            return out["fingerprint"]
+
+        def verify(fp: str, *extra: str) -> tuple[int, dict]:
+            return r.run("tree-verify", "--before", snap, "--fingerprint", fp, *extra, cwd=wt)
+
+        fp = take()                                              # nominal : conforme
+        rc, out = verify(fp)
+        assert rc == 0 and out["ok"] is True, out
+        os.makedirs(os.path.join(wt, "src"), exist_ok=True)
+        _write(os.path.join(wt, "src", "n.txt"), b"1")
+        rc, out = verify(fp, "--allow", "src/**")                # écriture dans le worktree : ok
+        assert rc == 0 and out["ok"] is True, out
+        os.remove(os.path.join(wt, "src", "n.txt"))
+        _write(bj, json.dumps({"id": "B", "guard": {"allow": ["**"]}}).encode())   # réécriture
+        rc, out = verify(fp)
+        assert rc == 2 and "[.legion/battles/<active>/battle.json]" in out["changed"], out
+        _write(bj, json.dumps({"id": "B", "guard": {"allow": ["src/**"]}}).encode())
+        fp = take()
+        _write(os.path.join(r.root, "src", "a.txt"), b"hacked\n")  # écriture dans le principal
+        rc, out = verify(fp)
+        assert rc == 2 and "[main-tree]" in out["changed"], out
+        r.write("src/a.txt", "a\n")
+        rc, out = verify(fp)
+        assert rc == 0 and out["ok"] is True, out
+        _write(os.path.join(r.root, "untracked-main.txt"), b"x")  # fichier non suivi du principal
+        rc, out = verify(fp)
+        assert rc == 2 and "[main-tree]" in out["changed"], out
+        os.remove(os.path.join(r.root, "untracked-main.txt"))
+        base = r.git("rev-parse", "HEAD").strip()                # A2 : --base inchangé, vert
+        rc, out = r.run("tree-verify", "--base", base, "--root", wt, cwd=wt)
+        assert rc == 0 and out["ok"] is True, out
+    with _TreeRepo() as r:                                       # en place : pas de clé `main`
+        r.battle({"allow": ["src/**"]})
+        r.snapshot()
+        with open(r.snap, encoding="utf-8") as fh:
+            assert json.load(fh)["main"] is None
+
+
 def _t_is_legion_case() -> None:
     real = _fs_case_insensitive_real
     orig = globals()["_fs_case_insensitive"]
@@ -1814,7 +1914,7 @@ _TREE_TESTS = (
     _t_tree_ignored_and_legion, _t_tree_state, _t_tree_index_mask, _t_tree_crlf,
     _t_tree_allow_filter, _t_tree_guard, _t_tree_usage, _t_tree_refusals, _t_tree_no_git,
     _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree,
-    _t_tree_stdout_bounded, _t_tree_nested_repo, _t_is_legion_case,
+    _t_tree_worktree_battle, _t_tree_stdout_bounded, _t_tree_nested_repo, _t_is_legion_case,
 )
 
 _TESTS = (_t_absent, _t_empty, _t_not_canonical, _t_relative_equals_absolute,

@@ -172,7 +172,9 @@ exploration that will not ship → `spike`; otherwise `feature`. Whatever the pr
 
 ## DELIVER
 
-`/battle deliver` branches `<me>/<token>` → commit (Conventional Commits subject +
+`/battle deliver` branches `<me>/<token>` (en mode worktree, la branche existe déjà : c'est
+`battle.json.worktree.branch`, créée par `battle_worktree.py create` ; DELIVER ne fait aucun
+`checkout -b` et part du worktree) → commit (Conventional Commits subject +
 co-author trailer) → compose `pr-body.md` from the artifacts → push → open the PR via
 `gh pr create`. For a numeric issue, the PR body ends with **`Closes #<n>`** so merging
 auto-closes the issue.
@@ -324,6 +326,20 @@ projects `tokens_total` + `skills` into the shard for the UI (plus `slices_done`
 
 A new session **resumes** a battle by reading `battle.json` — no conversational
 context required. The active battle is pointed to by `.legion/active-battle`.
+
+**Mode worktree (défaut, `--in-place` pour l'ancien flux).** `/battle start` crée un worktree
+dédié `<repo>/.claude/worktrees/<id>` sur la branche `<me>/<token>` (`battle_worktree.py create`,
+puis `battle_state.py set-meta --worktree-path/--worktree-branch/--worktree-base`), et la session y
+entre (`EnterWorktree`, repli : relancer `claude` depuis ce chemin puis `/battle resume <id>`).
+L'état (`.legion/`) reste dans le **dépôt principal** : tout chemin `.legion/` s'ancre sur la
+racine d'état `<state>` rendue par `battle_worktree.py where`. `battle.json` porte le bloc
+optionnel `worktree {path, branch, base, created_at}` (absent ou `null` = en place) et, après
+`set-delivery --pr-json`, `delivery.head_ref` / `delivery.head_oid` (branche et tip de la PR).
+`/battle close [<id>]`, lancé depuis le principal, prouve que la PR est mergée et la branche
+contenue dans `origin/<default>` (ascendance, ou PR mergée et `head_oid` == tip local, pour le
+squash/rebase), que le worktree est propre, puis supprime worktree et branche locale
+(`battle_worktree.py close-check` / `close`, jamais `--force`). Un `build all --auto` en mode
+worktree passe en builders séquentiels (`fan_in.py` refuse tout arbre autre que le principal).
 **`run.mode` est lu et respecté au resume** : une battle `step` ne s'emballe pas,
 une battle `autonomous` ré-enchaîne depuis la phase pending. Un champ `run` absent
 (battle antérieure à la feature) → comportement `autonomous` par défaut.
@@ -360,6 +376,12 @@ which also catches what the filter cannot see (`python -c`, `bash -c`) and check
 builder against `guard.allow` (`--guard`). The hooks and the state CLIs use **two roots**: the battle state
 (`.legion/`) is read from the **main repo**, even from a worktree, while the `guard.allow` /
 `deny` globs stay relative to the **worktree** the agent works in.
+
+**Rule C8 (battle in worktree mode).** When `battle.json.worktree.path` exists, `guard.py` blocks
+(exit 2) every write under the main checkout that is outside that worktree and outside `.legion/**`,
+whether or not the perimeter guard is armed and whether the session is in the worktree or in the main
+repo (fallback). The tree integrity check also fingerprints the main checkout when the state root
+differs from the tree (fault `[main-tree]`) and reads the protected state at the state root.
 
 ## Conventions
 

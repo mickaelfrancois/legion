@@ -6,7 +6,8 @@ argument-hint: (no args) | off
 Activate (or clear) the **combined guard preset** on the active battle.
 Arguments: `$ARGUMENTS`
 
-1. Resolve the active battle (`.legion/active-battle` → `battle.json`). No active
+1. Resolve the active battle (`<state>/.legion/active-battle` → `battle.json`, where `<state>`
+   is the main repo root, even when the session runs in the battle's worktree). No active
    battle → say so and stop.
 
 2. If `off`: clear `guard.allow` and `guard.deny`, leave `guard.careful` untouched:
