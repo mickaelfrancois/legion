@@ -24,9 +24,11 @@ session's context.
 > `reason` to the user and **do not advance**. The script enforces the phase
 > preconditions and the auto-correction budgets; you no longer re-check them by hand.
 > `set-delivery --pr-json <file>` records the PR/CI state read by `gh`; the script only
-> parses the file and never touches the network. Without `--repo`, the script resolves the state
-> root like the hooks: from a linked worktree it targets the **main repo** (the active battle
-> there); `init` and `activate` always target the main repo. An explicit `--repo <path>` wins.
+> parses the file and never touches the network. Without `--repo`, the script starts from the repo
+> root containing the cwd (`git rev-parse --show-toplevel`), so a subfolder never gets its own
+> `.legion/`; from a linked worktree it then targets the **main repo** (the active battle
+> there); `init` and `activate` always target the main repo. The hooks keep their own
+> resolution (raw cwd). An explicit `--repo <path>` wins.
 > Reading `battle.json` with `Read` stays allowed.
 
 > **Surfacing commands to the user — always namespace them.** This plugin's
