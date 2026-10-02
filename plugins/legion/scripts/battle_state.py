@@ -3084,6 +3084,11 @@ def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
     assert "session-status" in battle, "session-status absent de battle.md"
     assert "concurrent_battle" not in "".join(docs.values()), "concurrent_battle subsiste"
     assert "in_place_live" in battle, "in_place_live non documenté"
+    assert 'battle_worktree.py" start-check' in battle, "start-check absent de battle.md"
+    assert "worktree_live" in battle, "worktree_live non documenté"
+    a1 = battle[battle.index("### §A.1"):]
+    assert a1.index('battle_worktree.py" start-check') < a1.index('battle_state.py" init'), \
+        "start-check doit précéder init dans §A.1"
     # appels battle_state.py de freeze / careful / guard / retro : toujours --battle
     for n in ("freeze", "careful", "guard", "retro"):
         for line in docs[n].splitlines():

@@ -16,10 +16,16 @@ active) :
   réguliers, jamais de lien symbolique, rien sous `.legion/` ni `.claude/`, jamais d'écrasement).
   Refus (`reason`) : `aborted`, `dirty` (principal modifié ou fichiers non suivis non ignorés),
   `not_ignored` (`.legion/` ou `.claude/worktrees/<id>` non ignoré), `branch_exists`,
-  `path_exists`, `no_commit`, `invalid`. Plus de refus `concurrent_battle` : les battles en parallèle
-  sont permises ; le résultat porte `concurrent: [ids]` (autres battles avec worktree actif) et un
-  `warnings` `in_place_live` si une autre battle vit dans le principal (sans worktree). Idempotent :
-  worktree déjà conforme (bon chemin, bonne branche, `HEAD` == base) -> `created:false`.
+  `path_exists`, `no_commit`, `in_place_live` (une autre battle vivante tourne en place dans le
+  principal, sans worktree : on ne mélange pas les modes), `invalid`. Les battles en worktree
+  parallèles sont permises ; le résultat porte `concurrent: [ids]` (autres battles avec worktree
+  actif) et `warnings` (vide pour l'instant). Idempotent : worktree déjà conforme (bon chemin, bonne
+  branche, `HEAD` == base) -> `created:false` (avant le contrôle `in_place_live`).
+- `start-check --battle <id> [--in-place]` : contrôle de cohabitation, **avant `init`**, lecture
+  seule (n'écrit rien, aucun git mutateur ; la battle `<id>` n'a pas besoin d'exister). Sans
+  `--in-place` (mode worktree) : refus `in_place_live` si une autre battle vit en place. Avec
+  `--in-place` : refus `worktree_live` si une autre battle vit dans un worktree. Sortie ok :
+  `{ok, mode: "worktree"|"in_place", concurrent, in_place}`. Refus : `battles: [ids]` bloquantes.
 - `where [--battle <id>]` : `{state_root, mode, worktree_path, branch, exists, inside,
   cwd_toplevel, current_branch, worktree_branch, main_branch, reason}`. En mode worktree, `ok`
   vaut vrai si le worktree existe, est enregistré et est sur `worktree.branch` (la session reste
@@ -44,6 +50,7 @@ active) :
 
 Usage :
     python battle_worktree.py create --battle <id>
+    python battle_worktree.py start-check --battle <id> [--in-place]
     python battle_worktree.py where [--battle <id>]
     python battle_worktree.py close-check --battle <id>
     python battle_worktree.py close --battle <id>
@@ -330,8 +337,8 @@ def _create(cwd: str, battle_id: str) -> dict:
     concurrent, live = _others(main, battle_id)
     warnings: list[str] = []
     if live:
-        warnings.append("in_place_live : battle(s) " + ", ".join(live)
-                        + " en place dans le principal (sans worktree) : le principal reste partagé")
+        raise _Refusal("in_place_live", "battle(s) " + ", ".join(live) + " en place dans le principal (sans worktree) : "
+                       "les modes ne cohabitent pas, terminer/clore ou abandonner d'abord", battles=live)
     bad = [r for r in (".legion/x", f".claude/worktrees/{battle_id}/x") if not _ignored(main, r)]
     if bad:
         raise _Refusal("not_ignored", "à ignorer dans .gitignore : " + ", ".join(b[:-2] for b in bad))
@@ -347,6 +354,30 @@ def _create(cwd: str, battle_id: str) -> dict:
     copied, skipped = _copy_local(main, path)
     return {"ok": True, "path": path, "branch": branch, "base": head, "created": True,
             "copied": copied, "skipped": skipped, "concurrent": concurrent, "warnings": warnings}
+
+
+# --- start-check ---------------------------------------------------------------------------
+
+def start_check(cwd: str, battle_id: str, in_place: bool = False) -> dict:
+    try:
+        return _start_check(cwd, battle_id, in_place)
+    except _Refusal as exc:
+        return _refused(exc)
+
+
+def _start_check(cwd: str, battle_id: str, in_place: bool) -> dict:
+    """Lecture seule, avant `init` : refuse de mélanger battle en place et battle en worktree."""
+    if not isinstance(battle_id, str) or not bs._ID_RE.fullmatch(battle_id):
+        raise _Refusal("invalid", f"identifiant de battle invalide : {battle_id!r}")
+    main = _main_root(cwd)
+    with_wt, live = _others(main, battle_id)
+    if in_place and with_wt:
+        raise _Refusal("worktree_live", "battle(s) " + ", ".join(with_wt) + " en worktree : les modes ne cohabitent "
+                       "pas, terminer/clore ou abandonner d'abord", battles=with_wt)
+    if not in_place and live:
+        raise _Refusal("in_place_live", "battle(s) " + ", ".join(live) + " en place dans le principal (sans worktree) : "
+                       "les modes ne cohabitent pas, terminer/clore ou abandonner d'abord", battles=live)
+    return {"ok": True, "mode": "in_place" if in_place else "worktree", "concurrent": with_wt, "in_place": live}
 
 
 # --- where ---------------------------------------------------------------------------------
@@ -588,14 +619,22 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if "--self-test" in args:
         return _self_test()
-    if not args or args[0] not in ("create", "where", "close-check", "close"):
-        return _usage("sous-commande attendue : create | where | close-check | close | --self-test")
+    if not args or args[0] not in ("create", "start-check", "where", "close-check", "close"):
+        return _usage("sous-commande attendue : create | start-check | where | close-check | close | --self-test")
     cmd, rest = args[0], args[1:]
+    in_place = False
+    if cmd == "start-check" and "--in-place" in rest:
+        in_place = True
+        rest = [a for a in rest if a != "--in-place"]
     if len(rest) not in (0, 2) or (rest and rest[0] != "--battle") or (cmd != "where" and not rest):
-        return _usage(f"{cmd} --battle <id>" + (" (facultatif pour where)" if cmd == "where" else ""))
+        return _usage(f"{cmd} --battle <id>" + (" [--in-place]" if cmd == "start-check" else "")
+                      + (" (facultatif pour where)" if cmd == "where" else ""))
     bid = rest[1] if rest else None
     fn = {"create": create, "close-check": close_check, "close": close}.get(cmd)
-    res = where(os.getcwd(), bid) if fn is None else fn(os.getcwd(), bid)
+    if cmd == "start-check":
+        res = start_check(os.getcwd(), bid, in_place)
+    else:
+        res = where(os.getcwd(), bid) if fn is None else fn(os.getcwd(), bid)
     print(json.dumps(res, ensure_ascii=False))
     return 0 if res["ok"] else 2
 
@@ -792,18 +831,129 @@ def _t_create_concurrent_and_aborted(tmp: str) -> None:
     fx.battle("P")  # battle vivante en place (sans worktree)
     fx.git(fx.main, "worktree", "remove", "--force", res["path"])
     fx.git(fx.main, "branch", "-D", res["branch"])
+    before = _snapshot(fx)
     res = create(fx.main, "B")
-    assert res["ok"] and res["concurrent"] == ["C"], res
-    assert any("in_place_live" in w and "P" in w for w in res["warnings"]), res
-    fx.git(fx.main, "worktree", "remove", "--force", res["path"])
-    fx.git(fx.main, "branch", "-D", res["branch"])
+    assert not res["ok"] and res["reason"] == "in_place_live" and res["battles"] == ["P"], res
+    assert "P" in res["detail"], res
+    assert not os.path.exists(os.path.join(fx.main, ".claude", "worktrees", "B"))
+    assert _branch_tip(fx.main, "me/7") is None and _snapshot(fx) == before
+    p = subprocess.run([sys.executable, os.path.abspath(__file__), "create", "--battle", "B"], cwd=fx.main,
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                       env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+    assert p.returncode == 2 and json.loads(p.stdout)["reason"] == "in_place_live", (p.returncode, p.stdout, p.stderr)
     fx.battle("C", worktree={"path": other}, aborted={"at": "T", "reason": None})
     fx.battle("P", aborted={"at": "T", "reason": None})
     res = create(fx.main, "B")
-    assert res["ok"] and res["concurrent"] == [] and res["warnings"] == [], res
+    assert res["ok"] and res["created"] and res["concurrent"] == [] and res["warnings"] == [], res
+    fx.git(fx.main, "worktree", "remove", "--force", res["path"])
+    fx.git(fx.main, "branch", "-D", res["branch"])
+    fx.battle("P", phases={"reflect": {"status": "done"}})  # close : rétro faite
+    res = create(fx.main, "B")
+    assert res["ok"] and res["created"], res
     fx.battle("D", aborted={"at": "T", "reason": None})
     res = create(fx.main, "D")
     assert not res["ok"] and res["reason"] == "aborted", res
+
+
+def _t_create_idempotent_with_in_place(tmp: str) -> None:
+    fx = _Fx(tmp)
+    first = fx.created()
+    fx.battle(worktree=fx.wt_block(first))
+    fx.battle("P")  # en place, vivante
+    again = create(fx.main, "B")
+    assert again["ok"] and again["created"] is False, again
+
+
+def _t_start_check(tmp: str) -> None:
+    fx = _Fx(tmp)  # B existe, en place, vivante
+    before = _snapshot(fx)
+    res = start_check(fx.main, "B")  # B s'exclut
+    assert res["ok"] and res["mode"] == "worktree" and res["in_place"] == [], res
+    assert start_check(fx.main, "B", True)["mode"] == "in_place"
+    res = start_check(fx.main, "X")  # X inexistante ; B en place bloque le mode worktree
+    assert not res["ok"] and res["reason"] == "in_place_live" and res["battles"] == ["B"], res
+    assert start_check(fx.main, "X", True)["ok"]  # B n'a pas de worktree
+    other = os.path.join(fx.main, ".claude", "worktrees", "C")
+    os.makedirs(other)
+    fx.battle("C", worktree={"path": other, "branch": "me/9", "base": "0" * 40})
+    res = start_check(fx.main, "X", True)
+    assert not res["ok"] and res["reason"] == "worktree_live" and res["battles"] == ["C"], res
+    shutil.rmtree(other)  # bloc présent, dossier absent : ni l'un ni l'autre
+    assert start_check(fx.main, "X", True)["ok"]
+    # abandonnées ou closes : ok dans les deux modes
+    os.makedirs(other)
+    fx.battle("B", aborted={"at": "T", "reason": None})
+    fx.battle("C", worktree={"path": other}, phases={"reflect": {"status": "done"}})
+    legion_before = sorted(str(p) for p in Path(fx.main, ".legion").rglob("*"))
+    assert start_check(fx.main, "X")["ok"] and start_check(fx.main, "X", True)["ok"]
+    assert start_check(fx.main, "bad id")["reason"] == "invalid"
+    assert _snapshot(fx) == before
+    assert sorted(str(p) for p in Path(fx.main, ".legion").rglob("*")) == legion_before
+    # CLI : usage et codes de sortie
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def cli(*a: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, os.path.abspath(__file__), *a], cwd=fx.main, capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL, env=env)
+
+    assert cli("start-check", "--battle", "X").returncode == 0
+    assert cli("start-check", "--battle", "X", "--in-place").returncode == 0
+    assert cli("start-check").returncode == 1
+    assert cli("start-check", "--battle", "X", "--bogus").returncode == 1
+    assert cli("create", "--battle", "X", "--in-place").returncode == 1
+    p = cli("start-check", "--battle", "bad id")
+    assert p.returncode == 2 and json.loads(p.stdout)["reason"] == "invalid", (p.stdout, p.stderr)
+
+
+def _t_cross_in_place_exclusion(tmp: str) -> None:
+    """Test croise GH#175 : vrais CLI battle_state.py + battle_worktree.py, vrai principal git."""
+    if shutil.which("git") is None:
+        print("SKIP: _t_cross_in_place_exclusion (git absent)", file=sys.stderr)
+        return
+    fx = _Fx(tmp)
+    scripts = Path(_SCRIPTS_DIR)
+    clean_env = {k: v for k, v in os.environ.items()
+                 if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "LEGION_GUARD_OFF")}
+    profile = next(iter(bs.PROFILES))
+    (Path(fx.main) / ".legion" / "battles" / "B" / "battle.json").unlink()
+
+    def cli(script: str, *args: str, code: int = 0) -> dict:
+        p = subprocess.run([sys.executable, str(scripts / script), *args], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, cwd=fx.main, env=clean_env, timeout=120)
+        assert p.returncode == code, (script, args, p.returncode, p.stdout, p.stderr)
+        return json.loads(p.stdout) if p.stdout.strip().startswith("{") else {"raw": p.stdout}
+
+    def init(x: str, ticket: str = "GH#8") -> None:
+        cli("battle_state.py", "init", x, "--ticket", ticket, "--title", "t", "--profile", profile,
+            "--repo", fx.main)
+
+    def worktrees() -> list[str]:
+        return sorted(fx.git(fx.main, "worktree", "list", "--porcelain").split("\n"))
+
+    # 1. A en worktree vivante : --in-place refusé
+    init("A", "GH#7")
+    res = cli("battle_worktree.py", "create", "--battle", "A")
+    cli("battle_state.py", "set-meta", "--worktree-path", res["path"], "--worktree-branch", res["branch"],
+        "--worktree-base", res["base"], "--repo", fx.main, "--battle", "A")
+    r = cli("battle_worktree.py", "start-check", "--battle", "P", "--in-place", code=2)
+    assert r["reason"] == "worktree_live" and r["battles"] == ["A"], r
+    # 2. A close (`battle_state close` pose reflect done) : --in-place passe, puis init P (en place)
+    cli("battle_state.py", "close", "--repo", fx.main, "--battle", "A")
+    cli("battle_worktree.py", "start-check", "--battle", "P", "--in-place")
+    init("P")
+    # 3. P en place vivante : mode worktree refusé
+    r = cli("battle_worktree.py", "start-check", "--battle", "X", code=2)
+    assert r["reason"] == "in_place_live" and r["battles"] == ["P"], r
+    # 4. filet de course : init X puis create refuse, rien créé
+    init("X")
+    wts, branches = worktrees(), fx.git(fx.main, "branch", "--list")
+    r = cli("battle_worktree.py", "create", "--battle", "X", code=2)
+    assert r["reason"] == "in_place_live" and r["battles"] == ["P"], r
+    assert worktrees() == wts and fx.git(fx.main, "branch", "--list") == branches
+    # 5. P abandonnée : create X passe
+    cli("battle_state.py", "abort", "--repo", fx.main, "--battle", "P")
+    r = cli("battle_worktree.py", "create", "--battle", "X")
+    assert r["ok"] and r["created"], r
 
 
 def _t_where(tmp: str) -> None:
