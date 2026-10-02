@@ -3038,6 +3038,21 @@ def _t_doc_subcommands() -> None:
         assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
 
 
+def _t_doc_plugin_root_braces() -> None:   # GH#172 : seule la forme ${CLAUDE_PLUGIN_ROOT} est substituée
+    root = Path(__file__).resolve().parents[1]
+    files = sorted((root / "commands").glob("*.md")) + sorted((root / "skills").glob("*/SKILL.md"))
+    if not files:
+        print("SKIP: _t_doc_plugin_root_braces (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    for f in files:
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            assert "$CLAUDE_PLUGIN_ROOT" not in line, (
+                f"{f.name}:{n} : $CLAUDE_PLUGIN_ROOT sans accolades (non substitué) : {line.strip()}")
+    assert "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" in (root / "commands/battle.md").read_text(
+        encoding="utf-8"), "battle.md : forme ${CLAUDE_PLUGIN_ROOT} absente"
+
+
 def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
     root = Path(__file__).resolve().parents[1]
     names = ("battle", "retro", "freeze", "careful", "guard")
@@ -3054,7 +3069,7 @@ def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
     # appels battle_state.py de freeze / careful / guard / retro : toujours --battle
     for n in ("freeze", "careful", "guard", "retro"):
         for line in docs[n].splitlines():
-            if "battle_state.py" not in line or "$CLAUDE_PLUGIN_ROOT" not in line:
+            if "battle_state.py" not in line or "CLAUDE_PLUGIN_ROOT" not in line:
                 continue
             sub = line.split("battle_state.py\"", 1)[1].split()
             if sub and sub[0] in ("init", "activate", "session-status", "validate"):
@@ -3127,7 +3142,7 @@ def _t_doc_fan_in() -> None:
     text = battle_md.read_text(encoding="utf-8")
     start = text.index("**Mode — `--auto`.**")
     sec = text[start:text.index("After build (either mode)", start)]
-    # `fan_in.py` peut être suivi d'un guillemet fermant (`"$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" apply`)
+    # `fan_in.py` peut être suivi d'un guillemet fermant (`"${CLAUDE_PLUGIN_ROOT}/scripts/fan_in.py" apply`)
     pos: dict[str, int] = {}
     for sub in ("apply", "cleanup"):
         m = re.search(rf'fan_in\.py"? {sub}\b', sec)
@@ -3621,7 +3636,7 @@ _CORE_TESTS = (
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
     _t_slice_report_names, _t_merge_nominal, _t_merge_missing_blank, _t_merge_out_of_scope,
-    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode, _t_doc_concurrent,
+    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode, _t_doc_concurrent, _t_doc_plugin_root_braces,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,

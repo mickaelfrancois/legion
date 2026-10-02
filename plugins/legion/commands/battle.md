@@ -16,7 +16,7 @@ session's context.
 > **State writes — `battle_state.py` is the only writer of `battle.json`.** Never
 > edit `battle.json` (nor `.legion/active-battle`) by hand. Every mutation goes
 > through the deterministic script, called as
-> `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" <sub> …` (fall back to
+> `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" <sub> …` (fall back to
 > `python3`, same interpreter as the other script calls). Subcommands: `init`,
 > `transition`, `approve-plan`, `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`,
 > `invalidate`, `set-delivery`, `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, plus the read-only `session-status`. The script prints one JSON object on
@@ -36,7 +36,7 @@ session's context.
 > a dedicated worktree `<main>/.claude/worktrees/<id>` (§A.1), but its state stays in the
 > **main repo**: `.legion/` of the worktree is never the battle's state. So every `.legion/…`
 > path in this file means `<state>/.legion/…`, where `<state>` is the `state_root` printed by
-> `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>`. Take that value
+> `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" where --battle <id>`. Take that value
 > once per session (and again after a `resume`), check it is an existing absolute directory,
 > and write **absolute** paths in shell commands and in `Read` / `Write` calls. Never build a
 > `.legion/` path from the cwd. `battle_worktree.py` always starts from the main repo and
@@ -95,7 +95,7 @@ Arguments: `$ARGUMENTS`
    manually. A **slug** battle needs no `gh`.
 
 3. **Git tree snapshot** — the tree integrity check (§E) needs a working `git`. Run a
-   trial `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" tree-snapshot --out ".legion/_tree-preflight.json"`
+   trial `python "${CLAUDE_PLUGIN_ROOT}/scripts/artifact_check.py" tree-snapshot --out ".legion/_tree-preflight.json"`
    (the file is git-ignored with `.legion/` and transient). Exit `2` (no git repository,
    `git` missing, `safe.directory` refused) → **escalation case 5**: fix the
    environment before any battle.
@@ -152,7 +152,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 2. **Create the battle** with `init` (never `cd`; relative to the working directory):
 
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" init <id> --ticket <ticket> --title <title> --profile <p> [--step] [--required-gates <g> …]
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" init <id> --ticket <ticket> --title <title> --profile <p> [--step] [--required-gates <g> …]
    ```
 
    `init` creates `.legion/battles/<id>/` in the current repo, writes a minimal
@@ -161,7 +161,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    (`.legion/sessions/<key>.json`) once `init` succeeds, and the `guard.py` / `careful.py` /
    `usage_track.py` hooks resolve the battle by target, then by session, then by pointer.
    **Right after `init`** (and after `activate`, §B) run
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" session-status --battle <id>`
+   `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" session-status --battle <id>`
    (read-only). `bound: false` means the harness gave no session key: warn the user
    « single-session mode (pointer): do not start another battle in parallel » and go on.
    `<ticket>` is `GH#<n>` for a numeric intake, else the slug token. The title is
@@ -191,7 +191,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    repo, with the validated `<id>`:
 
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" create --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" create --battle <id>
    ```
 
    It creates `<main>/.claude/worktrees/<id>` on a new branch `<me>/<token>` cut from `HEAD`
@@ -216,7 +216,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    together, never one alone):
 
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-meta --worktree-path "<path>" --worktree-branch "<branch>" --worktree-base "<base>" --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-meta --worktree-path "<path>" --worktree-branch "<branch>" --worktree-base "<base>" --battle <id>
    ```
 
    The script refuses a path that is not `<state>/.claude/worktrees/<id>`, or an invalid branch
@@ -226,7 +226,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    `close`: never enter it with a tool, never `cd` into it. Then **verify**:
 
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" where --battle <id>
    ```
 
    `ok: true` means the worktree exists, is registered, and is on the branch
@@ -262,7 +262,8 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      `dotnet build "<wt>/…"`, `npm --prefix "<wt>"`. A subshell `( cd "<wt>" && … )` is
      tolerated **only** for a tool with no directory option, and the report says so.
    - Never a bare `cd`: the working directory of the session never moves.
-   - Paths in the clear, never a shell variable (`$WT`, `$CLAUDE_PLUGIN_ROOT` aside).
+   - Paths in the clear, never a shell variable such as `$WT`. `${CLAUDE_PLUGIN_ROOT}` is not one: Claude Code
+     replaces it with the plugin's real path when this file is loaded.
    - Every agent receives a **Code root** input = `<wt>` and must run its commands from it,
      never from the cwd. Gates still write their artifact under `<state>/.legion/`.
 
@@ -278,7 +279,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      Seed `spec.md` from its title / body / labels (acceptance criteria & repro
      steps are usually in the body). The ticket `GH#1234` was already recorded by
      `init` (step 2); record the real issue title with
-     `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-meta --title "<issue title>" --battle <id>`.
+     `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-meta --title "<issue title>" --battle <id>`.
      - **Recon decisions.** If the body carries a `## Cadrage` section (written by
        `/legion:recon`) with a `**Décisions.**` rubric, copy its lines **verbatim**
        (deviation marks included) into `spec.md` under `## Décisions de cadrage`, after
@@ -339,8 +340,8 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    [--test-target <path>]`, and flip the phases:
 
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition think done --battle <id>
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition plan in_progress --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" transition think done --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" transition plan in_progress --battle <id>
    ```
 
    Everything else stays `pending`.
@@ -367,7 +368,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    `["<Proj>/**", "<Proj.Tests>/**", …]`. If the placeholder globs would match no
    path in the repo, **warn the user and propose the derived globs** rather than
    locking a dead perimeter. Write the result with
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-guard --allow "<Proj>/**" "<Proj.Tests>/**" … --battle <id>`
+   `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-guard --allow "<Proj>/**" "<Proj.Tests>/**" … --battle <id>`
    (`--deny` is optional). (RETEX: the generic default mismatched a root-projects
    repo on two consecutive battles — the builder would have been blocked without it.)
 
@@ -414,7 +415,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      the user how to adjust the spec. Do **not** advance.
 
      ```bash
-     python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition plan blocked --verdict revise --fails '<json array of the FAILs>' --battle <id>
+     python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" transition plan blocked --verdict revise --fails '<json array of the FAILs>' --battle <id>
      ```
 
      On `revise`, **persist the resume context to disk** so step 5's incremental re-run
@@ -427,7 +428,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    - `accept` / `accept_with_opportunity` → `status = "done"`:
 
      ```bash
-     python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition plan done --verdict accept --battle <id>
+     python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" transition plan done --verdict accept --battle <id>
      ```
 
      Lire `plan.md` pour
@@ -440,12 +441,12 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      > build ?** »
 
      **Sur OK** : d'abord déclarer les slices avec
-     `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-slices --replace <id>… --battle <battle-id>` :
+     `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-slices --replace <id>… --battle <battle-id>` :
      les ids sont ceux des lignes `[slice-N]` de `plan.md`, dans l'ordre. Un plan sans
      ligne `[slice-…]` : `set-slices --replace` **sans id** (vide la liste, le BUILD reste
      agrégé — une seule unité), au premier passage comme au re-plan. Ensuite
      seulement, enregistrer l'approbation avec
-     `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" approve-plan --battle <id>` (elle pose
+     `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" approve-plan --battle <id>` (elle pose
      `phases.plan.approved_at` ; sans elle, `transition build in_progress` sera refusé
      en §D). **L'ordre compte** : `--replace` n'est accepté que tant que `build` est
      `pending` ou qu'un re-plan est ouvert (`approved_at` à `null`), et `approve-plan`
@@ -475,7 +476,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 ## §B — resume a battle
 
 Re-point the active battle with
-`python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" activate <battle-id>` (so the
+`python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" activate <battle-id>` (so the
 guard hooks track the resumed battle; a refusal means the battle does not exist),
 then check the state with `… battle_state.py validate --battle <battle-id>` (relay any error or warning).
 Read `<state>/.legion/battles/<battle-id>/battle.json`. Summarize phase
@@ -490,7 +491,7 @@ resumed battle: run `… battle_state.py session-status --battle <battle-id>` an
 `bound: false`, warn « single-session mode (pointer): do not start another battle in parallel ».
 **Check the worktree.** There is no re-entry: the session stays in the main checkout. If
 `battle.json` has a `worktree` block (worktree mode), run
-`python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <battle-id>`. `ok: true`
+`python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" where --battle <battle-id>`. `ok: true`
 means the worktree exists on its branch: go on from the main checkout (block « Worktree mode —
 working from the main checkout », §A.1 step 2b). `ok: false` carries `reason`: `missing` (the
 worktree is gone) or `wrong_branch` (see `worktree_branch`): relay it and stop (escalation
@@ -514,7 +515,7 @@ détermine le comportement de la session reprise :
 **Battle legacy sans approbation.** Si `transition build in_progress` (§D) est refusé
 avec « plan non approuvé » (battle antérieure à `approved_at`, ou plan relancé depuis ;
 le même refus vaut pour `transition build blocked`), ne pas contourner : demander l'**OK humain** (« OK pour lancer le build ? »), puis
-enregistrer avec `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" approve-plan --battle <id>`
+enregistrer avec `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" approve-plan --battle <id>`
 et retenter.
 
 > **Tableau mode × transition → rend la main ?**
@@ -546,7 +547,7 @@ it updates the delivery metadata (`pr_state`, `ci`, `checked_at`) and never chan
    ```
 3. Only if `gh` exited `0`, run:
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
    ```
    Exit `2` means the file was refused: relay the `reason`. The JSON printed on stdout
    also carries `failing` (`[{name, url}]`, the failed checks, not persisted).
@@ -568,7 +569,7 @@ required for every exit from `pending` (`in_progress`, `done` and `blocked`). On
 
 Resolve the target from the argument: a specific `slice-N`, or `all` (every
 slice listed in `plan.md`, in order). Default to the slice returned by
-`python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" next-slice --battle <id>` (first slice not `done`;
+`python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" next-slice --battle <id>` (first slice not `done`;
 `slice: null` when all are done or none were declared — aggregated build).
 
 **Per-slice state.** When the battle declares slices (`set-slices`, §A.1 step 6), record
@@ -582,7 +583,7 @@ endpoints), the script adds `security` to `required_gates` by itself and traces 
 (« security ajoutée automatiquement : <files> ») — the gate then runs in §E.
 
 **Mark the phase in progress first.** Before coding or delegating, run
-`python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" transition build in_progress --battle <id>`
+`python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" transition build in_progress --battle <id>`
 (this is also the precondition check). The
 phase must **never stay `pending`** once a build has started — that's how `/fleet`
 and a resumed session see work happening. You will reclassify it at the end.
@@ -635,7 +636,7 @@ parallel batch in this fixed order:
 
 1. Call `slice <id> in_progress` for **every** slice of the batch. Then freeze the integration
    tree as the batch base: `<base>` = the `base` field of
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" base --battle <id>` (worktree mode:
+   `python "${CLAUDE_PLUGIN_ROOT}/scripts/fan_in.py" base --battle <id>` (worktree mode:
    `… base --battle <id> --root "<wt>"`; validate `^[0-9a-f]{40}$`). It commits
    the integration tree as it stands, uncommitted and untracked files included (`.legion/`,
    `.claude/worktrees/` and ignored files excluded), into an unreferenced commit on top of
@@ -656,7 +657,7 @@ parallel batch in this fixed order:
    matches the slice) and write them **verbatim** with the Write tool to
    `<main>/.legion/battles/<id>/build-report-<slice_id>.md` (overwriting any earlier version;
    never edit or reword it). Then check it with
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" verify <path>` (`exists` +
+   `python "${CLAUDE_PLUGIN_ROOT}/scripts/artifact_check.py" verify <path>` (`exists` +
    `non_empty`). This write touches neither `battle.json` nor `.legion/active-battle`, which
    `tree-snapshot` excludes from its paths, so it is allowed between S1 and step 4 (it is not a
    `battle_state.py` write). Error cases: a block that is absent or empty means the report is
@@ -694,7 +695,7 @@ parallel batch in this fixed order:
    are kept.
 6. Take a new snapshot S2 (same `_tree-before.json`, overwritten; worktree mode: with
    `--root "<wt>"`). **No `battle_state.py` write between S2 and step 8.**
-7. Run `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" apply --base <base> --battle <id> --slice <id> "<builder-wt>" …`
+7. Run `python "${CLAUDE_PLUGIN_ROOT}/scripts/fan_in.py" apply --base <base> --battle <id> --slice <id> "<builder-wt>" …`
    (worktree mode: add `--root "<wt>"`; one `--slice <id> "<builder-wt>"` pair per slice,
    paths taken from `git worktree list --porcelain` and validated as in step 3). It computes each worktree's delta
    against `<base>` (builder commits and untracked files included, ignored files excluded),
@@ -723,7 +724,7 @@ parallel batch in this fixed order:
     the main checkout »): the stack's build and tests (.NET:
     `dotnet build` + `dotnet test`; other stack: the repo's commands). If red:
     `transition build blocked`, escalation **case 7**, worktrees kept.
-12. If green: `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" cleanup --base <base> --battle <id> --slice <id> "<builder-wt>" …`
+12. If green: `python "${CLAUDE_PLUGIN_ROOT}/scripts/fan_in.py" cleanup --base <base> --battle <id> --slice <id> "<builder-wt>" …`
     (worktree mode: add `--root "<wt>"`; same pairs). It removes each worktree and its harness
     branch only after proving the integration tree already holds the delta; it never removes the
     battle's branch (`branch_kept`). Otherwise it keeps them (`kept`, exit 2). A refusal is
@@ -747,7 +748,7 @@ After build (either mode), **classify the result and record it immediately** wit
   `transition build blocked`; relay the
   residual errors. En mode `autonomous`, entrer dans la boucle d'auto-correction
   (§E — boucle de `revise`), en commençant par
-  `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" bump-autocorrect build --fails '<json array of the residual errors>' --battle <id>`
+  `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" bump-autocorrect build --fails '<json array of the residual errors>' --battle <id>`
   (`continue` ⇒ relancer le build : `transition build in_progress`, puis
   `slice <id> in_progress` ; `escalate` ⇒ escalade, cf. §E) ; en mode `step`,
   stop. Do not advance until resolved.
@@ -759,7 +760,7 @@ After build (either mode), **classify the result and record it immediately** wit
   straight into it, in `step` mode hand back.
   Consolidation: once every targeted slice is `done` (and only then, before `transition build done`,
   in every mode; for a parallel batch, after the fan-in `cleanup` of step 12), run
-  `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" merge-reports --battle <id>`. It assembles `build-report.md`
+  `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" merge-reports --battle <id>`. It assembles `build-report.md`
   from the `build-report-<id>.md` files in the `battle.json.slices` order (plan order), with one
   final grouped `## Hors périmètre — candidats issue` section; it never writes `battle.json` and is
   idempotent. With no declared slice (aggregated BUILD) it only checks that `build-report.md` exists.
@@ -802,7 +803,7 @@ fault. `<id>` is the validated battle id, never `$ARGUMENTS`.
 
 1. **Snapshot.** After `transition <phase-key> in_progress` (or `slice <id> in_progress`)
    and **before** `Agent`, run
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" tree-snapshot --battle <id> --out "<state>/.legion/battles/<id>/_tree-before.json"`.
+   `python "${CLAUDE_PLUGIN_ROOT}/scripts/artifact_check.py" tree-snapshot --battle <id> --out "<state>/.legion/battles/<id>/_tree-before.json"`.
    **Worktree mode:** add `--root "<worktree>"` (`<worktree>` = `worktree.path`) so the snapshot
    covers the battle's worktree, not the main checkout; run it from the main checkout.
    Keep the `fingerprint` it prints; it must match `^[0-9a-f]{64}$`. A refusal (exit `2`)
@@ -845,7 +846,7 @@ A gate now writes its own artifact, so a returned verdict no longer **proves** t
 artifact exists. A verdict counts **only if its artifact was written this pass**.
 Wrap every gate invocation with this check — it is deterministic (metadata only, you
 never read the artifact's content, which would refill the context the confinement
-spares). It runs through `python "$CLAUDE_PLUGIN_ROOT/scripts/artifact_check.py" …` (fall
+spares). It runs through `python "${CLAUDE_PLUGIN_ROOT}/scripts/artifact_check.py" …` (fall
 back to `python3`); the script prints one JSON object on stdout and works the same on
 Windows, Linux, WSL and macOS:
 
@@ -1099,7 +1100,7 @@ The branch of the main checkout never moves. `git fetch origin` can run from eit
 
    a. **Base freshness** — the gates must have judged the base you actually ship.
       **Deterministic helper:** after `git fetch origin`, run
-      `python "$CLAUDE_PLUGIN_ROOT/scripts/base_freshness.py" --touched <files from build-report.md>`
+      `python "${CLAUDE_PLUGIN_ROOT}/scripts/base_freshness.py" --touched <files from build-report.md>`
       — it returns a JSON verdict (`fresh` / `waive_pure_merge` / `waive_disjoint` /
       `regate`) computed by the git logic below, so you don't judge it by hand. The rest
       of this item explains what each verdict means and how to act on it.
@@ -1160,7 +1161,7 @@ The branch of the main checkout never moves. `git fetch origin` can run from eit
 
    **Worktree mode** (`battle.json` has a `worktree` block): the branch already exists, the
    script made it at start. **Create no branch and run no `checkout`.** Run
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>` before the commit and require
+   `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" where --battle <id>` before the commit and require
    `ok: true` (the worktree is on `worktree.branch`; read `reason` and `worktree_branch` otherwise).
    Otherwise **escalate (case 4)**: the worktree is not on the battle's branch, never switch it.
    Commit and push with `git -C "<worktree>"` on `worktree.branch`; the branch of the main checkout is never touched. Skip the rest of
@@ -1427,7 +1428,7 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    require **per-thread** confirmation — never close a disagreement without the
    user's agreement.
 
-6. **Push**: first run `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" check-cascade --battle <id>`
+6. **Push**: first run `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" check-cascade --battle <id>`
    (read-only). Exit `2` (incomplete cascade) → **do not push**: relay `missing`
    (`[{phase, status}]`) and re-run the cascade (step 3). Exit `0` →
    `git push origin <me>/<token>` (the commits join the existing PR). In worktree mode, push
@@ -1480,7 +1481,7 @@ out of it, refuse anything else (unknown option, extra word) and ask the user to
 correct, then pass each value as its own quoted argument:
 
 ```bash
-python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" abort [--battle "<battle-id>"] [--reason "<text>"]
+python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" abort [--battle "<battle-id>"] [--reason "<text>"]
 ```
 
 Always pass `--battle <battle-id>` (the id of this session's battle): without it the script
@@ -1534,14 +1535,14 @@ tool is absent: ask the user to relaunch `claude` from the main repo (`state_roo
 
    ```bash
    gh pr view <n> --json state,mergedAt,statusCheckRollup,url,headRefName,headRefOid > "<state>/.legion/battles/<id>/pr-status.json"
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
    ```
 
    This records `delivery.head_ref` and `delivery.head_oid` too: `close` needs `head_oid` to
    prove that a squash or rebase merge lost no local commit. No `gh` or no `pr_url`: the PR
    cannot be proven merged, so stop and say so.
 2. **Fetch**: `git fetch --no-tags origin` (the scripts never use the network).
-3. **Check**: `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" close-check --battle <id>`.
+3. **Check**: `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" close-check --battle <id>`.
    It is read-only and prints `{ ok, checks:[{name, ok, detail}], modified, untracked }`. The
    controls are `pr_merged`, `contained` (the branch is an ancestor of `origin/<default>`, or the
    PR is merged and `delivery.head_oid` equals the local tip), `worktree_clean` and `not_inside`.
@@ -1550,7 +1551,7 @@ tool is absent: ask the user to relaunch `claude` from the main repo (`state_roo
 4. **Retrospective.** If `phases.reflect` is not `done`, run `/legion:retro` for this battle
    first (it closes the battle state and files the lessons), then continue. `close` refuses
    while `reflect` is not `done`.
-5. **Close**: `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" close --battle <id>`.
+5. **Close**: `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" close --battle <id>`.
    It replays `close-check`, then runs `git worktree remove` (never `--force`), `git branch -D`
    (only after the `contained` proof), `git worktree prune`, and fast-forwards the main checkout
    onto `origin/<default>` only if it is on `<default>` and clean. It prints

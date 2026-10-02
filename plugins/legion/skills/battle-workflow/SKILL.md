@@ -418,7 +418,7 @@ differs from the tree (fault `[main-tree]`) and reads the protected state at the
   `feat|fix|refactor|perf|docs|test|build|ci|chore`.
 - No `Set-Location`/`cd`, no `&&`/`;`/`|` chaining, no shell redirection; run
   `dotnet` from the current directory.
-- Hooks are launched via `python "$CLAUDE_PLUGIN_ROOT/hooks/<x>.py"`, falling back
+- Hooks are launched via `python "${CLAUDE_PLUGIN_ROOT}/hooks/<x>.py"`, falling back
   to `python3` when `python` is absent (Linux/macOS). If neither exists the hooks
   fail silently — the `/battle start` preflight checks it.
 - Iterate in small validated steps; never emit large unvalidated blocks.

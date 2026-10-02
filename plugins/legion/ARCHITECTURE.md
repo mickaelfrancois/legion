@@ -467,7 +467,7 @@ plugins/legion/
 
 - **Prose FR, identifiants/fichiers EN**. **Sujets de commit et titres de PR** :
   anglais, format **Conventional Commits** `type(scope): subject`.
-- **Hooks Python** lancés via `$(command -v python || command -v python3) "$CLAUDE_PLUGIN_ROOT/hooks/<x>.py"`
+- **Hooks Python** lancés via `$(command -v python || command -v python3) "${CLAUDE_PLUGIN_ROOT}/hooks/<x>.py"`
   (`python` d'abord — Windows ; `python3` en repli — Linux/macOS sans
   `python-is-python3`), `exit 2` pour bloquer, bypass par env var, `--self-test`.
   Les hooks tournent sous `sh` (Linux) / Git Bash (Windows), d'où la substitution
