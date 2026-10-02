@@ -193,7 +193,7 @@ def _self_test() -> int:
     if _IMPORT_ERROR is not None:
         print(f"FAIL: import battle_state : {_IMPORT_ERROR}", file=sys.stderr)
         return 1
-    tests = [_t_init, _t_activate_compound, _t_failure_proofs, _t_per_call, _t_chained, _t_repo, _t_nothing, _t_probe, _t_hooks_json]
+    tests = [_t_init, _t_activate_compound, _t_failure_proofs, _t_per_call, _t_chained, _t_repo, _t_subdir, _t_nothing, _t_probe, _t_hooks_json]
     for t in tests:
         t()
     print(f"OK: {len(tests)} tests session_bind")
@@ -310,6 +310,22 @@ def _t_repo() -> None:
         _handle(_payload(f'python battle_state.py activate A --repo "{root}"', other, stdout=_ok("A")))
         assert _binding(root, "sid-1") == "A"
         assert not (other / ".legion").exists()
+
+
+def _t_subdir() -> None:  # S1 (GH#154) : cwd = sous-dossier du depot, liaison a la racine
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _mk(tmp)
+        probe = subprocess.run(["git", "init", "-q", str(root)], capture_output=True, text=True)
+        if probe.returncode != 0:
+            print("SKIP: session_bind subdir (git absent ou inutilisable)", file=sys.stderr)
+            return
+        sub = root / "sub"
+        sub.mkdir()
+        _init(root, "A")
+        _handle(_payload("python battle_state.py activate A", sub, stdout=_ok("A")))
+        assert _binding(root, "sid-1") == "A"
+        assert not (sub / ".legion").exists()
 
 
 def _t_nothing() -> None:
