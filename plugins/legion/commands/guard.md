@@ -14,7 +14,7 @@ Arguments: `$ARGUMENTS`
 
 2. If `off`: clear `guard.allow` and `guard.deny`, leave `guard.careful` untouched:
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-guard --allow --deny --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-guard --allow --deny --battle <id>
    ```
    Then stop.
 
@@ -45,7 +45,7 @@ Arguments: `$ARGUMENTS`
 4. Persist the preset through the state script (it replaces both lists and leaves
    `guard.careful` untouched):
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-guard --allow <allow globs…> --deny <deny globs…> --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-guard --allow <allow globs…> --deny <deny globs…> --battle <id>
    ```
    (`python3` when `python` is absent.) Never edit `battle.json` by hand: the script
    validates, writes atomically and resyncs the fleet. Exit `2` = refused → relay the

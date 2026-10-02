@@ -15,7 +15,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    **State root `<state>`.** A battle may run in a dedicated worktree
    (`<main>/.claude/worktrees/<id>`), but its state lives in the **main repo**. Every
    `.legion/…` path below means `<state>/.legion/…`, where `<state>` is the `state_root` printed
-   by `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>` (JSON,
+   by `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" where --battle <id>` (JSON,
    read-only, no network; `<id>` validated as in step 1b). Check it is an existing absolute
    directory and use **absolute** paths in shell commands and in `Read` / `Write`, never a path
    built from the cwd. This retrospective **removes nothing**: the worktree and the branch stay
@@ -30,7 +30,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    ```
    and, only if `gh` exited `0`:
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
    ```
    - `open` → warn that the PR is not merged and **ask for confirmation** before going on.
    - `closed` → note it in `retro.md` (`Outcome`: `Shipped: no — PR fermée sans merge`).
@@ -48,7 +48,8 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
    Also read **`usage.jsonl`** if present (written by the `usage_track` hook): each
    line is `{scope, agent_type?, skills[], tokens{input,output,…}}`. Aggregate it:
-   `tokens_total = Σ(input+output)`, and the **unique set of skills** actually used
+   `tokens_total = Σ(input + output + cache_read + cache_creation)` (with prompt caching,
+   `input` alone is near zero: never drop the cache counters), and the **unique set of skills** actually used
    (across the main session and the delegated subagents). This is approximate (see
    the hook's caveats) — present it as such.
 
@@ -74,7 +75,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    - PR : <pr_state> · CI : <ci>
 
    ## Cost (approximate)
-   - Tokens: ~<tokens_total> (subagents <Σ>, main <Σ>)
+   - Tokens: ~<tokens_total> (subagents <Σ>, main <Σ>) — input <n>, output <n>, cache_read <n>, cache_creation <n>
    - Skills used: <scaffold, code-review, build-fix, …> (or "none recorded")
 
    ## What worked
@@ -103,7 +104,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
 4. **Close the battle first** (release the guard before writing out-of-repo):
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" close --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" close --battle <id>
    ```
    It sets `phases.reflect.status = "done"` (and resyncs the fleet, dropping the
    battle from the active view), clears `<state>/.legion/active-battle` when it points at
@@ -137,7 +138,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    then append them to the cross-battle journal:
 
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/plugin_retex.py" append \
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/plugin_retex.py" append \
      --file "<state>/.legion/battles/<id>/plugin-retex.json" --battle "<id>" --repo "<repo>"
    ```
 
@@ -164,17 +165,23 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    the **third** REFLECT output, alongside the project-memory learning of step 5 and the
    central plugin-RETEX journal of step 6). During a battle, gates and the builder log
    observations that fall **outside** the feature's scope in a
-   `## Hors périmètre — candidats issue` section of their artifact. Turn the actionable
-   ones into follow-up issues on the **target repo**, **without duplicates**. All `gh`
+   `## Hors périmètre — candidats issue` section of their artifact. Turn only the confirmed
+   **bugs** into follow-up issues on the **target repo**, **without duplicates**. All `gh`
    writes stay here — the script never touches the network.
 
    a. **Aggregate** every `## Hors périmètre — candidats issue` section from the artifacts
       read at step 2 (`plan.md`, each `gate-*.md`, `build-report.md`). No such section
       anywhere → skip this step entirely (write nothing, report `RAS`).
 
-   b. **Filter** — keep only what is **out of scope** AND **actionable** AND
-      **substantial**. Drop nits, vague remarks, and anything the shipped work already
-      covers. A loose filter spams the repo; be strict.
+   b. **Filter — confirmed bugs only.** Keep a candidate only if it is a **bug**: a
+      wrong behaviour that was **reproduced or observed** during the battle (a test, a
+      command output, a gate finding with a concrete failing case), out of the shipped
+      scope. Everything else is **not** filed as an issue: improvements, technical debt,
+      missing tests, defensive hardening without an observed failure, ideas, UI wishes.
+      Journal those in the plugin RETEX (step 6) when they concern the tooling, or just
+      list them in `retro.md` under « Hors périmètre écarté ». A battle that files no
+      issue is the expected case. (RETEX: filing every actionable remark grew the backlog
+      as fast as battles closed it.)
 
    c. **Build the candidate list + fetch existing issues.** Write the kept candidates to
       `<state>/.legion/battles/<id>/opportunities.json` (under the battle dir — always writable,
@@ -189,7 +196,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
       `<state>/.legion/battles/<id>/opp-dedup-in.json`, then classify (deterministic, offline):
 
       ```bash
-      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" dedup --file "<state>/.legion/battles/<id>/opp-dedup-in.json"
+      python "${CLAUDE_PLUGIN_ROOT}/scripts/opportunity.py" dedup --file "<state>/.legion/battles/<id>/opp-dedup-in.json"
       ```
 
       It returns `{ to_create, duplicates, probable }`. **`duplicates`** (fingerprint
@@ -201,7 +208,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
       marker (`<!-- legion-opportunity: <fp> -->`), the pivot of the anti-duplicate net:
 
       ```bash
-      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> --out "<state>/.legion/battles/<id>/opp-<fingerprint>.md"
+      python "${CLAUDE_PLUGIN_ROOT}/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> --out "<state>/.legion/battles/<id>/opp-<fingerprint>.md"
       ```
 
    e. **CONFIRM (outward effect).** Show the user the list to create — each title + body,

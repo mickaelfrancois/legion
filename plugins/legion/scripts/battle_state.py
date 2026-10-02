@@ -31,9 +31,9 @@ dépôt principal si une battle y est active, sinon le cwd ; ne lève jamais), `
 -> Path` (GH#128 : le dépôt principal d'un worktree lié même sans battle active, sinon le cwd ;
 utilisé par `init` / `activate`), `worktree_battle_of(state_root, path) -> (id, dict) | None`
 (GH#166 : la battle vivante dont le worktree contient `path`, déduite du chemin seul, sans le
-pointeur ni le cwd ; lit un seul `battle.json`). Le CLI, lui, part de
-`_repo_toplevel(cwd)` (GH#134 : racine du dépôt depuis un sous-dossier) ; ces deux fonctions
-restent inchangées pour les hooks.
+pointeur ni le cwd ; lit un seul `battle.json`). Le CLI part de
+`_repo_toplevel(cwd)` (GH#134 : racine du dépôt depuis un sous-dossier) ; `resolve_state_root` et
+`main_repo_root` font de même d'eux-mêmes (GH#154), donc les hooks aussi.
 
 Battle par session (GH#170), lecture seule sauf mention, jamais d'exception sauf `bind_session` /
 `unbind_battle` (écrivent) : `session_keys(payload) -> list[str]` (clés de session du payload d'un
@@ -216,7 +216,7 @@ SUBCOMMANDS: tuple[str, ...] = ("init", "transition", "approve-plan", "bump-auto
                                 "invalidate", "set-delivery", "set-guard", "set-meta",
                                 "set-slices", "slice", "next-slice", "check-cascade",
                                 "merge-reports", "activate", "close", "abort", "validate",
-                                "session-status")
+                                "session-status", "touch-files")
 
 # Commandes encore permises sur une battle abandonnée (GH#75) : lecture de diagnostic seule.
 ABORT_ALLOWED: tuple[str, ...] = ("validate",)
@@ -1582,7 +1582,7 @@ def _repo_toplevel(cwd: Path) -> Path | None:
     """Racine du dépôt (ou du worktree) contenant `cwd` (GH#134), chemin réel ; `None` pour garder
     le `cwd`. Chemin rapide sans sous-processus quand `cwd/.git` existe (dossier ou fichier).
     Sinon `git rev-parse --show-toplevel --show-superproject-working-tree` : code != 0, git
-    absent, délai, sortie vide ou seconde ligne non vide (sous-module) donnent `None`.
+    absent, délai, sortie vide, non absolue ou seconde ligne non vide (sous-module) donnent `None`.
     L'environnement git hérité est nettoyé. Ne lève jamais.
     """
     try:
@@ -1596,7 +1596,7 @@ def _repo_toplevel(cwd: Path) -> Path | None:
         if proc.returncode != 0:
             return None
         lines = [ln.strip() for ln in proc.stdout.splitlines()]
-        if not lines or not lines[0] or any(lines[1:]):
+        if not lines or not lines[0] or any(lines[1:]) or not os.path.isabs(lines[0]):
             return None
         return Path(os.path.realpath(lines[0]))
     except Exception:  # noqa: BLE001 - contrat : jamais d'exception
@@ -1606,27 +1606,31 @@ def _repo_toplevel(cwd: Path) -> Path | None:
 def resolve_state_root(cwd: Path) -> Path:
     """Racine de l'état `.legion/` pour un `cwd` (GH#68). Lecture seule, ne lève jamais.
 
-    Dans un worktree lié (`git rev-parse --git-dir --git-common-dir` : deux dossiers distincts),
+    Part de la racine du dépôt ou du worktree contenant `cwd` (`_repo_toplevel`, GH#154 : un
+    sous-dossier donne sa racine ; `cwd` si inconnue). Dans un worktree lié (`git rev-parse --git-dir --git-common-dir` : deux dossiers distincts),
     renvoie le dépôt principal s'il a une battle active (pointeur, ou liaison de session vivante
-    dans `.legion/sessions/`, GH#170), sinon le `cwd`. Chemin rapide sans
-    sous-processus quand `cwd/.git` est un dossier. Toute erreur (git absent, délai, code != 0,
+    dans `.legion/sessions/`, GH#170), sinon la racine ci-dessus. Chemin
+    rapide sans sous-processus quand `cwd/.git` est un dossier. Toute erreur (git absent, délai, code != 0,
     sortie incomplète) renvoie `cwd` tel quel. L'environnement git hérité est nettoyé.
     """
     try:
-        main = _linked_main_root(cwd)
+        base = _repo_toplevel(cwd) or Path(cwd)
+        main = _linked_main_root(base)
         if main is not None and (active_battle_id(main) is not None or _has_live_binding(main)):
             return main
-        return Path(cwd)
+        return base
     except Exception:  # noqa: BLE001 - contrat : jamais d'exception
         return Path(cwd) if isinstance(cwd, (str, os.PathLike)) else cwd
 
 
 def main_repo_root(cwd: Path) -> Path:
     """Dépôt principal pour un `cwd` (GH#128) : celui d'un worktree lié non bare, même sans battle
-    active, sinon le `cwd`. Utilisé par `init` / `activate`. Lecture seule, ne lève jamais."""
+    active, sinon la racine du dépôt contenant `cwd` (GH#154, `_repo_toplevel`). Utilisé par
+    `init` / `activate`. Lecture seule, ne lève jamais."""
     try:
-        main = _linked_main_root(cwd)
-        return main if main is not None else Path(cwd)
+        base = _repo_toplevel(cwd) or Path(cwd)
+        main = _linked_main_root(base)
+        return main if main is not None else base
     except Exception:  # noqa: BLE001 - contrat : jamais d'exception
         return Path(cwd) if isinstance(cwd, (str, os.PathLike)) else cwd
 
@@ -1635,7 +1639,7 @@ def _cli_root(args, cwd: Path) -> Path:
     """Racine d'état du CLI (GH#128, GH#134). `--repo` non vide l'emporte ; sinon on part de la
     racine du dépôt contenant le cwd (`_repo_toplevel`, le cwd si inconnue), puis `init` /
     `activate` visent toujours le dépôt principal (`main_repo_root`), les autres
-    `resolve_state_root`. Les hooks gardent leur propre résolution (cwd brut)."""
+    `resolve_state_root` (qui normalisent aussi d'eux-mêmes, GH#154, comme les hooks)."""
     repo = getattr(args, "repo", None)
     if repo:
         return Path(repo)
@@ -1812,6 +1816,8 @@ def _build_parser_parts():
     s.add_argument("--reason", default=None)
     add("validate")
     add("session-status")
+    s = add("touch-files")
+    s.add_argument("--files", nargs="+", required=True)
     return p, sub
 
 
@@ -1912,6 +1918,17 @@ def _mutation(args, battle: dict, root: "Path | None" = None) -> tuple[dict, dic
                 detail["security_auto"] = copy.deepcopy(out["run"]["security_auto"])
                 detail["_warnings"] = [
                     f"security ajoutée à required_gates (fichiers sensibles : {', '.join(added)})"]
+        return out, detail
+    if cmd == "touch-files":   # GH#115 : fichiers touchés hors `slice … done` (correctif, polissage, §H)
+        reflect = ((battle.get("phases") or {}).get("reflect") or {})
+        if isinstance(reflect, dict) and reflect.get("status") == "done":
+            raise _Refuse("battle close : touch-files refusé")
+        out, added = mark_security_auto(battle, args.files, _now_iso())
+        detail = {"files": list(args.files), "security_added": bool(added)}
+        if added:
+            detail["security_auto"] = copy.deepcopy(out["run"]["security_auto"])
+            detail["_warnings"] = [
+                f"security ajoutée à required_gates (fichiers sensibles : {', '.join(added)})"]
         return out, detail
     out = copy.deepcopy(battle)
     if cmd == "set-delivery":
@@ -3032,10 +3049,26 @@ def _t_doc_subcommands() -> None:
         cited = set(re.findall(r"`([a-z][a-z-]*)`", m.group(0)))
         # `session-status` (GH#170) suit `validate` dans SUBCOMMANDS : la doctrine le cite juste
         # après la plage `init`..`validate`, vérifié ci-dessous.
-        assert cited == known - {"session-status"}, (d.name, sorted(cited ^ known))
+        assert cited == known - {"session-status", "touch-files"}, (d.name, sorted(cited ^ known))
         if d.name == "battle.md":
             assert "session-status" in text, "session-status non cité dans battle.md"
+        assert "touch-files" in text, f"touch-files non cité dans {d.name}"
         assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
+
+
+def _t_doc_plugin_root_braces() -> None:   # GH#172 : seule la forme ${CLAUDE_PLUGIN_ROOT} est substituée
+    root = Path(__file__).resolve().parents[1]
+    files = sorted((root / "commands").glob("*.md")) + sorted((root / "skills").glob("*/SKILL.md"))
+    if not files:
+        print("SKIP: _t_doc_plugin_root_braces (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    for f in files:
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            assert "$CLAUDE_PLUGIN_ROOT" not in line, (
+                f"{f.name}:{n} : $CLAUDE_PLUGIN_ROOT sans accolades (non substitué) : {line.strip()}")
+    assert "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" in (root / "commands/battle.md").read_text(
+        encoding="utf-8"), "battle.md : forme ${CLAUDE_PLUGIN_ROOT} absente"
 
 
 def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
@@ -3054,7 +3087,7 @@ def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
     # appels battle_state.py de freeze / careful / guard / retro : toujours --battle
     for n in ("freeze", "careful", "guard", "retro"):
         for line in docs[n].splitlines():
-            if "battle_state.py" not in line or "$CLAUDE_PLUGIN_ROOT" not in line:
+            if "battle_state.py" not in line or "CLAUDE_PLUGIN_ROOT" not in line:
                 continue
             sub = line.split("battle_state.py\"", 1)[1].split()
             if sub and sub[0] in ("init", "activate", "session-status", "validate"):
@@ -3127,7 +3160,7 @@ def _t_doc_fan_in() -> None:
     text = battle_md.read_text(encoding="utf-8")
     start = text.index("**Mode — `--auto`.**")
     sec = text[start:text.index("After build (either mode)", start)]
-    # `fan_in.py` peut être suivi d'un guillemet fermant (`"$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" apply`)
+    # `fan_in.py` peut être suivi d'un guillemet fermant (`"${CLAUDE_PLUGIN_ROOT}/scripts/fan_in.py" apply`)
     pos: dict[str, int] = {}
     for sub in ("apply", "cleanup"):
         m = re.search(rf'fan_in\.py"? {sub}\b', sec)
@@ -3283,6 +3316,11 @@ def _t_doc_worktree_mode() -> None:   # GH#152 : doctrine du mode worktree
     assert "Exception — worktree mode" not in d, "§D : l'exception worktree mode est encore presente"
     assert "not available in worktree mode" not in d, "§D : lot parallele encore declare indisponible"
     assert "integration tree" in d and "--root \"<wt>\"" in d, "§D : arbre d'integration absent"
+    # GH#159 : nettoyage d'une battle abandonnee (preuve unpushed, fetch --prune)
+    i_sec = battle[battle.index("## §I"):battle.index("## §J")]
+    assert "git worktree remove" not in i_sec, "§I : git worktree remove a la main de retour"
+    j_sec = battle[battle.index("## §J"):battle.index("## Guardrails")]
+    assert "unpushed" in j_sec and "--prune" in j_sec, "§J : unpushed / --prune absents"
     # options validees par liste fermee
     assert "closed list" in battle and "`--in-place` (no value" in battle, "liste fermee de start"
 
@@ -3621,7 +3659,7 @@ _CORE_TESTS = (
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
     _t_slice_report_names, _t_merge_nominal, _t_merge_missing_blank, _t_merge_out_of_scope,
-    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode, _t_doc_concurrent,
+    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode, _t_doc_concurrent, _t_doc_plugin_root_braces,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
@@ -4511,6 +4549,47 @@ def _t_security_auto_slice() -> None:
         assert "security ajoutée" in res["warnings"][0] and "kaboom" in res["warnings"][1]
 
 
+def _t_touch_files() -> None:   # GH#115
+    def prep(r):
+        r.init("b1")
+        r.ok("transition", "think", "done")
+        r.ok("transition", "plan", "in_progress")
+        r.ok("transition", "plan", "done", "--verdict", "accept")
+        r.ok("set-slices", "--replace", "s1")
+        r.ok("approve-plan")
+        r.ok("transition", "build", "in_progress")
+
+    with _Repo() as r:
+        prep(r)
+        before = r.load()["required_gates"]
+        res = r.ok("touch-files", "--files", "src/util.py", "--battle", "b1")   # neutre
+        assert res["security_added"] is False and res["warnings"] == []
+        b = r.load()
+        assert b["required_gates"] == before and "security_auto" not in b.get("run", {})
+        res = r.ok("touch-files", "--files", "src/util.py", "src/Auth/Login.cs", "--battle", "b1")
+        b = r.load()
+        assert b["required_gates"] == list(DEFAULT_REQUIRED_GATES) + ["security"]
+        assert b["run"]["security_auto"]["files"] == ["src/Auth/Login.cs"]
+        assert res["security_added"] is True and len(res["warnings"]) == 1
+        at = b["run"]["security_auto"]["at"]
+        res = r.ok("touch-files", "--files", "x.env", "--battle", "b1")   # idempotent
+        b = r.load()
+        assert res["warnings"] == [] and res["security_added"] is False
+        assert b["run"]["security_auto"]["at"] == at and b["required_gates"].count("security") == 1
+        code, _ = r.run("touch-files", "--battle", "b1")   # --files requis
+        assert code == 2
+        r.ok("abort", "--battle", "b1")
+        code, res = r.run("touch-files", "--files", "a.env", "--battle", "b1")
+        assert code == 2 and "abandonnée" in res["reason"], res
+    with _Repo() as r:
+        prep(r)
+        b = r.load()
+        b["phases"]["reflect"] = {"status": "done"}
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        code, res = r.run("touch-files", "--files", "a.env", "--battle", "b1")
+        assert code == 2 and "close" in res["reason"], res
+
+
 def _write_gh(r: "_Repo", obj, name="pr-status.json", raw: str | None = None) -> str:
     f = r.root / name
     f.write_text(raw if raw is not None else json.dumps(obj), encoding="utf-8")
@@ -4696,7 +4775,7 @@ def _t_merge_reports_subcommand() -> None:        # M16
 
 
 _INTEGRATION_TESTS = (
-    _t_security_hits, _t_security_auto_slice,
+    _t_security_hits, _t_security_auto_slice, _t_touch_files,
     _t_init_profiles, _t_set_meta_profile, _t_set_meta_worktree, _t_set_delivery_head_fields,
     _t_validate_profile, _t_hotfix_e2e,
     _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_activate_pointer_taken, _t_atomic_and_corrupt,
@@ -4765,8 +4844,21 @@ def _t_resolve_root_fast_path() -> None:          # R1
 def _t_resolve_root_subdir() -> None:             # R2
     def body(main, wt, wt_out):
         (main / "sub").mkdir()
-        assert resolve_state_root(main / "sub") == main / "sub"
+        assert _rp(resolve_state_root(main / "sub")) == _rp(main)
     _with_fixture("_t_resolve_root_subdir", body)
+
+
+def _t_resolve_root_subdir_worktree() -> None:    # R2b, R2c, R2d
+    def body(main, wt, wt_out):
+        (main / "sub").mkdir()
+        (wt / "sub").mkdir()
+        assert _rp(resolve_state_root(wt / "sub")) == _rp(main)             # R2b
+        assert _rp(main_repo_root(main / "sub")) == _rp(main)               # R2d
+        assert _rp(main_repo_root(wt / "sub")) == _rp(main)
+        (main / ".legion" / "active-battle").write_text("", encoding="utf-8")
+        got = resolve_state_root(wt / "sub")                                # R2c
+        assert _rp(got) == _rp(wt) == _rp(resolve_state_root(wt)), got
+    _with_fixture("_t_resolve_root_subdir_worktree", body)
 
 
 def _t_resolve_root_worktree() -> None:           # R3, R4
@@ -5007,7 +5099,8 @@ _SESSION_TESTS = (
 
 
 _RESOLVE_ROOT_TESTS = (
-    _t_worktree_battle_of, _t_resolve_root_fast_path, _t_resolve_root_subdir, _t_resolve_root_worktree,
+    _t_worktree_battle_of, _t_resolve_root_fast_path, _t_resolve_root_subdir, _t_resolve_root_subdir_worktree,
+    _t_resolve_root_worktree,
     _t_resolve_root_no_main_battle, _t_resolve_root_not_git, _t_resolve_root_git_failures,
     _t_pick_state_root_pure, _t_resolve_root_ignores_git_dir_env,
 )

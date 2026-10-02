@@ -254,12 +254,12 @@ fermé) est inchangée. Deux ajouts rétrocompatibles dans `battle.json` : le bl
 --pr-json`). `scripts/battle_worktree.py` (`create`, `where`, `close-check`, `close`) fait les
 opérations git locales sans jamais écrire `battle.json`. `close` exige `phases.reflect` `done`, la
 PR mergée et la branche contenue dans `origin/<default>` (ou PR mergée avec `head_oid` == tip
-local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`.
+local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`. Une battle abandonnée avec bloc `worktree` passe en mode abandonné : `unpushed` (aucun commit absent de `refs/remotes/origin`, ou tip == base) et `worktree_on_branch` remplacent `pr_merged` et `contained`, `reflect` n'est pas exigé et le principal n'est pas mis à jour.
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (le pointeur et la déliaison des sessions à `close` / `abort` ; la liaison `.legion/sessions/<clé>.json` est écrite par le hook `hooks/session_bind.py` via `battle_state.bind_session`, sur chaque appel `init` / `activate` d'une commande enchaînée ; le garde-fou `guard.py` lit la sous-commande et `--battle` par le vrai parser, donc `--repo /x validate` reste une lecture ; il couvre aussi `fan_in.py base|apply|cleanup` lancé sans `--battle` quand la session est liée à une autre battle que le pointeur, ou étrangère : exit 2, message qui nomme `--battle <id> --root <worktree.path>`. `align` et `--self-test` restent permis) (sous-commandes `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
-`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, plus la lecture seule `session-status`). Sans `--repo`, le CLI part de la racine du dépôt contenant le cwd (`git rev-parse --show-toplevel`, GH#134), donc jamais d'un sous-dossier ; depuis un worktree lié, la racine d'état est le dépôt principal (battle active) ; `init` et `activate` visent toujours le dépôt principal ; `--repo` explicite prime. Les hooks gardent leur propre résolution, à partir du cwd brut. `build done` exige que toutes les
+`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, plus la lecture seule `session-status`, et `touch-files`, qui écrit `battle.json` : il applique la règle `security` automatique aux fichiers touchés hors `slice … done`, GH#115). Sans `--repo`, le CLI part de la racine du dépôt contenant le cwd (`git rev-parse --show-toplevel`, GH#134), donc jamais d'un sous-dossier ; depuis un worktree lié, la racine d'état est le dépôt principal (battle active) ; `init` et `activate` visent toujours le dépôt principal ; `--repo` explicite prime. Les hooks résolvent de la même façon (racine du dépôt contenant le cwd). `build done` exige que toutes les
 slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
 pendant un re-plan ouvert (`approved_at` à `null`) ou tant que `build` est `pending`
 (déclarer les slices **avant** `approve-plan`) ; sans id, elle vide la liste (BUILD agrégé,
@@ -467,7 +467,7 @@ plugins/legion/
 
 - **Prose FR, identifiants/fichiers EN**. **Sujets de commit et titres de PR** :
   anglais, format **Conventional Commits** `type(scope): subject`.
-- **Hooks Python** lancés via `$(command -v python || command -v python3) "$CLAUDE_PLUGIN_ROOT/hooks/<x>.py"`
+- **Hooks Python** lancés via `$(command -v python || command -v python3) "${CLAUDE_PLUGIN_ROOT}/hooks/<x>.py"`
   (`python` d'abord — Windows ; `python3` en repli — Linux/macOS sans
   `python-is-python3`), `exit 2` pour bloquer, bypass par env var, `--self-test`.
   Les hooks tournent sous `sh` (Linux) / Git Bash (Windows), d'où la substitution

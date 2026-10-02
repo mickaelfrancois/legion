@@ -240,7 +240,7 @@ pr-status.json  ci-failed-<run-id>.log   # ADDRESS/status : sortie `gh` (PR/CI) 
 `battle.json` schema (**no need to open `ARCHITECTURE.md` at run time**). It is written
 **only by `scripts/battle_state.py`** (subcommands `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
-`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`), which checks every phase transition, writes atomically and resyncs the fleet
+`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, `touch-files`), which checks every phase transition, writes atomically and resyncs the fleet
 shard — never edit it by hand. On a re-plan, `set-slices --replace` swaps the slice list
 (before `approve-plan`; with no id it empties it — aggregated BUILD); `check-cascade` (read-only) gates the ADDRESS push. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
 single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
@@ -351,7 +351,7 @@ optionnel `worktree {path, branch, base, created_at}` (absent ou `null` = en pla
 `/battle close [<id>]`, lancé depuis le principal, prouve que la PR est mergée et la branche
 contenue dans `origin/<default>` (ascendance, ou PR mergée et `head_oid` == tip local, pour le
 squash/rebase), que le worktree est propre, puis supprime worktree et branche locale
-(`battle_worktree.py close-check` / `close`, jamais `--force`). Un `build all --auto` en mode
+(`battle_worktree.py close-check` / `close`, jamais `--force`). Pour une battle abandonnée avec bloc `worktree`, `close` remplace ces preuves par « aucun commit perdu » (`unpushed`, après `git fetch --prune --no-tags origin`), sans rétro ni mise à jour du principal. Un `build all --auto` en mode
 worktree lance le lot parallèle : `fan_in.py base|apply|cleanup` portent `--battle <id> --root
 <worktree.path>` (l'arbre d'intégration est le worktree de la battle) et les builders vivent sous
 `<principal>/.claude/worktrees/agent-*`, à côté du worktree de la battle (refusé comme worktree de builder).
@@ -368,7 +368,8 @@ multiplex sessions.
 A retro feeds three capitalization outputs: the **code/project** learning → Claude
 project memory (persist only what would change how the *next* battle is run); the
 **tooling** RETEX → the central `plugin-retex.jsonl` journal; and **out-of-scope
-opportunities** → deduplicated GitHub issues on the target repo (from the
+confirmed bugs only** (reproduced or observed — never improvements, debt or ideas) →
+deduplicated GitHub issues on the target repo (from the
 `## Hors périmètre — candidats issue` sections, materialized via `scripts/opportunity.py`).
 
 ## Guardrails
@@ -418,7 +419,7 @@ differs from the tree (fault `[main-tree]`) and reads the protected state at the
   `feat|fix|refactor|perf|docs|test|build|ci|chore`.
 - No `Set-Location`/`cd`, no `&&`/`;`/`|` chaining, no shell redirection; run
   `dotnet` from the current directory.
-- Hooks are launched via `python "$CLAUDE_PLUGIN_ROOT/hooks/<x>.py"`, falling back
+- Hooks are launched via `python "${CLAUDE_PLUGIN_ROOT}/hooks/<x>.py"`, falling back
   to `python3` when `python` is absent (Linux/macOS). If neither exists the hooks
   fail silently — the `/battle start` preflight checks it.
 - Iterate in small validated steps; never emit large unvalidated blocks.

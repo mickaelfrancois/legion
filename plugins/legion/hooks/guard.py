@@ -87,14 +87,15 @@ Regles :
 
 **Deux racines** (GH#68) : dans un worktree git lie, le cwd du hook est le worktree mais la
 battle vit dans le depot principal. `_decide(data, repo_root, state_root)` separe donc la racine
-d'**edition** (`repo_root` = cwd du hook : globs `allow`/`deny` et `.gitignore`) de la racine
+d'**edition** (`repo_root` = racine du depot/worktree contenant le cwd du hook, GH#154 : globs `allow`/`deny` et `.gitignore`) de la racine
 d'**etat** (`state_root`, `battle_state.resolve_state_root` : pointeur, `battle.json`, confinement
 des gates, regle `.legion/` du builder, `.legion/**` toujours autorise, logs de gate). Hors worktree
 les deux racines sont confondues : comportement inchange. Depuis un worktree, le builder ecrit son
 rapport (`build-report.md` ou `build-report-<slice_id>.md`) dans `<principal>/.legion/battles/<id>/` (chemin absolu) ; le `.legion/` du
 worktree n'est pas de l'etat et reste bloque.
 
-Les globs sont relatifs a la racine d'edition (cwd du hook). `**` matche tout
+Les globs sont relatifs a la racine d'edition (racine du depot/worktree contenant le cwd du hook ;
+un `file_path` relatif s'ancre sur le cwd reel). `**` matche tout
 (slash inclus), `*` matche hors-slash, `?` un caractere hors-slash.
 
 Tests CLI hors Claude Code :
@@ -142,6 +143,8 @@ try:
     from battle_state import active_battle_id, battles_dir, guard_of, load_active_battle
     # Racine d'etat (GH#68) : depot principal depuis un worktree lie, sinon le cwd.
     from battle_state import resolve_state_root
+    # Racine du depot/worktree contenant le cwd (GH#154) : racine d'edition du guard.
+    from battle_state import _repo_toplevel
     # Battle proprietaire d'une cible sous `.claude/worktrees/<id>/` (GH#166, C4-A).
     from battle_state import worktree_battle_of
     # Matcher de globs partage avec `artifact_check.py tree-verify --guard` (GH#66, C6).
@@ -166,6 +169,9 @@ except Exception as _exc:  # ImportError, SyntaxError du module... jamais plante
 
     def resolve_state_root(cwd):  # repli : pas de resolution (les decisions ferment de toute facon)
         return cwd
+
+    def _repo_toplevel(cwd):  # repli : pas de normalisation (cwd brut, comportement d'avant)
+        return None
 
     def _slice_report_id(name):  # repli : aucun motif reconnu (les decisions ferment de toute facon)
         return None
@@ -1566,6 +1572,18 @@ def _probe(data, state_root: Path) -> None:
         pass
 
 
+def _anchor_relative_path(data: dict, cwd: Path, edit_root: Path) -> dict:
+    """GH#154 : depuis un sous-dossier, un `file_path` relatif d'un outil d'ecriture s'ancre sur le
+    cwd reel (la ou l'outil ecrit), pas sur la racine d'edition. Copie du payload ; no-op si cwd = racine."""
+    if edit_root == cwd or data.get("tool_name") not in WRITE_TOOLS:
+        return data
+    tool_input = data.get("tool_input")
+    fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+    if not isinstance(fp, str) or not fp or os.path.isabs(fp):
+        return data
+    return {**data, "tool_input": {**tool_input, "file_path": str(cwd / fp)}}
+
+
 def main() -> int:
     if "--self-test" in sys.argv:
         return _self_test()
@@ -1577,8 +1595,10 @@ def main() -> int:
             _emit(message)  # rejet de parsing : pas de bypass LEGION_GUARD_OFF
             return code
 
-        edit_root = Path.cwd()
+        cwd = Path.cwd()
+        edit_root = _repo_toplevel(cwd) or cwd       # racine du depot/worktree, pas le sous-dossier (GH#154)
         state_root = resolve_state_root(edit_root)   # depot principal depuis un worktree (GH#68)
+        data = _anchor_relative_path(data, cwd, edit_root)
         _probe(data, state_root)
         code, message = _safe_decide(data, edit_root, state_root)
 
@@ -2223,6 +2243,53 @@ def _t_guard_wt_subprocess(bs) -> None:
     _with_wt(bs, "_t_guard_wt_subprocess", body)
 
 
+def _run_sibling(hook: str, payload: dict, cwd: Path) -> tuple[int, str]:
+    """Lance un hook voisin (`careful.py`, `usage_track.py`) en sous-processus avec `cwd` : (code, stderr)."""
+    import subprocess
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "LEGION_GUARD_OFF")}
+    proc = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / hook)], input=json.dumps(payload),
+                          capture_output=True, text=True, cwd=str(cwd), env=env, timeout=60)
+    return proc.returncode, proc.stderr
+
+
+def _t_hooks_from_subdir(bs) -> None:
+    """GH#154, X1 a X8 : les vrais hooks lances depuis un sous-dossier du depot et du worktree."""
+    def body(main, wt, wt_out):
+        _wt_guard_json(main, '{"allow":["src/**"],"careful":true}')
+        for root in (main, wt):
+            (root / "sub").mkdir()
+        sub_main, sub_wt = main / "sub", wt / "sub"
+        code, err = _run_hook(_ev("Edit", "claude", str(main / "docs" / "x.md")), sub_main)       # X1
+        assert code == 2 and "hors du perimetre" in err, (code, err)
+        code, err = _run_hook(_ev("Edit", "claude", str(main / "src" / "a.py")), sub_main)        # X2
+        assert code == 0, (code, err)
+        code, err = _run_hook(_ev("Edit", "claude", "a.py"), sub_main)                            # X3
+        assert code == 2 and "hors du perimetre" in err, (code, err)
+        code, err = _run_hook(_ev("Edit", "claude", str(wt / "src" / "a.py")), sub_wt)            # X4
+        assert code == 0, (code, err)
+        code, err = _run_hook(_ev("Edit", "claude", str(wt / "sub" / "src" / "a.py")), sub_wt)    # X5
+        assert code == 2, (code, err)
+        rm = {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}}
+        for cwd in (sub_main, sub_wt):                                                           # X6
+            code, err = _run_sibling("careful.py", rm, cwd)
+            assert code == 0 and "[careful]" in err, (cwd, code, err)
+        tp = main.parent / "t-sub.jsonl"
+        tp.write_text(json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 1, "output_tokens": 1},
+                      "content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "x"}}]}}) + "\n",
+                      encoding="utf-8")
+        usage = main / ".legion" / "battles" / "B" / "usage.jsonl"
+        for n, cwd in enumerate((sub_main, sub_wt), 1):                                          # X7
+            payload = {"hook_event_name": "SubagentStop", "agent_type": "builder",
+                       "agent_transcript_path": str(tp), "cwd": str(cwd)}
+            code, err = _run_sibling("usage_track.py", payload, cwd)
+            assert code == 0, (cwd, code, err)
+            assert len(usage.read_text(encoding="utf-8").splitlines()) == n, (cwd, err)
+        for cwd in (sub_main, sub_wt):                                                           # X8
+            assert not (cwd / ".legion").exists(), cwd
+    _with_wt(bs, "_t_hooks_from_subdir", body)
+
+
 def _t_guard_wt_standard(bs) -> None:
     """G3 : `deny` evalue sur la racine d'edition (le worktree)."""
     def body(main, wt, wt_out):
@@ -2803,6 +2870,7 @@ def _self_test() -> int:
     _t_shell_allowed(battle_state)
     _t_shell_routing(battle_state)
     _t_guard_wt_subprocess(battle_state)
+    _t_hooks_from_subdir(battle_state)
     _t_guard_wt_standard(battle_state)
     _t_guard_wt_builder(battle_state)
     _t_guard_wt_gate(battle_state)
