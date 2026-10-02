@@ -23,13 +23,13 @@ public sealed class FleetEntry
     // SnakeCaseLower naming maps this to the wire key battle_status (doc §2).
     public BattleStatus BattleStatus { get; set; } // global: active | blocked | closed | aborted
     public string? PrUrl { get; set; }
-    public long? TokensTotal { get; set; }      // tokens_total = input + output; absent if nothing yet
+    public long? TokensTotal { get; set; }      // tokens_total = input + output + cache_read + cache_creation; absent if nothing yet
     public TokenUsage? Tokens { get; set; }     // breakdown (cache tracked separately)
     public List<string> Skills { get; set; } = []; // skills actually used (main + subagents)
     public DateTimeOffset? Updated { get; set; }
 }
 
-// Token cost breakdown. tokens_total is input+output; cache is tracked apart (doc §2).
+// Token breakdown. tokens_total is the sum of the four counters, cache included (doc §2, GH#180).
 public sealed class TokenUsage
 {
     public long Input { get; set; }

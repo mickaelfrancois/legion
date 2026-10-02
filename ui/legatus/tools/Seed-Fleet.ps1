@@ -95,7 +95,7 @@ function Get-UsageAggregate([string] $battleDir) {
         if ($rec.skills) { foreach ($s in $rec.skills) { if ($skills -notcontains $s) { $skills.Add($s) } } }
     }
     return [ordered]@{
-        tokens_total = $input + $output
+        tokens_total = $input + $output + $cacheRead + $cacheCreation
         tokens       = [ordered]@{ input = $input; output = $output; cache_read = $cacheRead; cache_creation = $cacheCreation }
         skills       = @($skills)
     }

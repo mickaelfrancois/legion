@@ -48,7 +48,8 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
    Also read **`usage.jsonl`** if present (written by the `usage_track` hook): each
    line is `{scope, agent_type?, skills[], tokens{input,output,…}}`. Aggregate it:
-   `tokens_total = Σ(input+output)`, and the **unique set of skills** actually used
+   `tokens_total = Σ(input + output + cache_read + cache_creation)` (with prompt caching,
+   `input` alone is near zero: never drop the cache counters), and the **unique set of skills** actually used
    (across the main session and the delegated subagents). This is approximate (see
    the hook's caveats) — present it as such.
 
@@ -74,7 +75,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    - PR : <pr_state> · CI : <ci>
 
    ## Cost (approximate)
-   - Tokens: ~<tokens_total> (subagents <Σ>, main <Σ>)
+   - Tokens: ~<tokens_total> (subagents <Σ>, main <Σ>) — input <n>, output <n>, cache_read <n>, cache_creation <n>
    - Skills used: <scaffold, code-review, build-fix, …> (or "none recorded")
 
    ## What worked
