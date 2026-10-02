@@ -368,7 +368,8 @@ multiplex sessions.
 A retro feeds three capitalization outputs: the **code/project** learning → Claude
 project memory (persist only what would change how the *next* battle is run); the
 **tooling** RETEX → the central `plugin-retex.jsonl` journal; and **out-of-scope
-opportunities** → deduplicated GitHub issues on the target repo (from the
+confirmed bugs only** (reproduced or observed — never improvements, debt or ideas) →
+deduplicated GitHub issues on the target repo (from the
 `## Hors périmètre — candidats issue` sections, materialized via `scripts/opportunity.py`).
 
 ## Guardrails
