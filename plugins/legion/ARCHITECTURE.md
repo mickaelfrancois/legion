@@ -252,7 +252,7 @@ PR mergée et la branche contenue dans `origin/<default>` (ou PR mergée avec `h
 local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`.
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
-`scripts/battle_state.py` (le pointeur et la déliaison des sessions à `close` / `abort` ; la liaison `.legion/sessions/<clé>.json` est écrite par le hook `hooks/session_bind.py` via `battle_state.bind_session`) (sous-commandes `init`, `transition`, `approve-plan`,
+`scripts/battle_state.py` (le pointeur et la déliaison des sessions à `close` / `abort` ; la liaison `.legion/sessions/<clé>.json` est écrite par le hook `hooks/session_bind.py` via `battle_state.bind_session`, sur chaque appel `init` / `activate` d'une commande enchaînée ; le garde-fou `guard.py` lit la sous-commande et `--battle` par le vrai parser, donc `--repo /x validate` reste une lecture) (sous-commandes `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
 `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, plus la lecture seule `session-status`). Sans `--repo`, le CLI part de la racine du dépôt contenant le cwd (`git rev-parse --show-toplevel`, GH#134), donc jamais d'un sous-dossier ; depuis un worktree lié, la racine d'état est le dépôt principal (battle active) ; `init` et `activate` visent toujours le dépôt principal ; `--repo` explicite prime. Les hooks gardent leur propre résolution, à partir du cwd brut. `build done` exige que toutes les
 slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
@@ -429,7 +429,7 @@ plugins/legion/
 │   ├── hooks.json               # PreToolUse: guard (Edit|Write|MultiEdit, Bash|PowerShell), careful (Bash|PowerShell) · PostToolUse: fleet_sync, session_bind (Bash|PowerShell) · Stop/SubagentStop: usage_track
 │   ├── guard.py                 # périmètre d'écriture + confinement gates + artefact non vide + filtre Bash des gates (exit 2 = block)
 │   ├── careful.py               # avertit sur commandes destructrices (warn)
-│   ├── session_bind.py          # PostToolUse : lie la session à la battle après un `init` / `activate` réussi (`.legion/sessions/<clé>.json`, exit 0 toujours)
+│   ├── session_bind.py          # PostToolUse : lie la session à la battle après un `init` / `activate` réussi, sur chaque appel `battle_state.py` d'une commande enchaînée (liaison finale = dernier appel réussi ; `.legion/sessions/<clé>.json`, exit 0 toujours)
 │   ├── fleet_sync.py            # écrit le shard fleet.d/<battle> à chaque écriture de battle.json (PHASE_ORDER dérivé de battle_state)
 │   └── usage_track.py           # append tokens + skills réels à la battle active
 ├── scripts/
