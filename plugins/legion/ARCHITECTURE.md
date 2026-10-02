@@ -188,16 +188,21 @@ une slice trop complexe se **découpe** au PLAN. Mandat : coder **une** slice du
 
 Deux modes : *inline* (la session principale code, défaut) ; *autonome*
 (`/battle build --auto` délègue chaque slice à un `builder`, parallélisable en
-worktrees). Un builder parallèle part de l'arbre principal figé, pas de `HEAD` : l'orchestrateur
-fige la base du lot (`fan_in.py base`, travail non commité compris, commit sans ref) et le
-builder aligne son worktree dessus avant de coder (`fan_in.py align`) ; `tree-verify --base`
-en prouve l'alignement (faute `[base]`). Le builder séquentiel reçoit le dossier de la battle en chemin
+worktrees). Un builder parallèle part de l'arbre d'intégration figé (`worktree.path` en mode worktree,
+l'arbre principal sinon), pas de `HEAD` : l'orchestrateur fige la base du lot (`fan_in.py base --battle <id>`,
+plus `--root <worktree.path>` en mode worktree ; travail non commité compris, commit sans ref) et le
+builder aligne son worktree dessus avant de coder (`fan_in.py align --base <base> --battle <id>`) ; `tree-verify --base`
+en prouve l'alignement (faute `[base]`). `align` tolère aussi un builder coupé du `HEAD` du principal quand
+celui-ci a avancé depuis `create` (`HEAD` ancêtre de celui du principal, worktree propre, sortie `origin:"main_head"`) ;
+il refuse d'être lancé dans le worktree d'une battle. Les builders vivent sous `<principal>/.claude/worktrees/agent-*`. Le builder séquentiel reçoit le dossier de la battle en chemin
 absolu du dépôt principal et y écrit son rapport de slice ; le builder isolé (lot parallèle) n'écrit
 aucun fichier de rapport : il le rend dans son retour (entre marqueurs), l'orchestrateur l'écrit, et tout
 refus d'écriture remonte dans `write_failures`. Le delta d'un worktree ne
 revient pas seul dans l'arbre principal : l'orchestrateur le réintègre (fan-in,
 `scripts/fan_in.py apply`, tout-ou-rien, sous `tree-verify --guard`), puis supprime les
-worktrees par `fan_in.py cleanup` une fois la vérification du projet verte.
+worktrees par `fan_in.py cleanup` une fois la vérification du projet verte. Le fan-in écrit dans l'arbre
+d'intégration (`--battle <id> --root <worktree.path>` pour une battle en worktree, exigés ; refus si `--root` n'est pas
+ce worktree, le principal, un builder ou le worktree d'une autre battle) ; `cleanup` ne supprime jamais la branche de la battle.
 
 ---
 
@@ -252,7 +257,7 @@ PR mergée et la branche contenue dans `origin/<default>` (ou PR mergée avec `h
 local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`.
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
-`scripts/battle_state.py` (le pointeur et la déliaison des sessions à `close` / `abort` ; la liaison `.legion/sessions/<clé>.json` est écrite par le hook `hooks/session_bind.py` via `battle_state.bind_session`, sur chaque appel `init` / `activate` d'une commande enchaînée ; le garde-fou `guard.py` lit la sous-commande et `--battle` par le vrai parser, donc `--repo /x validate` reste une lecture) (sous-commandes `init`, `transition`, `approve-plan`,
+`scripts/battle_state.py` (le pointeur et la déliaison des sessions à `close` / `abort` ; la liaison `.legion/sessions/<clé>.json` est écrite par le hook `hooks/session_bind.py` via `battle_state.bind_session`, sur chaque appel `init` / `activate` d'une commande enchaînée ; le garde-fou `guard.py` lit la sous-commande et `--battle` par le vrai parser, donc `--repo /x validate` reste une lecture ; il couvre aussi `fan_in.py base|apply|cleanup` lancé sans `--battle` quand la session est liée à une autre battle que le pointeur, ou étrangère : exit 2, message qui nomme `--battle <id> --root <worktree.path>`. `align` et `--self-test` restent permis) (sous-commandes `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
 `set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, plus la lecture seule `session-status`). Sans `--repo`, le CLI part de la racine du dépôt contenant le cwd (`git rev-parse --show-toplevel`, GH#134), donc jamais d'un sous-dossier ; depuis un worktree lié, la racine d'état est le dépôt principal (battle active) ; `init` et `activate` visent toujours le dépôt principal ; `--repo` explicite prime. Les hooks gardent leur propre résolution, à partir du cwd brut. `build done` exige que toutes les
 slices déclarées (`set-slices`) soient `done` ; `set-slices --replace` remplace la liste
@@ -438,7 +443,7 @@ plugins/legion/
 │   ├── artifact_check.py        # delivery check d'artefact de gate §E (snapshot/verify métadonnées-seules) + empreinte de l'arbre (tree-snapshot/tree-verify, --self-test)
 │   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
-│   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`base` fige l'arbre principal, `align` aligne un worktree, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
+│   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`--battle <id>` / `--root <worktree.path>` : `base` fige l'arbre d'intégration, `align` aligne un worktree de builder, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
 │   ├── battle_worktree.py       # worktree dédié d'une battle : `create` / `where` / `close-check` / `close` (opérations locales, jamais `battle.json`, jamais le réseau) (--self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)

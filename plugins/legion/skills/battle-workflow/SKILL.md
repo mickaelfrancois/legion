@@ -106,11 +106,15 @@ Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiqu
   gates review. A parallel (isolated) builder writes no report file: it returns its report in
   its final message and the orchestrator writes `build-report-<slice_id>.md`; any refused write
   is reported in `write_failures`. A parallel builder works in its own worktree and does not commit there: the
-  orchestrator merges its delta back into the main tree (fan-in, `scripts/fan_in.py apply`,
+  orchestrator merges its delta back into the integration tree (fan-in, `scripts/fan_in.py apply`,
   then `cleanup` once the project verification is green); a slice is `done` only after that.
-  A parallel builder starts from the frozen main tree, not from `HEAD`: the orchestrator
+  The integration tree is `worktree.path` in worktree mode, the main checkout otherwise; every
+  `fan_in.py` call carries `--battle <id>`, and `base` / `apply` / `cleanup` also `--root
+  "<worktree>"` in worktree mode. The builders' worktrees sit under `<main>/.claude/worktrees/`.
+  A parallel builder starts from the frozen integration tree, not from `HEAD`: the orchestrator
   freezes it (`fan_in.py base`, uncommitted work included) and the builder aligns its worktree
-  on that `<base>` (`fan_in.py align`) before writing any code; `tree-verify --base` proves it.
+  on that `<base>` (`fan_in.py align --base <base> --battle <id>`) before writing any code;
+  `tree-verify --base` proves it.
 - **Gates** — `architect`, `lint`, `reviewer`, `test-engineer`, `security`
   (+ `pr-triage`). They *judge* a deliverable. **Read-only on the code**, but each **writes its own
   single artifact** (`plan.md` / `gate-*.md` / `pr-feedback.md`) and returns only its
@@ -348,7 +352,9 @@ optionnel `worktree {path, branch, base, created_at}` (absent ou `null` = en pla
 contenue dans `origin/<default>` (ascendance, ou PR mergée et `head_oid` == tip local, pour le
 squash/rebase), que le worktree est propre, puis supprime worktree et branche locale
 (`battle_worktree.py close-check` / `close`, jamais `--force`). Un `build all --auto` en mode
-worktree passe en builders séquentiels (`fan_in.py` refuse tout arbre autre que le principal).
+worktree lance le lot parallèle : `fan_in.py base|apply|cleanup` portent `--battle <id> --root
+<worktree.path>` (l'arbre d'intégration est le worktree de la battle) et les builders vivent sous
+`<principal>/.claude/worktrees/agent-*`, à côté du worktree de la battle (refusé comme worktree de builder).
 **`run.mode` est lu et respecté au resume** : une battle `step` ne s'emballe pas,
 une battle `autonomous` ré-enchaîne depuis la phase pending. Un champ `run` absent
 (battle antérieure à la feature) → comportement `autonomous` par défaut.

@@ -1,14 +1,24 @@
 """Fan-in d'un lot parallèle legion (`/battle build --auto`, GH#72), version exécutable.
 
 En mode parallèle, chaque builder travaille dans un worktree git isolé. Une fois le lot
-vérifié, l'orchestrateur doit **réintégrer** les deltas dans l'arbre principal. Ce script est le
+vérifié, l'orchestrateur doit **réintégrer** les deltas dans l'**arbre d'intégration** : le dépôt principal, ou, pour une battle en
+mode worktree, son `worktree.path` (`--root`). Ce script est le
 **seul** qui écrit dans l'arbre de code (`battle_state.py` écrit `battle.json`, `artifact_check.py`
 vérifie) ; il n'écrit jamais `battle.json` ni rien sous `.legion/`.
 
+Contexte explicite (GH#157) : `--battle <id>` lit cette battle au lieu du pointeur ; `--root <wt>`
+désigne l'arbre d'intégration. Une battle en worktree exige les deux, et `--root` doit être son
+`worktree.path` (enregistré, non `prunable`, propriétaire = la battle) ; sans bloc `worktree`,
+`--root` est absent ou égal au principal. `--root` sans `--battle` : erreur d'usage. Le cwd est le
+principal ou `--root`. Les worktrees de builders restent sous `<principal>/.claude/worktrees/` ;
+l'arbre d'intégration et le worktree d'une battle (vivante ou close) sont refusés comme builder.
+`base`, `apply` et `cleanup` lisent et écrivent dans `root` (`git worktree remove` part du
+principal ; la branche de l'arbre d'intégration n'est jamais supprimée).
+
 Sous-commande `apply` (fail-closed, tout-ou-rien) :
 
-1. **Contexte** : le cwd est la racine du dépôt principal ; la battle active existe ; son guard est
-   valide et **armé** (`allow` non vide) ; `--base` est un commit existant ; chaque `--slice` est
+1. **Contexte** : le cwd est la racine du dépôt principal (ou de l'arbre d'intégration) ; la battle
+   existe (pointeur actif, ou `--battle <id>` vivante) ; son guard est valide et **armé** (`allow` non vide) ; `--base` est un commit existant ; chaque `--slice` est
    déclarée, au statut `in_progress`, sans doublon ; chaque worktree est enregistré, sous
    `<principal>/.claude/worktrees/`, sans lien symbolique, non `prunable`, non partagé, et son
    HEAD descend de `--base`. Le traitement suit l'ordre de `battle.json.slices`.
@@ -43,13 +53,16 @@ Sous-commande `align --base <sha>` (première action d'un builder, depuis la rac
 worktree) : avance le worktree sur `<base>` par `git reset --keep` (la branche du harnais est
 conservée, avancée). Sans effet si le HEAD descend déjà de `<base>`. Refus (fail-closed) si le
 contexte n'est pas un worktree enregistré sous `<principal>/.claude/worktrees/`, si `<base>` est
-inconnu, si le HEAD n'est pas un ancêtre de `<base>` ou si le worktree n'est pas propre.
+inconnu, si le HEAD n'est ni un ancêtre de `<base>` ni (builder coupé depuis un principal qui a avancé,
+sortie `origin:"main_head"`, réservée aux worktrees détachés ou sur une branche `worktree-agent-*`)
+un ancêtre du HEAD du principal, si le worktree n'est pas propre ou
+s'il est celui d'une battle. `--battle <id>` (optionnel) est validé, sans autre effet.
 
 Usage :
-    python fan_in.py base
-    python fan_in.py align --base <sha>
-    python fan_in.py apply --base <sha> --slice <id> <worktree> [--slice <id> <worktree> ...]
-    python fan_in.py cleanup --base <sha> --slice <id> <worktree> [--slice <id> <worktree> ...]
+    python fan_in.py base    [--battle <id> [--root <wt>]]
+    python fan_in.py align   --base <sha> [--battle <id>]
+    python fan_in.py apply   --base <sha> [--battle <id> [--root <wt>]] --slice <id> <worktree> [...]
+    python fan_in.py cleanup --base <sha> [--battle <id> [--root <wt>]] --slice <id> <worktree> [...]
     python fan_in.py --self-test
 
 Sortie : un objet JSON sur stdout
@@ -58,11 +71,12 @@ Sortie : un objet JSON sur stdout
                  out_of_scope_count, applied:[] }
     conflit -> { ok:false, conflict:{slice, kind, files<=50}, reason, applied:[] }
     faute   -> { ok:false, fault:true, reason, applied:[] }
-base    -> { ok:true, base, head, frozen:<bool>, files:<n> } ; refus -> { ok:false, refused:true, reason }
-align   -> { ok:true, aligned:<bool>, head } ; refus -> { ok:false, refused:true, reason }
+base    -> { ok:true, base, head, frozen:<bool>, files:<n>, root } ; refus -> { ok:false, refused:true, reason }
+align   -> { ok:true, aligned:<bool>, head, origin?:"base"|"main_head" } ; refus -> { ok:false, refused:true, reason }
 cleanup -> { ok:bool, removed:[{slice, worktree, branch, branch_kept?}], kept:[{slice, worktree,
                  reason}] } ; `ok` = `kept` vide ; refus d'entrée -> { ok:false, refused:true, reason,
                  removed:[], kept:[] }
+`apply` et `cleanup` ajoutent `root` en cas de succès (information).
 `applied[].files` n'est jamais tronqué : c'est la source fiable de `slice done --files`.
 Codes de sortie : 0 = ok ; 2 = conflit, refus ou faute (`ok:false`) ; 1 = erreur d'usage.
 Limite assumée : `git apply` valide tout avant d'écrire ; seule une erreur d'E/S pendant
@@ -153,32 +167,92 @@ def _wt_entries(main: str) -> list[dict]:
 
 # --- contexte et entrées -------------------------------------------------------------------
 
-def _context(cwd: str) -> tuple[str, list[dict], dict]:
-    """`(main, slices, guard)` ; `_Refuse` si le contexte n'est pas sûr (fail-closed)."""
+class _Ctx:
+    """Contexte résolu d'une commande : `main` (dépôt principal, lieu de l'état `.legion/`), `root`
+    (arbre d'intégration : `worktree.path` en mode worktree, sinon `main`), la battle, ses slices,
+    son guard et la branche extraite par `root`."""
+    __slots__ = ("main", "state", "root", "battle_id", "slices", "guard", "branch")
+
+    def __init__(self, main: str, root: str, battle_id: str, slices: list[dict], guard: dict,
+                 branch: str | None) -> None:
+        self.main, self.state, self.root = main, main, root
+        self.battle_id, self.slices, self.guard, self.branch = battle_id, slices, guard, branch
+
+
+def _integration_root(main: str, battle_id: str, data: dict, battle: str | None,
+                      root: str | None) -> str:
+    """Arbre d'intégration de la battle, validé ; `_Refuse` sinon."""
+    wt = data.get("worktree")
+    if wt is None:
+        if root is None or os.path.realpath(root) == main:
+            return main
+        raise _Refuse("battle sans worktree : --root doit être le dépôt principal (ou absent)")
+    if not isinstance(wt, dict):
+        raise _Refuse("bloc `worktree` invalide (fail-closed)")
+    if battle is None or root is None:
+        raise _Refuse(f"battle en worktree : `--battle {battle_id} --root <worktree.path>` obligatoires")
+    wt_path = wt.get("path")
+    if not isinstance(wt_path, str) or not wt_path:
+        raise _Refuse("`worktree.path` absent ou invalide (fail-closed)")
+    real = os.path.realpath(root)
+    if real != os.path.realpath(wt_path):
+        raise _Refuse("--root diffère de `worktree.path` de la battle")
+    if not os.path.isdir(real) or ac._toplevel(real) != real:
+        raise _Refuse("--root n'est pas la racine d'un worktree git")
+    entry = next((e for e in _wt_entries(main) if e["path"] == real), None)
+    if entry is None or entry["prunable"]:
+        raise _Refuse("--root n'est pas un worktree enregistré (ou prunable)")
+    owner = bs.worktree_battle_of(main, real)
+    if owner is None or owner[0] != battle_id:
+        raise _Refuse(f"--root n'est pas le worktree de la battle {battle_id}")
+    return real
+
+
+def _context(cwd: str, battle: str | None = None, root: str | None = None) -> _Ctx:
+    """Contexte de la commande ; `_Refuse` si il n'est pas sûr (fail-closed).
+
+    `battle` (`--battle`) lit cette battle au lieu du pointeur ; `root` (`--root`) désigne l'arbre
+    d'intégration (obligatoire pour une battle en worktree). Le cwd est `main` ou `root`."""
+    if battle is not None and not bs._ID_RE.fullmatch(battle):
+        raise _Refuse(f"--battle : identifiant invalide ({battle!r})")
+    if root is not None and battle is None:
+        raise _Refuse("--root exige --battle")
     top = ac._toplevel(cwd)
-    main_root = os.path.realpath(str(bs.main_repo_root(Path(cwd))))
-    if top != main_root or os.path.realpath(cwd) != top:
-        raise _Refuse("à lancer depuis la racine du dépôt principal (pas un worktree ni un sous-dossier)")
-    active = bs.load_active_battle(bs.resolve_state_root(Path(cwd)))
-    if active is None:
-        raise _Refuse("aucune battle active lisible (fail-closed)")
-    battle = active[1]
-    guard, valid = bs.guard_of(battle)
+    main = os.path.realpath(str(bs.main_repo_root(Path(cwd))))
+    if battle is None:
+        active = bs.load_active_battle(Path(main))
+        if active is None:
+            raise _Refuse("aucune battle active lisible (fail-closed)")
+        battle_id, data = active
+    else:
+        data = bs._live_data(Path(main), battle)
+        if data is None:
+            raise _Refuse(f"battle {battle} illisible, close ou abandonnée (fail-closed)")
+        battle_id = battle
+    real_root = _integration_root(main, battle_id, data, battle, root)
+    if os.path.realpath(cwd) != top or top not in (main, real_root):
+        raise _Refuse("à lancer depuis la racine du dépôt principal ou de l'arbre d'intégration "
+                      "(pas un autre worktree ni un sous-dossier)")
+    guard, valid = bs.guard_of(data)
     if not valid:
         raise _Refuse("bloc `guard` invalide (fail-closed)")
     allow = guard.get("allow") or []
     if not allow:
         raise _Refuse("guard non armé (`guard.allow` vide) : le fan-in exige un périmètre")
-    slices = battle.get("slices")
+    slices = data.get("slices")
     if not isinstance(slices, list) or not all(isinstance(s, dict) for s in slices):
         raise _Refuse("`battle.json.slices` absent ou invalide")
-    return top, slices, {"allow": allow, "deny": guard.get("deny") or []}
+    entry = next((e for e in _wt_entries(main) if e["path"] == real_root), None)
+    return _Ctx(main, real_root, battle_id, slices,
+                {"allow": allow, "deny": guard.get("deny") or []}, entry["branch"] if entry else None)
 
 
-def _validate_inputs(main: str, base: str, pairs: list[tuple[str, str]], slices: list[dict],
+def _validate_inputs(ctx: _Ctx, base: str, pairs: list[tuple[str, str]],
                      expected_status: str) -> list[tuple[str, str]]:
     """Valide `--base` et les paires `(slice, worktree)` ; rend `[(slice, wt_réel)]` dans l'ordre
-    de `battle.json.slices`."""
+    de `battle.json.slices`. Les worktrees de builders vivent sous `<main>/.claude/worktrees/` ;
+    l'arbre d'intégration et les worktrees des battles (vivantes ou closes) sont refusés."""
+    main, slices = ctx.main, ctx.slices
     if not ac._COMMIT_RE.fullmatch(base):
         raise _Refuse("--base n'est pas un sha hexadécimal complet")
     rc, _, _ = _run(main, "cat-file", "-e", f"{base}^{{commit}}")
@@ -189,6 +263,7 @@ def _validate_inputs(main: str, base: str, pairs: list[tuple[str, str]], slices:
     seen_wt: set[str] = set()
     entries = {e["path"]: e for e in _wt_entries(main)}
     wt_root = os.path.join(main, ".claude", "worktrees") + os.sep
+    battle_wts = ac._other_battles(ctx.state, ctx.battle_id).paths | {ctx.root}
     by_id: dict[str, str] = {}
     for sid, wt in pairs:
         if not bs._ID_RE.fullmatch(sid):
@@ -208,6 +283,10 @@ def _validate_inputs(main: str, base: str, pairs: list[tuple[str, str]], slices:
             raise _Refuse(f"worktree de {sid} : lien symbolique dans le chemin")
         if real == main:
             raise _Refuse(f"worktree de {sid} = dépôt principal")
+        if real == ctx.root:
+            raise _Refuse(f"worktree de {sid} = arbre d'intégration de la battle")
+        if real in battle_wts:
+            raise _Refuse(f"worktree de {sid} = worktree d'une battle")
         if not real.startswith(wt_root):
             raise _Refuse(f"worktree de {sid} hors de .claude/worktrees/")
         entry = entries.get(real)
@@ -356,15 +435,17 @@ def _fail(**kw) -> dict:
     return {"ok": False, "applied": [], **kw}
 
 
-def apply_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
-    """Cœur de `apply` ; ne lève jamais : toute faute devient un objet `ok:false`."""
+def apply_batch(cwd: str, base: str, pairs: list[tuple[str, str]], battle: str | None = None,
+                root: str | None = None) -> dict:
+    """Cœur de `apply` ; ne lève jamais : toute faute devient un objet `ok:false`. Lit, contrôle
+    et écrit dans l'arbre d'intégration (`root`)."""
     try:
-        main, slices, guard = _context(cwd)
-        ordered = _validate_inputs(main, base, pairs, slices, "in_progress")
-        deltas = [(sid, wt, _delta(main, wt, base)) for sid, wt in ordered]
-        _scope_check(deltas, guard)
-        _conflict_check(main, base, deltas)
-        _write_batch(main, deltas)
+        ctx = _context(cwd, battle, root)
+        ordered = _validate_inputs(ctx, base, pairs, "in_progress")
+        deltas = [(sid, wt, _delta(ctx.main, wt, base)) for sid, wt in ordered]
+        _scope_check(deltas, ctx.guard)
+        _conflict_check(ctx.root, base, deltas)
+        _write_batch(ctx.root, deltas)
     except _OutOfScope as exc:
         return _fail(refused=True, reason="chemins hors périmètre ou interdits",
                      out_of_scope=exc.items[:_MAX_LIST], out_of_scope_count=len(exc.items))
@@ -378,7 +459,7 @@ def apply_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
     applied = [{"slice": sid, "worktree": wt, "committed": d["committed"],
                 "files": [{"status": e["status"], "path": e["path"]} for e in d["entries"]]}
                for sid, wt, d in deltas]
-    return {"ok": True, "applied": applied}
+    return {"ok": True, "applied": applied, "root": ctx.root}
 
 
 # --- commande cleanup ----------------------------------------------------------------------
@@ -425,8 +506,10 @@ def _prove_in_main(main: str, d: dict) -> list[str]:
     return missing
 
 
-def _remove_one(main: str, sid: str, wt: str, entries: list[dict]) -> tuple[dict | None, str | None]:
-    """Retire le worktree et, sous conditions, sa branche. `(removed, None)` ou `(None, raison)`."""
+def _remove_one(main: str, root: str, sid: str, wt: str,
+                entries: list[dict]) -> tuple[dict | None, str | None]:
+    """Retire le worktree et, sous conditions, sa branche (jamais celle de l'arbre d'intégration
+    `root`). `(removed, None)` ou `(None, raison)`."""
     me = next((e for e in entries if e["path"] == wt), None)
     if me is None:
         return None, "worktree introuvable dans git worktree list"
@@ -441,8 +524,11 @@ def _remove_one(main: str, sid: str, wt: str, entries: list[dict]) -> tuple[dict
         return out, None
     short = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
     main_branch = next((e["branch"] for e in entries if e["path"] == main), None)
+    root_branch = next((e["branch"] for e in entries if e["path"] == root), None)
     if branch == main_branch:
         out["branch_kept"] = "branche courante du principal"
+    elif branch == root_branch:
+        out["branch_kept"] = "branche de l'arbre d'intégration (battle)"
     elif any(e["path"] != wt and e["branch"] == branch for e in entries):
         out["branch_kept"] = "branche extraite dans un autre worktree"
     else:
@@ -454,17 +540,22 @@ def _remove_one(main: str, sid: str, wt: str, entries: list[dict]) -> tuple[dict
     return out, None
 
 
-def cleanup_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
-    """Cœur de `cleanup` ; ne lève jamais. `ok` vaut vrai si aucun worktree n'est conservé."""
+def cleanup_batch(cwd: str, base: str, pairs: list[tuple[str, str]], battle: str | None = None,
+                  root: str | None = None) -> dict:
+    """Cœur de `cleanup` ; ne lève jamais. `ok` vaut vrai si aucun worktree n'est conservé. La
+    preuve se fait contre l'arbre d'intégration (`root`)."""
     removed: list[dict] = []
     kept: list[dict] = []
+    ctx_root: str | None = None
     try:
-        main, slices, _guard = _context(cwd)
-        ordered = _validate_inputs(main, base, pairs, slices, "done")
+        ctx = _context(cwd, battle, root)
+        ctx_root = ctx.root
+        main = ctx.main
+        ordered = _validate_inputs(ctx, base, pairs, "done")
         entries = _wt_entries(main)                   # instantané : les branches se jugent avant tout retrait
         for sid, wt in ordered:
             try:
-                missing = _prove_in_main(main, _delta(main, wt, base))
+                missing = _prove_in_main(ctx.root, _delta(main, wt, base))
             except _Refuse as exc:
                 kept.append({"slice": sid, "worktree": wt, "reason": f"preuve impossible : {exc}"})
                 continue
@@ -472,7 +563,7 @@ def cleanup_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
                 kept.append({"slice": sid, "worktree": wt,
                              "reason": f"delta absent du principal : {', '.join(missing[:3])}"})
                 continue
-            done, why = _remove_one(main, sid, wt, entries)
+            done, why = _remove_one(main, ctx.root, sid, wt, entries)
             if done is None:
                 kept.append({"slice": sid, "worktree": wt, "reason": why})
             else:
@@ -482,7 +573,7 @@ def cleanup_batch(cwd: str, base: str, pairs: list[tuple[str, str]]) -> dict:
     except Exception as exc:  # noqa: BLE001 - contrat : jamais d'exception non rattrapée
         return {"ok": False, "fault": True, "reason": f"{type(exc).__name__}: {exc}",
                 "removed": removed[:_MAX_LIST], "kept": kept[:_MAX_LIST]}
-    return {"ok": not kept, "removed": removed[:_MAX_LIST], "kept": kept[:_MAX_LIST]}
+    return {"ok": not kept, "removed": removed[:_MAX_LIST], "kept": kept[:_MAX_LIST], "root": ctx_root}
 
 
 # --- commandes base et align ---------------------------------------------------------------
@@ -506,10 +597,12 @@ def _diff_entries(root: str, a: str, b: str) -> list[tuple[str, str, str]]:
     return out
 
 
-def base_batch(cwd: str) -> dict:
-    """Cœur de `base` ; ne lève jamais : toute faute devient un objet `ok:false`."""
+def base_batch(cwd: str, battle: str | None = None, root: str | None = None) -> dict:
+    """Cœur de `base` ; ne lève jamais : toute faute devient un objet `ok:false`. Fige l'arbre
+    d'intégration (`root`)."""
     try:
-        main, _slices, _guard = _context(cwd)
+        ctx = _context(cwd, battle, root)
+        main = ctx.root
         head = ac._git(main, "rev-parse", "HEAD").decode().strip()
         head_tree = ac._git(main, "rev-parse", "HEAD^{tree}").decode().strip()
         with tempfile.TemporaryDirectory() as td:
@@ -533,20 +626,21 @@ def base_batch(cwd: str) -> dict:
             if ac._is_legion(path):
                 raise _Refuse(f"chemin .legion/ dans l'arbre figé : {path}")
         if tree == head_tree:
-            return {"ok": True, "base": head, "head": head, "frozen": False, "files": 0}
+            return {"ok": True, "base": head, "head": head, "frozen": False, "files": 0, "root": main}
         base = ac._git(main, *_BASE_IDENT, "commit-tree", tree, "-p", head, "-m",
                        "legion: base du lot").decode().strip()
         if not ac._COMMIT_RE.fullmatch(base):
             raise _Refuse("commit-tree n'a pas rendu de sha")
-        return {"ok": True, "base": base, "head": head, "frozen": True, "files": len(entries)}
+        return {"ok": True, "base": base, "head": head, "frozen": True, "files": len(entries),
+                "root": main}
     except _Refuse as exc:
         return {"ok": False, "refused": True, "reason": str(exc)}
     except Exception as exc:  # noqa: BLE001 - contrat : jamais d'exception non rattrapée
         return {"ok": False, "fault": True, "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def _align_context(cwd: str, base: str) -> str:
-    """Racine réelle du worktree du builder ; `_Refuse` si le contexte n'est pas sûr."""
+def _align_context(cwd: str, base: str, battle: str | None = None) -> tuple[str, str]:
+    """`(worktree du builder, principal)` en chemins réels ; `_Refuse` si le contexte n'est pas sûr."""
     top = ac._toplevel(cwd)
     if os.path.realpath(cwd) != top:
         raise _Refuse("à lancer depuis la racine du worktree du builder (pas un sous-dossier)")
@@ -557,6 +651,13 @@ def _align_context(cwd: str, base: str) -> str:
         raise _Refuse("worktree hors de .claude/worktrees/")
     if os.path.normcase(os.path.abspath(cwd)) != os.path.normcase(top) or ac._has_symlink_between(main, top):
         raise _Refuse("lien symbolique dans le chemin du worktree")
+    if bs.worktree_battle_of(main, top) is not None or top in ac._other_battles(main, "").paths:
+        raise _Refuse("worktree d'une battle : `align` est réservé aux worktrees de builders")
+    if battle is not None:
+        if not bs._ID_RE.fullmatch(battle):
+            raise _Refuse(f"--battle : identifiant invalide ({battle!r})")
+        if bs._live_data(Path(main), battle) is None:
+            raise _Refuse(f"battle {battle} illisible, close ou abandonnée (fail-closed)")
     entry = next((e for e in _wt_entries(main) if e["path"] == top), None)
     if entry is None:
         raise _Refuse("worktree non enregistré par git")
@@ -567,27 +668,43 @@ def _align_context(cwd: str, base: str) -> str:
     rc, _, _ = _run(top, "cat-file", "-e", f"{base}^{{commit}}")
     if rc != 0:
         raise _Refuse(f"--base {base[:12]} ne désigne aucun commit existant")
-    return top
+    return top, main
 
 
-def align_worktree(cwd: str, base: str) -> dict:
-    """Cœur de `align` ; ne lève jamais : toute faute devient un objet `ok:false`."""
+def align_worktree(cwd: str, base: str, battle: str | None = None) -> dict:
+    """Cœur de `align` ; ne lève jamais : toute faute devient un objet `ok:false`.
+
+    Origine acceptée du HEAD : ancêtre de `<base>` (`origin:"base"`), ou, worktree propre, ancêtre
+    du HEAD du principal (`origin:"main_head"`, builder coupé depuis un principal qui a avancé
+    depuis `create` : rien n'est perdu, ses commits restent dans l'histoire du principal). Cette
+    seconde origine exige un worktree de harnais : HEAD détaché ou branche `worktree-agent-*`."""
     try:
-        top = _align_context(cwd, base)
+        top, main = _align_context(cwd, base, battle)
         head = ac._git(top, "rev-parse", "HEAD").decode().strip()
         rc, _, _ = _run(top, "merge-base", "--is-ancestor", base, "HEAD")
         if rc == 0:
             return {"ok": True, "aligned": False, "head": head}
         rc, _, _ = _run(top, "merge-base", "--is-ancestor", "HEAD", base)
+        origin = "base"
         if rc != 0:
-            raise _Refuse("le HEAD du worktree n'est pas un ancêtre de --base (alignement refusé)")
+            entry = next((e for e in _wt_entries(main) if e["path"] == top), None)
+            branch = (entry or {}).get("branch") or ""
+            if not ((entry or {}).get("detached") or branch.startswith("refs/heads/worktree-agent-")):
+                raise _Refuse("le HEAD du worktree n'est pas un ancêtre de --base, et sa branche "
+                              "n'est pas une branche de harnais (worktree-agent-*) : alignement refusé")
+            main_head = ac._git(main, "rev-parse", "HEAD").decode().strip()
+            rc, _, _ = _run(top, "merge-base", "--is-ancestor", "HEAD", main_head)
+            if rc != 0:
+                raise _Refuse("le HEAD du worktree n'est pas un ancêtre de --base ni du HEAD du "
+                              "principal (alignement refusé)")
+            origin = "main_head"
         if ac._git(top, "status", "--porcelain", "-uall").strip():
             raise _Refuse("worktree non propre : alignement refusé (aucun travail n'est écrasé)")
         ac._git(top, "reset", "--keep", base)
         now = ac._git(top, "rev-parse", "HEAD").decode().strip()
         if now != base or ac._git(top, "status", "--porcelain", "-uall").strip():
             raise _Refuse("alignement non vérifié (HEAD différent de --base ou statut non vide)")
-        return {"ok": True, "aligned": True, "head": now}
+        return {"ok": True, "aligned": True, "head": now, "origin": origin}
     except _Refuse as exc:
         return {"ok": False, "refused": True, "reason": str(exc)}
     except Exception as exc:  # noqa: BLE001 - contrat : jamais d'exception non rattrapée
@@ -601,30 +718,46 @@ def _usage(msg: str) -> int:
     return 1
 
 
-def _parse_batch(rest: list[str]) -> tuple[str, list[tuple[str, str]]] | str:
-    """`(base, [(slice, worktree)])` ou un message d'usage."""
-    base: str | None = None
-    pairs: list[tuple[str, str]] = []
+def _parse_opts(rest: list[str], allowed: tuple[str, ...], pairs_ok: bool = False) -> dict | str:
+    """Options `--x <valeur>` (ordre libre, chacune au plus une fois) parmi `allowed`, plus les
+    `--slice <id> <worktree>` si `pairs_ok`. `{opt: valeur, "pairs": [...]}` ou un message d'usage.
+    `--battle` est validé par `_ID_RE` ; `--root` exige `--battle`."""
+    out: dict = {"pairs": []}
     i = 0
     while i < len(rest):
         a = rest[i]
-        if a == "--base":
-            if i + 1 >= len(rest):
-                return "--base attend une valeur"
-            base = rest[i + 1]
+        if a in allowed:
+            if a in out:
+                return f"{a} donné deux fois"
+            if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+                return f"{a} attend une valeur"
+            out[a] = rest[i + 1]
             i += 2
-        elif a == "--slice":
+        elif pairs_ok and a == "--slice":
             if i + 2 >= len(rest) or rest[i + 1].startswith("--") or rest[i + 2].startswith("--"):
                 return "--slice attend <id> <worktree>"
-            pairs.append((rest[i + 1], rest[i + 2]))
+            out["pairs"].append((rest[i + 1], rest[i + 2]))
             i += 3
         else:
             return f"argument inattendu : {a}"
+    if "--battle" in out and not bs._ID_RE.fullmatch(out["--battle"]):
+        return f"--battle : identifiant invalide ({out['--battle']!r})"
+    if "--root" in out and "--battle" not in out:
+        return "--root exige --battle"
+    return out
+
+
+def _parse_batch(rest: list[str]) -> tuple[str, list[tuple[str, str]], str | None, str | None] | str:
+    """`(base, [(slice, worktree)], battle, root)` ou un message d'usage."""
+    opts = _parse_opts(rest, ("--base", "--battle", "--root"), pairs_ok=True)
+    if isinstance(opts, str):
+        return opts
+    base = opts.get("--base")
     if base is None or not ac._COMMIT_RE.fullmatch(base):
         return "--base <sha hexadécimal complet> obligatoire"
-    if not pairs:
+    if not opts["pairs"]:
         return "au moins un --slice <id> <worktree> est obligatoire"
-    return base, pairs
+    return base, opts["pairs"], opts.get("--battle"), opts.get("--root")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -632,22 +765,29 @@ def main(argv: list[str] | None = None) -> int:
     if "--self-test" in args:
         return _self_test()
     if args and args[0] == "base":
-        if len(args) != 1:
-            return _usage("base n'attend aucun argument")
-        res = base_batch(os.getcwd())
+        opts = _parse_opts(args[1:], ("--battle", "--root"))
+        if isinstance(opts, str):
+            return _usage("base [--battle <id> [--root <worktree>]] : " + opts)
+        res = base_batch(os.getcwd(), opts.get("--battle"), opts.get("--root"))
         print(json.dumps(res, ensure_ascii=False))
         return 0 if res["ok"] else 2
     if args and args[0] == "align":
-        if len(args) != 3 or args[1] != "--base" or not ac._COMMIT_RE.fullmatch(args[2]):
-            return _usage("align --base <sha hexadécimal complet>")
-        res = align_worktree(os.getcwd(), args[2])
+        opts = _parse_opts(args[1:], ("--base", "--battle"))
+        if isinstance(opts, str) or "--root" in opts:
+            return _usage("align --base <sha hexadécimal complet> [--battle <id>]"
+                          + (f" : {opts}" if isinstance(opts, str) else ""))
+        base = opts.get("--base")
+        if base is None or not ac._COMMIT_RE.fullmatch(base):
+            return _usage("align --base <sha hexadécimal complet> [--battle <id>]")
+        res = align_worktree(os.getcwd(), base, opts.get("--battle"))
         print(json.dumps(res, ensure_ascii=False))
         return 0 if res["ok"] else 2
     if not args or args[0] not in ("apply", "cleanup"):
         return _usage("sous-commande attendue : base | align | apply | cleanup | --self-test")
     parsed = _parse_batch(args[1:])
     if isinstance(parsed, str):
-        return _usage(f"{args[0]} --base <sha> --slice <id> <worktree> [...] : " + parsed)
+        return _usage(f"{args[0]} --base <sha> [--battle <id> [--root <worktree>]] --slice <id> "
+                      f"<worktree> [...] : " + parsed)
     res = (apply_batch if args[0] == "apply" else cleanup_batch)(os.getcwd(), *parsed)
     print(json.dumps(res, ensure_ascii=False))
     return 0 if res["ok"] else 2
@@ -1341,6 +1481,442 @@ def _t_e2_not_aligned() -> None:
     _with_fx("E2", body)
 
 
+class _WtFx(_Fx):
+    """`_Fx` plus une battle `A` en mode worktree (`<main>/.claude/worktrees/A` sur `me/A`) et deux
+    builders `agent-1` / `agent-2` coupés depuis le HEAD du principal. Le pointeur reste sur la
+    battle `B` (in-place) : `A` ne se lit que par `--battle A`."""
+
+    def __init__(self, base_dir: str, fx: tuple) -> None:
+        super().__init__(base_dir, fx)
+        self.wt_a = self.add_wt("A", "me/A", self.base)
+        self.a_path = os.path.join(self.main, ".legion", "battles", "A", "battle.json")
+        self.set_a()
+        self.a1 = self.add_wt("agent-1", "worktree-agent-1", "HEAD")
+        self.a2 = self.add_wt("agent-2", "worktree-agent-2", "HEAD")
+
+    def add_wt(self, name: str, branch: str, start: str) -> str:
+        path = os.path.join(self.main, ".claude", "worktrees", name)
+        self.git(self.main, "worktree", "add", "-q", "-b", branch, path, start)
+        return os.path.realpath(path)
+
+    def set_a(self, statuses=("in_progress", "in_progress"), aborted=None, worktree="default") -> None:
+        if worktree == "default":
+            worktree = {"path": self.wt_a, "branch": "me/A"}
+        body = {"id": "A", "guard": {"allow": ["src/**", "docs/**", "lib/**"], "deny": []},
+                "slices": [{"id": "slice-1", "status": statuses[0]},
+                           {"id": "slice-2", "status": statuses[1]}], "worktree": worktree}
+        if aborted:
+            body["aborted"] = aborted
+        os.makedirs(os.path.dirname(self.a_path), exist_ok=True)
+        with open(self.a_path, "w", encoding="utf-8") as fh:
+            json.dump(body, fh)
+
+    def other_battle(self, name: str) -> str:
+        """Battle `name` (conforme : worktree sous `.claude/worktrees/<name>`), vivante."""
+        path = self.add_wt(name, f"me/{name}", self.base)
+        bp = os.path.join(self.main, ".legion", "battles", name, "battle.json")
+        os.makedirs(os.path.dirname(bp), exist_ok=True)
+        with open(bp, "w", encoding="utf-8") as fh:
+            json.dump({"id": name, "worktree": {"path": path, "branch": f"me/{name}"}}, fh)
+        return path
+
+    def fi(self, cmd: str, *pairs: tuple[str, str], base: str | None = None, battle: str | None = "A",
+           root: str | None = "default", cwd: str | None = None) -> tuple[int, dict, str]:
+        args = [cmd]
+        if cmd != "base":
+            args += ["--base", base or self.base]
+        if battle is not None:
+            args += ["--battle", battle]
+        if root is not None and cmd != "align":
+            args += ["--root", self.wt_a if root == "default" else root]
+        for sid, wt in pairs:
+            args += ["--slice", sid, wt]
+        return self.run(*args, cwd=cwd)
+
+    def main_state(self) -> tuple:
+        return (self.git(self.main, "rev-parse", "HEAD"), self.git(self.main, "ls-files", "-s"),
+                self.git(self.main, "status", "--porcelain", "-uall"),
+                self.git(self.main, "for-each-ref"))
+
+    def pair(self) -> tuple[tuple[str, str], tuple[str, str]]:
+        return ("slice-1", self.a1), ("slice-2", self.a2)
+
+
+def _with_wt_fx(name: str, body) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        wfx = None
+        try:
+            raw = bs._git_worktree_fixture(Path(os.path.realpath(tmp)))
+            wfx = _WtFx(tmp, raw) if raw is not None else None
+        except (OSError, subprocess.SubprocessError, AssertionError):
+            wfx = None
+        if wfx is None:
+            print(f"SKIP: {name} (git absent ou inutilisable)", file=sys.stderr)
+            return
+        body(wfx, tmp)
+
+
+def _t_w1_worktree_flow() -> None:                                   # W1 W2 W3 W4
+    def body(fx: _WtFx, tmp: str) -> None:
+        fx.write(fx.wt_a, "src/found.txt", "found\n")                # fondation non commitée dans wtA
+        before = fx.main_state()
+        rc, out, _ = fx.fi("base")
+        assert rc == 0 and out["frozen"] is True and out["root"] == fx.wt_a, (rc, out)
+        base = out["base"]
+        assert fx.git(fx.main, "rev-parse", f"{base}^") == fx.git(fx.wt_a, "rev-parse", "HEAD")
+        assert fx.main_state() == before                                # le principal est intact
+        for wt in (fx.a1, fx.a2):
+            rc, out, _ = fx.fi("align", base=base, root=None, cwd=wt)
+            assert rc == 0 and out["aligned"] is True and out["head"] == base, (rc, out)
+        fx.write(fx.a1, "src/n.txt", "new\n")
+        fx.write(fx.a2, "docs/u2.txt", "u2\n")
+        fx.write(fx.a2, "lib/y.txt", "y\n")                           # W4 : dans l'allow de A, pas de B
+        rc, out, _ = fx.fi("apply", *fx.pair(), base=base)
+        assert rc == 0 and out["ok"] is True and out["root"] == fx.wt_a, (rc, out)
+        assert fx.read(fx.wt_a, "src/n.txt") == b"new\n" and fx.read(fx.wt_a, "lib/y.txt") == b"y\n"
+        assert fx.read(fx.wt_a, "src/found.txt") == b"found\n"
+        assert fx.read(fx.main, "src/n.txt") is None
+        assert fx.main_state()[:3] == before[:3]                        # HEAD, index, status du principal
+        fx.set_a(statuses=("done", "done"))
+        rc, out, _ = fx.fi("cleanup", *fx.pair(), base=base)
+        assert rc == 0 and out["ok"] is True and len(out["removed"]) == 2, (rc, out)
+        assert {r["branch"] for r in out["removed"]} == {"worktree-agent-1", "worktree-agent-2"}, out
+        assert "me/A" in fx.branches() and not any(b.startswith("worktree-agent") for b in fx.branches())
+        assert fx.wt_a in fx.worktrees() and fx.a1 not in fx.worktrees()
+        assert fx.main_state()[:3] == before[:3]                        # refs : seules les branches builders partent
+    _with_wt_fx("W1", body)
+
+
+def _t_w5_root_refusals() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        for root in (fx.main, fx.a1, os.path.join(fx.wt_a, "src"), os.path.join(tmp, "absent")):
+            rc, out, _ = fx.fi("apply", ("slice-1", fx.a1), root=root)
+            assert rc == 2 and out["refused"] is True, (root, rc, out)
+            rc, out, _ = fx.fi("base", root=root)
+            assert rc == 2 and out["refused"] is True, (root, rc, out)
+    _with_wt_fx("W5", body)
+
+
+def _t_w6_worktree_battle_needs_root() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        rc, out, _ = fx.fi("apply", ("slice-1", fx.a1), root=None)
+        assert rc == 2 and out["refused"] is True and "--root" in out["reason"], (rc, out)
+        bs._write_pointer(Path(fx.main), "A")                          # mode pointeur, battle en worktree
+        rc, out, _ = fx.fi("apply", ("slice-1", fx.a1), battle=None, root=None)
+        assert rc == 2 and out["refused"] is True and "--root" in out["reason"], (rc, out)
+        rc, out, _ = fx.fi("base", battle=None, root=None)
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        bs._write_pointer(Path(fx.main), "B")
+    _with_wt_fx("W6", body)
+
+
+def _t_w7_usage() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        for a in (["base", "--root", fx.wt_a], ["base", "--battle", "../x"], ["base", "--battle"],
+                  ["base", "--battle", "A", "--battle", "A"], ["align", "--base", fx.base, "--root", "x"],
+                  ["apply", "--base", fx.base, "--root", fx.wt_a, "--slice", "slice-1", fx.a1],
+                  ["apply", "--base", fx.base, "--battle", "a b", "--slice", "slice-1", fx.a1]):
+            rc, out, err = fx.run(*a)
+            assert rc == 1 and err.strip() and out == {}, (a, rc, err)
+    _with_wt_fx("W7", body)
+
+
+def _t_w8_battle_unusable() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        rc, out, _ = fx.fi("base", battle="Z", root=fx.wt_a)               # inconnue
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        fx.set_a(aborted={"reason": "x"})                                  # abandonnée
+        rc, out, _ = fx.fi("base")
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        rc, out, _ = fx.fi("align", base=fx.base, root=None, cwd=fx.a1)
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        with open(fx.a_path, "w", encoding="utf-8") as fh:                 # illisible
+            fh.write("{oops")
+        rc, out, _ = fx.fi("base")
+        assert rc == 2 and out["refused"] is True, (rc, out)
+    _with_wt_fx("W8", body)
+
+
+def _t_w9_battle_worktrees_refused() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        wt_c = fx.other_battle("C")
+        for wt in (fx.wt_a, wt_c):
+            rc, out, _ = fx.fi("apply", ("slice-1", wt))
+            assert rc == 2 and out["refused"] is True and "battle" in out["reason"], (wt, rc, out)
+        assert fx.read(fx.wt_a, "src/a.txt") == b"a\n"
+    _with_wt_fx("W9", body)
+
+
+def _t_w10_align_refused_in_battle_worktree() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        wt_c = fx.other_battle("C")
+        fx.write(fx.main, "src/m.txt", "m\n")
+        fx.git(fx.main, "add", "-A")
+        fx.git(fx.main, "commit", "-q", "-m", "m1")
+        base = fx.git(fx.main, "rev-parse", "HEAD").strip()
+        heads = {w: fx.git(w, "rev-parse", "HEAD") for w in (fx.wt_a, wt_c)}
+        for wt in (fx.wt_a, wt_c):
+            rc, out, _ = fx.fi("align", base=base, root=None, cwd=wt)
+            assert rc == 2 and out["refused"] is True, (wt, rc, out)
+            assert fx.git(wt, "rev-parse", "HEAD") == heads[wt]
+        assert fx.git(fx.main, "rev-parse", "me/A") == heads[fx.wt_a]
+    _with_wt_fx("W10", body)
+
+
+def _t_w11_w12_align_main_head() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        fx.write(fx.wt_a, "src/found.txt", "found\n")
+        base = fx.fi("base")[1]["base"]
+        fx.write(fx.main, "docs/m1.txt", "m1\n")                          # le principal avance après create
+        fx.git(fx.main, "add", "-A")
+        fx.git(fx.main, "commit", "-q", "-m", "m1")
+        a3 = fx.add_wt("agent-3", "worktree-agent-3", "HEAD")
+        rc, out, _ = fx.fi("align", base=base, root=None, cwd=a3)             # W11
+        assert rc == 0 and out["aligned"] is True and out["origin"] == "main_head", (rc, out)
+        assert out["head"] == base and fx.git(a3, "rev-parse", "HEAD").strip() == base
+        a4 = fx.add_wt("agent-4", "worktree-agent-4", "HEAD")                 # W12 : worktree sale
+        fx.write(a4, "docs/mine.txt", "mine\n")
+        head4 = fx.git(a4, "rev-parse", "HEAD")
+        rc, out, _ = fx.fi("align", base=base, root=None, cwd=a4)
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        assert fx.read(a4, "docs/mine.txt") == b"mine\n" and fx.git(a4, "rev-parse", "HEAD") == head4
+        a5 = fx.add_wt("agent-5", "worktree-agent-5", "HEAD")                 # W12 : orphelin
+        fx.git(a5, "checkout", "-q", "--orphan", "other")
+        fx.git(a5, "commit", "-q", "-m", "unrelated")
+        head5 = fx.git(a5, "rev-parse", "HEAD")
+        rc, out, _ = fx.fi("align", base=base, root=None, cwd=a5)
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        assert fx.git(a5, "rev-parse", "HEAD") == head5
+        fx.git(fx.main, "branch", "merged-feature", "HEAD")                    # R1 : branche non harnais, fusionnée
+        a6 = os.path.join(fx.main, ".claude", "worktrees", "feat-6")
+        fx.git(fx.main, "worktree", "add", "-q", a6, "merged-feature")
+        a6 = os.path.realpath(a6)
+        fx.write(fx.main, "docs/m2.txt", "m2\n")
+        fx.git(fx.main, "add", "-A")
+        fx.git(fx.main, "commit", "-q", "-m", "m2")
+        head6 = fx.git(a6, "rev-parse", "HEAD")
+        rc, out, _ = fx.fi("align", base=base, root=None, cwd=a6)
+        assert rc == 2 and out["refused"] is True, (rc, out)
+        assert fx.git(a6, "rev-parse", "HEAD") == head6
+        a7 = os.path.join(fx.main, ".claude", "worktrees", "det-7")           # R1 : HEAD détaché accepté
+        fx.git(fx.main, "worktree", "add", "-q", "--detach", a7, "HEAD~1")
+        rc, out, _ = fx.fi("align", base=base, root=None, cwd=os.path.realpath(a7))
+        assert rc == 0 and out["origin"] == "main_head", (rc, out)
+    _with_wt_fx("W11", body)
+
+
+def _t_w13_cleanup_keeps_battle_branch() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        fx.git(fx.a1, "checkout", "-q", "--ignore-other-worktrees", "me/A")   # builder sur la branche de la battle
+        fx.set_a(statuses=("done", "done"))
+        rc, out, _ = fx.fi("cleanup", ("slice-1", fx.a1))
+        assert rc == 0 and out["ok"] is True, (rc, out)
+        assert out["removed"][0]["branch"] is None and out["removed"][0].get("branch_kept"), out
+        assert "me/A" in fx.branches() and fx.wt_a in fx.worktrees()
+    _with_wt_fx("W13", body)
+
+
+def _t_w14_cwd() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        for cwd in (os.path.join(fx.main, "src"), fx.a2, os.path.join(fx.wt_a, "src")):
+            rc, out, _ = fx.fi("apply", ("slice-1", fx.a1), cwd=cwd)
+            assert rc == 2 and out["refused"] is True, (cwd, rc, out)
+        fx.write(fx.a1, "src/n.txt", "new\n")
+        rc, out, _ = fx.fi("apply", ("slice-1", fx.a1), cwd=fx.wt_a)            # cwd = root : permis
+        assert rc == 0, (rc, out)
+    _with_wt_fx("W14", body)
+
+
+def _t_w15_inplace_explicit() -> None:
+    def body(fx: _WtFx, tmp: str) -> None:
+        fx.write(fx.w1, "src/n.txt", "new\n")
+        for extra in ((), ("--root", fx.main)):
+            rc, out, _ = fx.run("apply", "--base", fx.base, "--battle", "B", *extra,
+                                "--slice", "slice-1", fx.w1)
+            assert rc == 0 and out["root"] == fx.main, (extra, rc, out)
+            os.remove(os.path.join(fx.main, "src", "n.txt"))
+        rc, out, _ = fx.run("apply", "--base", fx.base, "--battle", "B", "--root", fx.w1,
+                            "--slice", "slice-1", fx.w1)
+        assert rc == 2, (rc, out)                                       # --root w1 : pas le principal
+    _with_wt_fx("W15", body)
+
+
+def _t_cross_worktree_batch() -> None:
+    """Test croisé (GH#157, slice-6) : les vrais CLI (battle_state, battle_worktree, fan_in,
+    artifact_check, hook guard) en sous-processus sur un vrai dépôt + remote nu. Battle `A` en
+    worktree qui fait le lot ; battle `B` (in-place) tient le pointeur pendant tout le lot ; le
+    principal avance après `create` (tolérance C3)."""
+    import shutil
+    if shutil.which("git") is None:
+        print("SKIP: cross_worktree_batch (git absent)", file=sys.stderr)
+        return
+    here = os.path.dirname(os.path.abspath(__file__))
+    scripts = {n: os.path.join(here, n) for n in ("battle_state.py", "battle_worktree.py", "fan_in.py",
+                                                  "artifact_check.py")}
+    guard_hook = os.path.join(os.path.dirname(here), "hooks", "guard.py")
+    with tempfile.TemporaryDirectory() as tmp0:
+        tmp = os.path.realpath(tmp0)
+        env = {k: v for k, v in os.environ.items() if k not in bs._GIT_ENV_DROP}
+        gitconfig = os.path.join(tmp, "gitconfig")             # identité : battle_worktree la exige
+        with open(gitconfig, "w", encoding="utf-8") as fh:
+            fh.write("[user]\n\tname = t\n\temail = t@t\n")
+        env.update(GIT_CONFIG_GLOBAL=gitconfig, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+        env.pop("LEGION_GUARD_OFF", None)
+        main, remote = os.path.join(tmp, "main"), os.path.join(tmp, "remote.git")
+
+        def git(cwd: str, *a: str) -> str:
+            p = subprocess.run(["git", "-c", "commit.gpgsign=false", *a], cwd=cwd, env=env,
+                               capture_output=True, text=True, encoding="utf-8",
+                               stdin=subprocess.DEVNULL, timeout=60)
+            assert p.returncode == 0, (a, p.stderr)
+            return p.stdout.strip()
+
+        def cli(script: str, *a: str, cwd: str = main, stdin: str | None = None) -> tuple[int, dict, str]:
+            p = subprocess.run([sys.executable, script, *a], cwd=cwd, env=env, capture_output=True,
+                               text=True, encoding="utf-8", input=stdin, timeout=120,
+                               **({} if stdin is not None else {"stdin": subprocess.DEVNULL}))
+            try:
+                out = json.loads(p.stdout) if p.stdout.strip() else {}
+            except ValueError:
+                out = {"raw": p.stdout}
+            return p.returncode, out, p.stderr
+
+        def bst(*a: str) -> dict:
+            rc, out, err = cli(scripts["battle_state.py"], *a)
+            assert rc == 0, (a, rc, out, err)
+            return out
+
+        def wr(root: str, rel: str, data: str) -> None:
+            _Fx.write(root, rel, data)
+
+        try:
+            git(tmp, "init", "-q", "--bare", "-b", "main", remote)
+            os.makedirs(main)
+            git(main, "init", "-q", "-b", "main")
+            wr(main, ".gitignore", ".legion/\n.claude/\n")
+            wr(main, "src/a.txt", "a\n")
+            wr(main, "docs/b.txt", "b\n")
+            git(main, "add", "-A")
+            git(main, "commit", "-q", "-m", "base")
+            git(main, "remote", "add", "origin", remote)
+            git(main, "push", "-q", "-u", "origin", "main")
+        except (OSError, subprocess.SubprocessError, AssertionError) as exc:
+            print(f"SKIP: cross_worktree_batch (git inutilisable : {exc})", file=sys.stderr)
+            return
+        # 1. battle A en worktree, session sidA ; puis B in-place : le pointeur vaut B.
+        bst("init", "A", "--ticket", "A", "--title", "A", "--profile", "feature")
+        bs.bind_session(Path(main), "sidA", "A")
+        rc, created, err = cli(scripts["battle_worktree.py"], "create", "--battle", "A")
+        assert rc == 0 and created["ok"] is True, (rc, created, err)
+        wt_a = os.path.realpath(created["path"])
+        bst("set-meta", "--battle", "A", "--worktree-path", created["path"],
+            "--worktree-branch", created["branch"], "--worktree-base", created["base"])
+        bst("set-guard", "--battle", "A", "--allow", "src/**", "docs/**")
+        bst("transition", "think", "done", "--battle", "A")
+        bst("transition", "plan", "in_progress", "--battle", "A")
+        bst("transition", "plan", "done", "--verdict", "accept", "--battle", "A")
+        bst("approve-plan", "--battle", "A")
+        bst("set-slices", "--battle", "A", "slice-1", "slice-2")
+        bst("transition", "build", "in_progress", "--battle", "A")
+        bst("slice", "slice-1", "in_progress", "--battle", "A")
+        bst("slice", "slice-2", "in_progress", "--battle", "A")
+        bst("init", "B", "--ticket", "B", "--title", "B", "--profile", "feature")
+        bs.bind_session(Path(main), "sidB", "B")
+        with open(os.path.join(main, ".legion", "active-battle"), encoding="utf-8") as fh:
+            assert "B" in fh.read()
+        # 2. fondation non commitée dans wtA ; le principal avance (M1) après create.
+        wr(wt_a, "src/found.txt", "found\n")
+        wr(main, "docs/m1.txt", "m1\n")
+        git(main, "add", "-A")
+        git(main, "commit", "-q", "-m", "M1")
+        # 3. empreinte du principal
+        def fp_main() -> tuple:
+            return (git(main, "rev-parse", "HEAD"), git(main, "ls-files", "-s"),
+                    git(main, "status", "--porcelain", "-uall"), git(main, "for-each-ref"))
+        before_main = fp_main()
+        # 4. base
+        fi = scripts["fan_in.py"]
+        rc, out, err = cli(fi, "base", "--battle", "A", "--root", wt_a)
+        assert rc == 0 and out["frozen"] is True, (rc, out, err)
+        base = out["base"]
+        assert git(main, "rev-parse", f"{base}^") == git(wt_a, "rev-parse", "HEAD")
+        # 5. S1
+        ac_ = scripts["artifact_check.py"]
+        s1, s2 = os.path.join(tmp, "s1.json"), os.path.join(tmp, "s2.json")
+        rc, out, err = cli(ac_, "tree-snapshot", "--battle", "A", "--root", wt_a, "--out", s1)
+        assert rc == 0 and out["ok"] is True, (rc, out, err)
+        fp1 = out["fingerprint"]
+        # 6. builders simulés, coupés depuis le HEAD du principal (qui a avancé après create)
+        agents = []
+        for n in (1, 2):
+            path = os.path.join(main, ".claude", "worktrees", f"agent-{n}")
+            git(main, "worktree", "add", "-q", "-b", f"worktree-agent-{n}", path, "HEAD")
+            agents.append(os.path.realpath(path))
+        a1, a2 = agents
+        assert git(main, "rev-parse", "HEAD") != git(wt_a, "rev-parse", "HEAD")
+        # 7. align depuis chaque agent
+        for ag in agents:
+            rc, out, err = cli(fi, "align", "--base", base, "--battle", "A", cwd=ag)
+            assert rc == 0 and out.get("ok") is True and out.get("origin") == "main_head", (ag, rc, out, err)
+            assert git(ag, "rev-parse", "HEAD") == base
+        # 8. écritures des builders
+        wr(a1, "src/a.txt", "a1\n")
+        wr(a2, "docs/u2.txt", "u2\n")
+        # 9. tree-verify --base de chaque builder
+        for ag in agents:
+            rc, out, err = cli(ac_, "tree-verify", "--base", base, "--battle", "A", "--root", ag, "--guard")
+            assert rc == 0 and out["ok"] is True, (ag, rc, out, err)
+        # 10. tree-verify du lot
+        rc, out, err = cli(ac_, "tree-verify", "--battle", "A", "--root", wt_a, "--before", s1,
+                           "--fingerprint", fp1, "--batch-worktrees")
+        assert rc == 0 and out["ok"] is True, (rc, out, err)
+        # 11. garde-fou du hook
+        def hook(cmd: str, sid: str) -> tuple[int, str]:
+            payload = json.dumps({"tool_name": "Bash", "agent_type": "claude", "session_id": sid,
+                                  "tool_input": {"command": cmd}})
+            p = subprocess.run([sys.executable, guard_hook], cwd=main, env=env, input=payload,
+                               capture_output=True, text=True, encoding="utf-8", timeout=60)
+            return p.returncode, p.stdout + p.stderr
+        pairs = ["--slice", "slice-1", a1, "--slice", "slice-2", a2]
+        apply_cmd = f'python3 "{fi}" apply --base {base} {" ".join(pairs)}'
+        code, msg = hook(apply_cmd, "sidA")
+        assert code == 2 and "A" in msg, (code, msg)
+        code, msg = hook(apply_cmd + " --battle A --root " + wt_a, "sidA")
+        assert code == 0, (code, msg)
+        # 12. apply dans wtA, principal intact
+        rc, out, err = cli(fi, "apply", "--base", base, "--battle", "A", "--root", wt_a, *pairs)
+        assert rc == 0 and out["ok"] is True, (rc, out, err)
+        assert _Fx.read(_Fx, wt_a, "src/a.txt") == b"a1\n" and _Fx.read(_Fx, wt_a, "docs/u2.txt") == b"u2\n"
+        assert _Fx.read(_Fx, wt_a, "src/found.txt") == b"found\n"
+        assert fp_main()[:3] == before_main[:3]               # refs : seules les branches builders s'ajoutent
+        # 13. S2, verify --guard, slice done
+        rc, out, err = cli(ac_, "tree-snapshot", "--battle", "A", "--root", wt_a, "--out", s2)
+        assert rc == 0, (rc, out, err)
+        rc, out, err = cli(ac_, "tree-verify", "--battle", "A", "--root", wt_a, "--before", s2,
+                           "--fingerprint", out["fingerprint"], "--guard")
+        assert rc == 0 and out["ok"] is True, (rc, out, err)
+        bst("slice", "slice-1", "done", "--battle", "A")
+        bst("slice", "slice-2", "done", "--battle", "A")
+        # 14. cleanup
+        rc, out, err = cli(fi, "cleanup", "--base", base, "--battle", "A", "--root", wt_a, *pairs)
+        assert rc == 0 and out["ok"] is True and len(out["removed"]) == 2, (rc, out, err)
+        branches = git(main, "branch", "--format=%(refname:short)").split()
+        assert created["branch"] in branches and not any(b.startswith("worktree-agent") for b in branches)
+        assert wt_a in [os.path.realpath(l[len("worktree "):]) for l in
+                        git(main, "worktree", "list", "--porcelain").splitlines() if l.startswith("worktree ")]
+        assert fp_main() == before_main                              # principal strictement identique
+        # 15. refus
+        for root in (main, a1):
+            rc, out, _ = cli(fi, "apply", "--base", base, "--battle", "A", "--root", root, *pairs[:3])
+            assert rc == 2, (root, rc, out)
+        rc, out, _ = cli(fi, "apply", "--base", base, "--slice", "slice-1", wt_a)
+        assert rc == 2, (rc, out)
+        rc, out, _ = cli(fi, "align", "--base", base, "--battle", "A", cwd=wt_a)
+        assert rc == 2, (rc, out)
+        rc, out, _ = cli(fi, "apply", "--base", base, "--battle", "B", "--slice", "slice-1", wt_a)
+        assert rc == 2, (rc, out)                                     # B in-place : chemin actuel, refuse ce worktree
+
+
 _TESTS = (_t_import_smoke, _t_f1_nominal, _t_f2_order, _t_f3_overlap, _t_f4_dirty_main,
           _t_f5_untracked_present, _t_f6_out_of_scope_and_deny, _t_f7_legion_forced,
           _t_f8_committed_and_dirty, _t_f9_head_not_descendant, _t_f10_invalid_worktrees,
@@ -1350,7 +1926,12 @@ _TESTS = (_t_import_smoke, _t_f1_nominal, _t_f2_order, _t_f3_overlap, _t_f4_dirt
           _t_f22_cleanup_mode_lost, _t_b1_base_nominal, _t_b2_base_clean_fallback,
           _t_b3_base_unignored_state, _t_b4_base_invariants, _t_b5_base_nested_repo,
           _t_b6_base_context, _t_a1_align_nominal, _t_a2_align_branch, _t_a3_align_refusals,
-          _t_a4_align_base_is_head, _t_e1_end_to_end, _t_e2_not_aligned)
+          _t_a4_align_base_is_head, _t_e1_end_to_end, _t_e2_not_aligned,
+          _t_w1_worktree_flow, _t_w5_root_refusals, _t_w6_worktree_battle_needs_root, _t_w7_usage,
+          _t_w8_battle_unusable, _t_w9_battle_worktrees_refused,
+          _t_w10_align_refused_in_battle_worktree, _t_w11_w12_align_main_head,
+          _t_w13_cleanup_keeps_battle_branch, _t_w14_cwd, _t_w15_inplace_explicit,
+          _t_cross_worktree_batch)
 
 
 def _self_test() -> int:
