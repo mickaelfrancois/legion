@@ -56,7 +56,7 @@ from pathlib import Path
 # sources de métriques) ; la valeur est le libellé de présentation (C1 : gate entre
 # parenthèses, table figée — aucune dépendance de l'agrégation à cette table).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from battle_state import VERDICT_PHASES, is_aborted  # noqa: E402
+from battle_state import GATE_PHASE, VERDICT_PHASES, is_aborted  # noqa: E402
 
 GATE_PHASES: tuple[str, ...] = VERDICT_PHASES
 _GATE_LABEL = {
@@ -83,10 +83,21 @@ def _is_closed(shard: dict) -> bool:
     return shard.get("phase") == "reflect"
 
 
+_PHASE_GATE = {phase: gate for gate, phase in GATE_PHASE.items()}
+
+
 def _phase_ran(battle: dict, phase: str) -> bool:
-    """C2 : la gate a tourné = la phase existe **et** a rendu un verdict (`status==done`)."""
+    """C2 : la gate a tourné = la phase existe **et** a rendu un verdict (`status==done`).
+
+    GH#116 : si la battle déclare `required_gates`, une phase dont la gate n'y figure pas n'a
+    pas tourné (ex. `plan` d'un `hotfix`, passé à `done` par l'orchestrateur sans architect).
+    Sans `required_gates` (battle ancienne), comportement d'avant."""
     ph = (battle.get("phases") or {}).get(phase) if isinstance(battle, dict) else None
-    return isinstance(ph, dict) and ph.get("status") == "done"
+    if not (isinstance(ph, dict) and ph.get("status") == "done"):
+        return False
+    required = battle.get("required_gates")
+    gate = _PHASE_GATE.get(phase)
+    return not (isinstance(required, list) and gate is not None and gate not in required)
 
 
 def _gate_metrics(battles: list) -> dict:
@@ -320,6 +331,15 @@ def _self_test() -> int:
     b4 = {"phases": None, "run": {"autocorrect": None}}
     assert _gate_metrics([b4])["review"]["ran"] == 0
     assert not _phase_ran({"phases": None}, "review")
+    # GH#116 : plan d'un hotfix (architect non requis) non compté ; feature et battle ancienne comptées
+    hot = {"phases": {"plan": {"status": "done", "verdict": "accept"}},
+           "required_gates": ["lint", "reviewer", "test-engineer"]}
+    feat = {"phases": {"plan": {"status": "done", "verdict": "accept"}},
+            "required_gates": ["architect", "lint", "reviewer", "test-engineer"]}
+    old = {"phases": {"plan": {"status": "done", "verdict": "accept"}}}
+    assert _gate_metrics([hot])["plan"]["ran"] == 0
+    assert _gate_metrics([feat, old])["plan"]["ran"] == 2
+    assert _phase_ran(hot, "plan") is False and _phase_ran(feat, "plan") is True
 
     # ---- cœur pur : _cost_stats (shard sans tokens_total exclu du dénominateur) ----
     cs = _cost_stats([{"tokens_total": 100}, {"tokens_total": 200}, {"repo": "x"}])
