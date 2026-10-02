@@ -216,7 +216,7 @@ SUBCOMMANDS: tuple[str, ...] = ("init", "transition", "approve-plan", "bump-auto
                                 "invalidate", "set-delivery", "set-guard", "set-meta",
                                 "set-slices", "slice", "next-slice", "check-cascade",
                                 "merge-reports", "activate", "close", "abort", "validate",
-                                "session-status")
+                                "session-status", "touch-files")
 
 # Commandes encore permises sur une battle abandonnée (GH#75) : lecture de diagnostic seule.
 ABORT_ALLOWED: tuple[str, ...] = ("validate",)
@@ -1816,6 +1816,8 @@ def _build_parser_parts():
     s.add_argument("--reason", default=None)
     add("validate")
     add("session-status")
+    s = add("touch-files")
+    s.add_argument("--files", nargs="+", required=True)
     return p, sub
 
 
@@ -1916,6 +1918,17 @@ def _mutation(args, battle: dict, root: "Path | None" = None) -> tuple[dict, dic
                 detail["security_auto"] = copy.deepcopy(out["run"]["security_auto"])
                 detail["_warnings"] = [
                     f"security ajoutée à required_gates (fichiers sensibles : {', '.join(added)})"]
+        return out, detail
+    if cmd == "touch-files":   # GH#115 : fichiers touchés hors `slice … done` (correctif, polissage, §H)
+        reflect = ((battle.get("phases") or {}).get("reflect") or {})
+        if isinstance(reflect, dict) and reflect.get("status") == "done":
+            raise _Refuse("battle close : touch-files refusé")
+        out, added = mark_security_auto(battle, args.files, _now_iso())
+        detail = {"files": list(args.files), "security_added": bool(added)}
+        if added:
+            detail["security_auto"] = copy.deepcopy(out["run"]["security_auto"])
+            detail["_warnings"] = [
+                f"security ajoutée à required_gates (fichiers sensibles : {', '.join(added)})"]
         return out, detail
     out = copy.deepcopy(battle)
     if cmd == "set-delivery":
@@ -3036,9 +3049,10 @@ def _t_doc_subcommands() -> None:
         cited = set(re.findall(r"`([a-z][a-z-]*)`", m.group(0)))
         # `session-status` (GH#170) suit `validate` dans SUBCOMMANDS : la doctrine le cite juste
         # après la plage `init`..`validate`, vérifié ci-dessous.
-        assert cited == known - {"session-status"}, (d.name, sorted(cited ^ known))
+        assert cited == known - {"session-status", "touch-files"}, (d.name, sorted(cited ^ known))
         if d.name == "battle.md":
             assert "session-status" in text, "session-status non cité dans battle.md"
+        assert "touch-files" in text, f"touch-files non cité dans {d.name}"
         assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
 
 
@@ -4535,6 +4549,47 @@ def _t_security_auto_slice() -> None:
         assert "security ajoutée" in res["warnings"][0] and "kaboom" in res["warnings"][1]
 
 
+def _t_touch_files() -> None:   # GH#115
+    def prep(r):
+        r.init("b1")
+        r.ok("transition", "think", "done")
+        r.ok("transition", "plan", "in_progress")
+        r.ok("transition", "plan", "done", "--verdict", "accept")
+        r.ok("set-slices", "--replace", "s1")
+        r.ok("approve-plan")
+        r.ok("transition", "build", "in_progress")
+
+    with _Repo() as r:
+        prep(r)
+        before = r.load()["required_gates"]
+        res = r.ok("touch-files", "--files", "src/util.py", "--battle", "b1")   # neutre
+        assert res["security_added"] is False and res["warnings"] == []
+        b = r.load()
+        assert b["required_gates"] == before and "security_auto" not in b.get("run", {})
+        res = r.ok("touch-files", "--files", "src/util.py", "src/Auth/Login.cs", "--battle", "b1")
+        b = r.load()
+        assert b["required_gates"] == list(DEFAULT_REQUIRED_GATES) + ["security"]
+        assert b["run"]["security_auto"]["files"] == ["src/Auth/Login.cs"]
+        assert res["security_added"] is True and len(res["warnings"]) == 1
+        at = b["run"]["security_auto"]["at"]
+        res = r.ok("touch-files", "--files", "x.env", "--battle", "b1")   # idempotent
+        b = r.load()
+        assert res["warnings"] == [] and res["security_added"] is False
+        assert b["run"]["security_auto"]["at"] == at and b["required_gates"].count("security") == 1
+        code, _ = r.run("touch-files", "--battle", "b1")   # --files requis
+        assert code == 2
+        r.ok("abort", "--battle", "b1")
+        code, res = r.run("touch-files", "--files", "a.env", "--battle", "b1")
+        assert code == 2 and "abandonnée" in res["reason"], res
+    with _Repo() as r:
+        prep(r)
+        b = r.load()
+        b["phases"]["reflect"] = {"status": "done"}
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        code, res = r.run("touch-files", "--files", "a.env", "--battle", "b1")
+        assert code == 2 and "close" in res["reason"], res
+
+
 def _write_gh(r: "_Repo", obj, name="pr-status.json", raw: str | None = None) -> str:
     f = r.root / name
     f.write_text(raw if raw is not None else json.dumps(obj), encoding="utf-8")
@@ -4720,7 +4775,7 @@ def _t_merge_reports_subcommand() -> None:        # M16
 
 
 _INTEGRATION_TESTS = (
-    _t_security_hits, _t_security_auto_slice,
+    _t_security_hits, _t_security_auto_slice, _t_touch_files,
     _t_init_profiles, _t_set_meta_profile, _t_set_meta_worktree, _t_set_delivery_head_fields,
     _t_validate_profile, _t_hotfix_e2e,
     _t_set_guard, _t_set_meta, _t_init, _t_activate_close, _t_activate_pointer_taken, _t_atomic_and_corrupt,
