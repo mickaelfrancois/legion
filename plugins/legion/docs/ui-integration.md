@@ -64,7 +64,7 @@ Chaque fichier contient **une** entrée, pas un tableau :
   "pr_url": null,                            // URL de la PR une fois deliver fait
   "pr_state": "open",                        // open | merged | closed ; absent si jamais posé
   "ci": "fail",                              // pass | fail | pending | none ; null = pas encore lu ; absent si jamais posé
-  "tokens_total": 184320,                    // coût approx. = Σ(input+output) ; absent si rien encore
+  "tokens_total": 184320,                    // volume = Σ des 4 compteurs (cache compris) ; absent si rien encore
   "tokens": { "input": 150000, "output": 34320, "cache_read": 0, "cache_creation": 0 },
   "skills": ["scaffold", "code-review", "build-fix"],  // skills RÉELLEMENT utilisés (main + subagents)
   "slices_done": 2,                          // slices `done` ; absent si la battle ne déclare pas de slices
@@ -78,7 +78,7 @@ Chaque fichier contient **une** entrée, pas un tableau :
 > chaque écriture de `battle.json` (transition de phase) — pas en continu. Pour un
 > affichage *live*, l'UI peut lire directement `<repo_path>/.legion/battles/<id>/
 > usage.jsonl` (append-only : une ligne par contribution `{scope, agent_type?,
-> skills[], tokens{…}}`) et agréger elle-même. `tokens_total` = `input + output`.
+> skills[], tokens{…}}`) et agréger elle-même. `tokens_total` = `input + output + cache_read + cache_creation` (GH#180).
 
 > **Pourquoi un dossier de shards et pas un fichier unique ?** Plusieurs sessions
 > Claude tournent en parallèle (une par repo). Un fichier partagé subirait des

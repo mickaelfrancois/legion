@@ -196,7 +196,8 @@ def _slice_counts(slices) -> dict:
 def _read_usage(battle_dir: Path) -> dict:
     """Agrege `usage.jsonl` (ecrit par usage_track.py) : tokens cumules + skills
     uniques. Snapshot rafraichi a chaque ecriture de battle.json. {} si absent.
-    L'entete `tokens_total` = input+output (le « cout approximatif » pour l'UI)."""
+    L'entete `tokens_total` = somme des 4 compteurs (input, output, cache_read,
+    cache_creation) : avec le prompt caching, input seul est quasi nul (GH#180)."""
     tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
     skills, seen = [], set()
     try:
@@ -217,7 +218,7 @@ def _read_usage(battle_dir: Path) -> dict:
                         skills.append(sk)
     except OSError:
         return {}
-    return {"tokens_total": tokens["input"] + tokens["output"], "tokens": tokens, "skills": skills}
+    return {"tokens_total": sum(tokens.values()), "tokens": tokens, "skills": skills}
 
 
 def read_fleet(fleet_dir: Path) -> list:
@@ -385,15 +386,16 @@ def _self_test() -> int:
         # usage.jsonl -> tokens/skills agrégés dans le shard
         bp1 = base / "b1" / ".legion" / "battles" / "b1"
         (bp1 / "usage.jsonl").write_text(
-            json.dumps({"scope": "subagent", "skills": ["scaffold"], "tokens": {"input": 100, "output": 20}}) + "\n"
+            json.dumps({"scope": "subagent", "skills": ["scaffold"], "tokens": {"input": 100, "output": 20,
+                                                                         "cache_read": 1000, "cache_creation": 200}}) + "\n"
             + json.dumps({"scope": "main", "skills": ["scaffold", "build-fix"], "tokens": {"input": 10, "output": 5}}) + "\n",
             encoding="utf-8")
         usage = _read_usage(bp1)
-        assert usage["tokens_total"] == 135, usage          # 100+20+10+5
+        assert usage["tokens_total"] == 1335, usage         # 100+20+1000+200+10+5 (GH#180 : cache compris)
         assert usage["skills"] == ["scaffold", "build-fix"], usage  # dédupliqué, ordre conservé
         upsert(bp1, base / "b1", fleet_dir)
         b1 = next(e for e in read_fleet(fleet_dir) if e["id"] == "b1")
-        assert b1["tokens_total"] == 135 and b1["skills"] == ["scaffold", "build-fix"]
+        assert b1["tokens_total"] == 1335 and b1["skills"] == ["scaffold", "build-fix"]
         assert b1["battle_status"] == "active", b1
         assert "slices_total" not in b1 and "slices_done" not in b1, b1  # pas de slices -> absents
 

@@ -55,7 +55,7 @@ Each shard (`fleet.d/*.json`) is **one battle entry** carrying, beyond the CLI
 columns: `title`, `profile`, `battle_status` (`active` | `blocked` | `closed` | `aborted`),
 `pr_url`, `pr_state` (`open` | `merged` | `closed`) and `ci` (`pass` | `fail` | `pending` | `none`; both absent until first written), and `repo_path` + `id` (which locate the artifacts at
 `<repo_path>/.legion/battles/<id>/`), plus an approximate usage snapshot
-`tokens_total` (Σ input+output), `tokens` (breakdown) and `skills` (the skills
+`tokens_total` (Σ input + output + cache_read + cache_creation), `tokens` (breakdown) and `skills` (the skills
 actually used, main + subagents — projected from `usage.jsonl`), plus `slices_done` /
 `slices_total` (absent when the battle declares no slices). A consumer (a
 local UI) lists every battle across repos by reading all shards, then opens the
