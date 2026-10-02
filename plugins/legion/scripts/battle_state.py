@@ -31,9 +31,9 @@ dépôt principal si une battle y est active, sinon le cwd ; ne lève jamais), `
 -> Path` (GH#128 : le dépôt principal d'un worktree lié même sans battle active, sinon le cwd ;
 utilisé par `init` / `activate`), `worktree_battle_of(state_root, path) -> (id, dict) | None`
 (GH#166 : la battle vivante dont le worktree contient `path`, déduite du chemin seul, sans le
-pointeur ni le cwd ; lit un seul `battle.json`). Le CLI, lui, part de
-`_repo_toplevel(cwd)` (GH#134 : racine du dépôt depuis un sous-dossier) ; ces deux fonctions
-restent inchangées pour les hooks.
+pointeur ni le cwd ; lit un seul `battle.json`). Le CLI part de
+`_repo_toplevel(cwd)` (GH#134 : racine du dépôt depuis un sous-dossier) ; `resolve_state_root` et
+`main_repo_root` font de même d'eux-mêmes (GH#154), donc les hooks aussi.
 
 Battle par session (GH#170), lecture seule sauf mention, jamais d'exception sauf `bind_session` /
 `unbind_battle` (écrivent) : `session_keys(payload) -> list[str]` (clés de session du payload d'un
@@ -1582,7 +1582,7 @@ def _repo_toplevel(cwd: Path) -> Path | None:
     """Racine du dépôt (ou du worktree) contenant `cwd` (GH#134), chemin réel ; `None` pour garder
     le `cwd`. Chemin rapide sans sous-processus quand `cwd/.git` existe (dossier ou fichier).
     Sinon `git rev-parse --show-toplevel --show-superproject-working-tree` : code != 0, git
-    absent, délai, sortie vide ou seconde ligne non vide (sous-module) donnent `None`.
+    absent, délai, sortie vide, non absolue ou seconde ligne non vide (sous-module) donnent `None`.
     L'environnement git hérité est nettoyé. Ne lève jamais.
     """
     try:
@@ -1596,7 +1596,7 @@ def _repo_toplevel(cwd: Path) -> Path | None:
         if proc.returncode != 0:
             return None
         lines = [ln.strip() for ln in proc.stdout.splitlines()]
-        if not lines or not lines[0] or any(lines[1:]):
+        if not lines or not lines[0] or any(lines[1:]) or not os.path.isabs(lines[0]):
             return None
         return Path(os.path.realpath(lines[0]))
     except Exception:  # noqa: BLE001 - contrat : jamais d'exception
@@ -1606,27 +1606,31 @@ def _repo_toplevel(cwd: Path) -> Path | None:
 def resolve_state_root(cwd: Path) -> Path:
     """Racine de l'état `.legion/` pour un `cwd` (GH#68). Lecture seule, ne lève jamais.
 
-    Dans un worktree lié (`git rev-parse --git-dir --git-common-dir` : deux dossiers distincts),
+    Part de la racine du dépôt ou du worktree contenant `cwd` (`_repo_toplevel`, GH#154 : un
+    sous-dossier donne sa racine ; `cwd` si inconnue). Dans un worktree lié (`git rev-parse --git-dir --git-common-dir` : deux dossiers distincts),
     renvoie le dépôt principal s'il a une battle active (pointeur, ou liaison de session vivante
-    dans `.legion/sessions/`, GH#170), sinon le `cwd`. Chemin rapide sans
-    sous-processus quand `cwd/.git` est un dossier. Toute erreur (git absent, délai, code != 0,
+    dans `.legion/sessions/`, GH#170), sinon la racine ci-dessus. Chemin
+    rapide sans sous-processus quand `cwd/.git` est un dossier. Toute erreur (git absent, délai, code != 0,
     sortie incomplète) renvoie `cwd` tel quel. L'environnement git hérité est nettoyé.
     """
     try:
-        main = _linked_main_root(cwd)
+        base = _repo_toplevel(cwd) or Path(cwd)
+        main = _linked_main_root(base)
         if main is not None and (active_battle_id(main) is not None or _has_live_binding(main)):
             return main
-        return Path(cwd)
+        return base
     except Exception:  # noqa: BLE001 - contrat : jamais d'exception
         return Path(cwd) if isinstance(cwd, (str, os.PathLike)) else cwd
 
 
 def main_repo_root(cwd: Path) -> Path:
     """Dépôt principal pour un `cwd` (GH#128) : celui d'un worktree lié non bare, même sans battle
-    active, sinon le `cwd`. Utilisé par `init` / `activate`. Lecture seule, ne lève jamais."""
+    active, sinon la racine du dépôt contenant `cwd` (GH#154, `_repo_toplevel`). Utilisé par
+    `init` / `activate`. Lecture seule, ne lève jamais."""
     try:
-        main = _linked_main_root(cwd)
-        return main if main is not None else Path(cwd)
+        base = _repo_toplevel(cwd) or Path(cwd)
+        main = _linked_main_root(base)
+        return main if main is not None else base
     except Exception:  # noqa: BLE001 - contrat : jamais d'exception
         return Path(cwd) if isinstance(cwd, (str, os.PathLike)) else cwd
 
@@ -1635,7 +1639,7 @@ def _cli_root(args, cwd: Path) -> Path:
     """Racine d'état du CLI (GH#128, GH#134). `--repo` non vide l'emporte ; sinon on part de la
     racine du dépôt contenant le cwd (`_repo_toplevel`, le cwd si inconnue), puis `init` /
     `activate` visent toujours le dépôt principal (`main_repo_root`), les autres
-    `resolve_state_root`. Les hooks gardent leur propre résolution (cwd brut)."""
+    `resolve_state_root` (qui normalisent aussi d'eux-mêmes, GH#154, comme les hooks)."""
     repo = getattr(args, "repo", None)
     if repo:
         return Path(repo)
@@ -4780,8 +4784,21 @@ def _t_resolve_root_fast_path() -> None:          # R1
 def _t_resolve_root_subdir() -> None:             # R2
     def body(main, wt, wt_out):
         (main / "sub").mkdir()
-        assert resolve_state_root(main / "sub") == main / "sub"
+        assert _rp(resolve_state_root(main / "sub")) == _rp(main)
     _with_fixture("_t_resolve_root_subdir", body)
+
+
+def _t_resolve_root_subdir_worktree() -> None:    # R2b, R2c, R2d
+    def body(main, wt, wt_out):
+        (main / "sub").mkdir()
+        (wt / "sub").mkdir()
+        assert _rp(resolve_state_root(wt / "sub")) == _rp(main)             # R2b
+        assert _rp(main_repo_root(main / "sub")) == _rp(main)               # R2d
+        assert _rp(main_repo_root(wt / "sub")) == _rp(main)
+        (main / ".legion" / "active-battle").write_text("", encoding="utf-8")
+        got = resolve_state_root(wt / "sub")                                # R2c
+        assert _rp(got) == _rp(wt) == _rp(resolve_state_root(wt)), got
+    _with_fixture("_t_resolve_root_subdir_worktree", body)
 
 
 def _t_resolve_root_worktree() -> None:           # R3, R4
@@ -5022,7 +5039,8 @@ _SESSION_TESTS = (
 
 
 _RESOLVE_ROOT_TESTS = (
-    _t_worktree_battle_of, _t_resolve_root_fast_path, _t_resolve_root_subdir, _t_resolve_root_worktree,
+    _t_worktree_battle_of, _t_resolve_root_fast_path, _t_resolve_root_subdir, _t_resolve_root_subdir_worktree,
+    _t_resolve_root_worktree,
     _t_resolve_root_no_main_battle, _t_resolve_root_not_git, _t_resolve_root_git_failures,
     _t_pick_state_root_pure, _t_resolve_root_ignores_git_dir_env,
 )

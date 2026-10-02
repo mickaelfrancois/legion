@@ -931,7 +931,7 @@ def _load_guard_filter(root_arg: str | None = None, battle: str | None = None) -
     """`allow`/`deny` de la battle visée (`--guard`).
 
     Racine d'état = `battle_state.resolve_state_root(cwd)` : dépôt principal depuis un worktree
-    lié, sinon le cwd. Distincte de la racine d'arbre (`_toplevel`, racine d'édition).
+    lié, sinon la racine du dépôt contenant le cwd (GH#154). Distincte de la racine d'arbre (`_toplevel`, racine d'édition).
     GH#166 : si `root_arg` (`--root`) est le worktree d'une battle vivante
     (`battle_state.worktree_battle_of`), c'est le guard de cette battle propriétaire, quel que
     soit le pointeur ; sinon celui de la battle active (pointeur). `_Refuse` si illisible/invalide."""
@@ -2037,6 +2037,27 @@ def _t_tree_guard_from_worktree() -> None:
         assert rc == 2 and out["refused"] is True, out
 
 
+def _t_tree_guard_from_subdir() -> None:
+    """GH#154 (T1) : `--guard` lancé depuis un sous-dossier du dépôt trouve la battle active."""
+    with _TreeRepo() as r:
+        r.battle({"allow": ["src/**"]})
+        sub = os.path.join(r.root, "sub")
+        os.makedirs(sub)
+        snap = os.path.join(r.root, ".legion", "_sub-before.json")
+        rc, out = r.run("tree-snapshot", "--out", snap, cwd=sub)
+        assert rc == 0 and out["ok"] is True, (rc, out)
+        fp = out["fingerprint"]
+        os.makedirs(os.path.join(r.root, "src"), exist_ok=True)
+        _write(os.path.join(r.root, "src", "n.txt"), b"1")
+        rc, out = r.run("tree-verify", "--before", snap, "--fingerprint", fp, "--guard", cwd=sub)
+        assert rc == 0 and out["ok"] is True, (rc, out)
+        os.makedirs(os.path.join(r.root, "docs"), exist_ok=True)
+        _write(os.path.join(r.root, "docs", "z.txt"), b"1")
+        rc, out = r.run("tree-verify", "--before", snap, "--fingerprint", fp, "--guard", cwd=sub)
+        assert rc == 2 and out["out_of_scope"] == ["docs/z.txt"], (rc, out)
+        assert not os.path.exists(os.path.join(sub, ".legion"))
+
+
 def _t_tree_worktree_battle() -> None:
     """Battle en worktree : état protégé lu au principal, checkout principal dans l'empreinte."""
     with _TreeRepo() as r:
@@ -2395,7 +2416,7 @@ _TREE_TESTS = (
     _t_tree_diff_pure, _t_tree_changes, _t_tree_dirty_start, _t_tree_index_and_head,
     _t_tree_ignored_and_legion, _t_tree_state, _t_tree_index_mask, _t_tree_crlf,
     _t_tree_allow_filter, _t_tree_guard, _t_tree_usage, _t_tree_refusals, _t_tree_no_git,
-    _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree,
+    _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree, _t_tree_guard_from_subdir,
     _t_tree_worktree_battle, _t_tree_wt_from_main, _t_tree_battle_pure, _t_tree_battle,
     _t_tree_batch_battle,
     _t_tree_stdout_bounded, _t_tree_nested_repo, _t_is_legion_case,
