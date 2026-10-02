@@ -269,12 +269,12 @@ hashée : une gate qui crée la branche de livraison `<me>/<token>` est vue. Le 
 du dossier commun est remplacé par la liste des worktrees (un faux `.git/worktrees/x` qui ferait
 sortir un dossier suivi de l'empreinte apparaît dans cette liste). Exception unique : après un
 lot de builders `--auto` isolés, `tree-verify --batch-worktrees` sur le tronc accepte les
-worktrees **apparus depuis le snapshot** qui sont sous `<racine>/.claude/worktrees/`, non
+worktrees **apparus depuis le snapshot** qui sont sous `<principal>/.claude/worktrees/` (le dossier du lot se calcule sur le dépôt principal, même quand `--root` est le worktree d'une battle ; le worktree de battle et `--root` lui-même ne sont jamais acceptés), non
 `prunable`, et dont l'entrée admin et le fichier `.git` se renvoient l'un à l'autre. Un worktree
 disparu ou redirigé, ou tout autre worktree, reste une faute. L'exception est aussi refusée
 (faute) si `.claude`, `.claude/worktrees` ou un composant du chemin du worktree est un lien
 symbolique, ou si le chemin du worktree contient des fichiers suivis par le tronc
-(`git ls-files -- <chemin>` non vide). `hooks/`, `config`, `info/exclude`
+(`git ls-files -- <chemin>` non vide, lancé depuis le principal). `hooks/`, `config`, `info/exclude`
 et `info/attributes` sont hashés à part.
 Le contenu de l'index est couvert autrement : `git status` tourne sur une copie de l'index sans
 données stat (`ls-files -s` puis `update-index --index-info` dans un index temporaire), donc git
@@ -302,7 +302,7 @@ est la faute nommée `[main-tree]`, jamais filtrable. Le mode `--base` reste inc
 - **R3** : le pointeur n'étant plus hashé, une gate qui le réécrirait n'est plus vue par `tree-verify`. Le guard la bloque : `Write` est confiné à l'artefact et le shell est analysé.
 - **R4** : une gate qui recréerait un worktree au chemin exact d'une battle close, sur sa branche, n'est pas vue (risque jugé faible).
 - **R6** : des tags rapatriés par un `fetch` pendant une gate restent une faute (tags protégés). En concurrence, utiliser `git fetch --no-tags origin`.
-Un builder isolé en worktree se vérifie avec `--base <sha> --root <worktree>`. L'orchestrateur
+Un builder isolé en worktree se vérifie avec `--base <sha> --root <worktree>`; `--base` accepte `--battle <id>`, qui ne sert qu'à `--guard` (guard de `<id>`), et refuse (exit 2) un `--root` qui est le worktree d'une battle. L'orchestrateur
 retient l'empreinte de `tree-snapshot` et la passe à `tree-verify --fingerprint` : un
 snapshot réécrit est refusé. Une faute de gate rend le verdict caduc (escalade cas 6).
 
@@ -345,7 +345,7 @@ sur une commande non analysable.
   Le sha de l'entrée d'index fait partie de l'empreinte de chaque chemin de `status` : un blob
   indexé changé sous « MM » est vu. Le worktree `--batch-worktrees` suppose que les worktrees du
   harness restent en place jusqu'au `tree-verify` du tronc. `<base>` est un commit synthétique
-  sans ref (`fan_in.py base`, arbre principal non commité compris) : invisible de l'empreinte
+  sans ref (`fan_in.py base`, arbre d'intégration non commité compris : `worktree.path` en mode worktree, sinon l'arbre principal) : invisible de l'empreinte
   (`objects/` ignoré), et le builder aligne son worktree dessus (`fan_in.py align`) ; l'alignement
   est prouvé par la faute `[base]` de `tree-verify --base`. Puis le fan-in (`fan_in.py apply`,
   sous un nouveau `tree-snapshot` / `tree-verify --guard`), puis `fan_in.py cleanup` après la

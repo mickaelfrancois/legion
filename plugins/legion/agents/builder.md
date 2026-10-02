@@ -37,16 +37,16 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
 4. **Périmètre guard** : globs autorisés en écriture (`guard.allow`)
 5. **Cible build** (optionnel) : chemin de projet à builder quand le repo n'a pas
    de `.sln` (`battle.json.stack.build_target`). Absent ⇒ build depuis la racine.
-6. **Lot parallèle uniquement** : `<base>` (sha de 40 hexa, l'arbre principal figé) et le
-   chemin absolu de `fan_in.py`. Leur présence signifie aussi **« tu es isolé »** (lot parallèle,
+6. **Lot parallèle uniquement** : `<base>` (sha de 40 hexa, l'arbre d'intégration figé), l'id de
+   la battle (`<id>`) et le chemin absolu de `fan_in.py`. Leur présence signifie aussi **« tu es isolé »** (lot parallèle,
    worktree à toi) : étape 7 en branche isolée. Absents ⇒ tu n'es pas dans un lot parallèle :
    saute l'étape 0 et suis la branche séquentielle de l'étape 7.
-7. **Racine du code** (optionnel) : racine où vit le code de la slice. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal. Absente ⇒ le répertoire courant. Quand elle est fournie, tu ne te fies **jamais** au cwd : chaque lecture, commande et outil vise cette racine, par chemin absolu ou par l'option de répertoire de l'outil (`dotnet build <chemin>`, `git -C`, `pytest <chemin>`, `npm --prefix`) ; jamais de `cd` nu.
+7. **Racine du code** (optionnel ; **ignorée quand l'entrée 6 est présente** : ta racine est alors ton propre worktree) : racine où vit le code de la slice. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal. Absente ⇒ le répertoire courant. Quand elle est fournie, tu ne te fies **jamais** au cwd : chaque lecture, commande et outil vise cette racine, par chemin absolu ou par l'option de répertoire de l'outil (`dotnet build <chemin>`, `git -C`, `pytest <chemin>`, `npm --prefix`) ; jamais de `cd` nu.
 
 ## Procédure
 
 0. **Lot parallèle : aligne ton worktree avant tout code.** Lance, depuis la racine de ton
-   worktree, `python "<chemin de fan_in.py>" align --base <base>`. Il avance ton worktree sur
+   worktree, `python "<chemin de fan_in.py>" align --base <base> --battle <id>`. Il avance ton worktree sur
    `<base>` (l'état figé du principal, fondation non commitée comprise) ; sans effet si tu y es
    déjà. S'il échoue (`ok:false`), **stop** : `build_ok: false` avec la raison, sans coder,
    **dans ton retour** (bloc rapport entre marqueurs compris, cf. étape 7). L'orchestrateur vérifie cet alignement (`tree-verify --base`, faute `[base]`).

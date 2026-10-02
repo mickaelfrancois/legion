@@ -618,31 +618,38 @@ state CLIs (`battle_state.py`, `artifact_check.py --guard`) resolve the battle f
 repo (`git rev-parse --git-common-dir`). Each slice owns a distinct report file, so parallel builders never race on a shared file; the
 missing-report check is done by `merge-reports` (below). Tell each builder it must not write another slice's report. For `all`,
 dispatch independent slices in parallel with `isolation: worktree`; keep
-dependent slices sequential. **Exception — worktree mode.** If `battle.json` has a `worktree`
-block, **never** run the parallel batch: `fan_in.py` refuses any tree other than the main
-checkout, so it cannot work from the battle's worktree. Run every slice as a **sequential**
-builder (wrapped in the tree integrity check with `--guard`, above) and **warn the user** that
-parallel builders are not available in worktree mode yet (`--in-place` keeps them). Pass the
-builder the **Code root** = `worktree.path` (it runs its tools from there with their directory option, never from the cwd), and still the battle dir and `plan.md` as
-absolute paths under `<state>`. **Sequential builders** are wrapped in the tree integrity
-check with `--guard` (above). **Parallel builders** write in their own worktree, so their
-deltas must be merged back into the main tree (the **fan-in**, `scripts/fan_in.py`, the only
-script that writes code into the main tree). Run a parallel batch in this fixed order:
+dependent slices sequential. **Sequential builders** are wrapped in the tree integrity
+check with `--guard` (above). In worktree mode (`battle.json` has a `worktree` block) a
+sequential builder gets the **Code root** = `worktree.path` (it runs its tools from there with
+their directory option, never from the cwd), and still the battle dir and `plan.md` as
+absolute paths under `<state>`. **Parallel builders** write in their own worktree, so their
+deltas must be merged back into the **integration tree** (the **fan-in**, `scripts/fan_in.py`,
+the only script that writes code into the integration tree). The integration tree is
+`worktree.path` in worktree mode, the main checkout otherwise. Every `fan_in.py` call carries
+`--battle <id>`; in worktree mode `base`, `apply` and `cleanup` also carry
+`--root "<wt>"` (`<wt>` = `worktree.path`, the integration tree; `<builder-wt>` = a builder's own worktree, never passed to `--root`). Run them from the main checkout. The
+builders' own worktrees (`agent-*`) always sit under `<main>/.claude/worktrees/`, next to the
+battle's worktree, which `fan_in.py` and `tree-verify` refuse as a builder worktree. A
+worktree-mode builder gets **no** Code root: its code lives in its own worktree. Run a
+parallel batch in this fixed order:
 
-1. Call `slice <id> in_progress` for **every** slice of the batch. Then freeze the main tree
-   as the batch base: `<base>` = the `base` field of
-   `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" base` (validate `^[0-9a-f]{40}$`). It commits
-   the main tree as it stands, uncommitted and untracked files included (`.legion/`,
+1. Call `slice <id> in_progress` for **every** slice of the batch. Then freeze the integration
+   tree as the batch base: `<base>` = the `base` field of
+   `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" base --battle <id>` (worktree mode:
+   `… base --battle <id> --root "<wt>"`; validate `^[0-9a-f]{40}$`). It commits
+   the integration tree as it stands, uncommitted and untracked files included (`.legion/`,
    `.claude/worktrees/` and ignored files excluded), into an unreferenced commit on top of
-   `HEAD`; on a clean tree it returns `HEAD` itself. It touches no ref, no `HEAD` and no index.
+   its `HEAD`; on a clean tree it returns `HEAD` itself. It touches no ref, no `HEAD` and no index.
    It refuses (exit 2) on a nested repository. Never use `git rev-parse HEAD` here: a foundation
    slice that is still uncommitted would be invisible to the builders. Then take the snapshot S1
-   of the main tree: `tree-snapshot --battle <id> --out <state>/.legion/battles/<id>/_tree-before.json`. No
+   of the integration tree: `tree-snapshot --battle <id> [--root "<wt>"] --out <state>/.legion/battles/<id>/_tree-before.json`. No
    `battle_state.py` write between this snapshot and step 4.
 2. Launch the builders in parallel (`isolation: worktree`). Each builder prompt carries
-   `<base>` and the absolute path of `fan_in.py`: the builder's first action is
-   `fan_in.py align --base <base>`, which moves its worktree onto `<base>` (`reset --keep`, the
-   harness branch is kept). If `align` fails the builder returns `build_ok: false` and stops.
+   `<base>`, the battle id and the absolute path of `fan_in.py`: the builder's first action is
+   `fan_in.py align --base <base> --battle <id>`, which moves its worktree onto `<base>`
+   (`reset --keep`, the harness branch is kept). If `align` fails the builder returns
+   `build_ok: false` and stops. **If `align` refuses** (for example the worktree `HEAD` is not an
+   ancestor of `<base>`), run the batch sequentially instead: no workaround.
    **On each builder's return, write its report right away.** Extract the lines between the
    line `<<<BUILD-REPORT <slice_id>>>>` and the **first following line** that is exactly
    `<<<END BUILD-REPORT>>>` (each marker alone on its line; check the id in the marker
@@ -664,17 +671,20 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
    to the user; with `build_ok: true` it is a non-blocking warning, flagged for the REFLECT.
 3. For each builder take its worktree path from `git worktree list --porcelain` (never from
    the builder's returned text), check it matches `^[A-Za-z0-9._/:\\ -]+$` (no `$`, backtick
-   or `"`), then run `artifact_check.py tree-verify --base <base> --battle <id> --root "<worktree>" --guard`
+   or `"`), then run `artifact_check.py tree-verify --base <base> --battle <id> --root "<builder-wt>" --guard`
    (the script also checks the path against `git worktree list`). In `--base` mode it also
    requires `<base>` to be an ancestor of the worktree `HEAD` (fault `[base]`): this proves the
    builder aligned. It follows the same path as any other fault of this step (step 5).
-4. On the main tree run `tree-verify --battle <id> --before S1 --fingerprint F1 --batch-worktrees`
-   **without a filter**: no isolated builder may touch the main tree, and a fault is charged to
+4. On the integration tree run
+   `tree-verify --battle <id> [--root "<wt>"] --before S1 --fingerprint F1 --batch-worktrees`
+   **without a filter**: no isolated builder may touch the integration tree, and a fault is charged to
    the whole batch. The fingerprint includes the list of registered worktrees and every branch
    except those checked out in a registered worktree, so a worktree that appeared or disappeared
    is a `[git-state]` fault. `--batch-worktrees` is the single, fixed exception: it accepts only
-   worktrees that **appeared since the snapshot**, sit under `<root>/.claude/worktrees/`, are not
-   `prunable`, and whose admin entry and `.git` file point at each other. Never weaken this
+   worktrees that **appeared since the snapshot**, sit under `<main>/.claude/worktrees/` (the
+   main checkout's folder, also in worktree mode), are not `prunable`, are neither the
+   integration tree nor the worktree of a known battle, and whose admin entry and `.git` file
+   point at each other. Never weaken this
    verify; it precedes any fan-in write. Leave the harness worktrees in place until the fan-in
    (never remove them earlier: their branches would then read as new branches); never pass the
    flag for a gate or a sequential builder.
@@ -682,42 +692,45 @@ script that writes code into the main tree). Run a parallel batch in this fixed 
    `slice <id> blocked` for **every** slice of the batch, then `transition build blocked`; apply
    escalation case 3 for a fault, otherwise the auto-correction loop (see below). The worktrees
    are kept.
-6. Take a new snapshot S2 (same `_tree-before.json`, overwritten). **No `battle_state.py` write
-   between S2 and step 8.**
-7. Run `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" apply --base <base> --slice <id> "<worktree>" …`
-   (one `--slice <id> "<worktree>"` pair per slice, paths taken from
-   `git worktree list --porcelain` and validated as in step 3). It computes each worktree's delta
+6. Take a new snapshot S2 (same `_tree-before.json`, overwritten; worktree mode: with
+   `--root "<wt>"`). **No `battle_state.py` write between S2 and step 8.**
+7. Run `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" apply --base <base> --battle <id> --slice <id> "<builder-wt>" …`
+   (worktree mode: add `--root "<wt>"`; one `--slice <id> "<builder-wt>"` pair per slice,
+   paths taken from `git worktree list --porcelain` and validated as in step 3). It computes each worktree's delta
    against `<base>` (builder commits and untracked files included, ignored files excluded),
    checks every path against `guard.allow` and `.legion/`, checks the whole batch for conflicts
    (`overlap`, `dirty`, `apply`), then writes everything with one `git apply` (working tree only;
    HEAD and index untouched). It is all-or-nothing and writes neither `battle.json` nor anything
    under `.legion/`. It processes slices in `battle.json.slices` order. Exit 0: JSON
    `{ ok, applied:[{ slice, worktree, committed, files:[{ status, path }] }] }`. Exit 2: JSON with
-   `refused` + `out_of_scope`, or `conflict:{ slice, kind, files }`, or `fault`; the main tree is
+   `refused` + `out_of_scope`, or `conflict:{ slice, kind, files }`, or `fault`; the integration tree is
    unchanged. Exit 1: usage error.
-8. Run `tree-verify --battle <id> --before S2 --fingerprint F2 --guard` on the main tree (no
-   `--batch-worktrees`: the worktrees did not move). A fault: `slice <id> blocked` for every
+8. Run `tree-verify --battle <id> [--root "<wt>"] --before S2 --fingerprint F2 --guard` on the
+   integration tree (no `--batch-worktrees`: the worktrees did not move). A fault: `slice <id> blocked` for every
    slice of the batch, then `transition build blocked`, escalation **case 3**. The worktrees are
    kept (no `cleanup`), and the changes `apply` wrote stay in the working tree for diagnosis.
 9. On any exit 2 of `apply` in step 7 (a conflict, a refusal or a fault): `slice <id> blocked`
    for every slice of the batch, then `transition build blocked`. A conflict is escalation
    **case 7** (relay the slice, the `kind` and the files); an out-of-scope refusal or a fault is
-   **case 3**. The main tree is unchanged and the worktrees are kept.
+   **case 3**. The integration tree is unchanged and the worktrees are kept.
 10. On success: `slice <id> done --warnings N --files <files from the apply JSON>` for each
     slice. The `--files` list comes from the tool, not from the builder's return. Invariant:
-    a slice is `done` only when its code is in the main tree. A slice whose worktree the harness
+    a slice is `done` only when its code is in the integration tree. A slice whose worktree the harness
     removed (no change) skips `apply`: record it `done` with no files; `merge-reports` still
     requires its report, which you already wrote at step 2.
-11. Verify the project **once** for the whole batch: the stack's build and tests (.NET:
+11. Verify the project **once** for the whole batch, on the integration tree (worktree mode: on
+    `<wt>`, with the tool's directory option, see the block « Worktree mode — working from
+    the main checkout »): the stack's build and tests (.NET:
     `dotnet build` + `dotnet test`; other stack: the repo's commands). If red:
     `transition build blocked`, escalation **case 7**, worktrees kept.
-12. If green: `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" cleanup --base <base> --slice <id> "<worktree>" …`
-    (same pairs). It removes each worktree and its harness branch only after proving the main
-    tree already holds the delta; otherwise it keeps them (`kept`, exit 2). A refusal is
+12. If green: `python "$CLAUDE_PLUGIN_ROOT/scripts/fan_in.py" cleanup --base <base> --battle <id> --slice <id> "<builder-wt>" …`
+    (worktree mode: add `--root "<wt>"`; same pairs). It removes each worktree and its harness
+    branch only after proving the integration tree already holds the delta; it never removes the
+    battle's branch (`branch_kept`). Otherwise it keeps them (`kept`, exit 2). A refusal is
     **non-blocking**: relay it as a warning and flag it for the REFLECT.
     **Resuming an interrupted batch.** `<base>` is held only in the orchestrator's context and is
-    no longer `git rev-parse HEAD` of the main tree. A builder that aligned and did not commit has
-    `HEAD` = `<base>` in its worktree: read it there (`git -C "<worktree>" rev-parse HEAD`). If no
+    no longer `git rev-parse HEAD` of the integration tree. A builder that aligned and did not commit has
+    `HEAD` = `<base>` in its worktree: read it there (`git -C "<builder-wt>" rev-parse HEAD`). If no
     aligned worktree is left, re-run the batch from step 1.
 13. Continue with the classification below: `merge-reports`, then `transition build done`.
 

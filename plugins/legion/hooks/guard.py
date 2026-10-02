@@ -79,6 +79,8 @@ Regles :
   (`shlex`) : commande non analysable ou erreur -> permis. La sous-commande et `--battle` sont lus
   par le vrai parser du CLI (GH#177 : `--repo /x validate` = `validate`) ; parser refuse ou absent ->
   repli textuel. Bypass `LEGION_GUARD_OFF=1`.
+  Meme garde-fou (GH#157) pour `fan_in.py base|apply|cleanup` sans `--battle` (`align` et `--self-test`
+  permis) ; le message ajoute `--root <worktree.path>` quand la battle de la session est en worktree.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -1115,8 +1117,8 @@ def _shell_write_hits(
 _MUTATION_FREE = ("init", "activate", "validate", "session-status")  # sans `--battle` : toujours permis
 
 
-def _battle_state_calls(command: str) -> list[list[str]]:
-    """Pour chaque appel `battle_state.py` de `command` : mots qui le suivent (jusqu'a l'operateur).
+def _script_calls(command: str, basename: str) -> list[list[str]]:
+    """Pour chaque appel du script `basename` de `command` : mots qui le suivent (jusqu'a l'operateur).
 
     Best-effort (`shlex`) ; commande non analysable -> []. Pur.
     """
@@ -1130,7 +1132,7 @@ def _battle_state_calls(command: str) -> list[list[str]]:
     calls: list[list[str]] = []
     i = 0
     while i < len(words):
-        if os.path.basename(words[i].replace("\\", "/")) == "battle_state.py":
+        if os.path.basename(words[i].replace("\\", "/")) == basename:
             j = i + 1
             while j < len(words) and not (words[j] and set(words[j]) <= set("&|;()")):
                 j += 1
@@ -1139,6 +1141,33 @@ def _battle_state_calls(command: str) -> list[list[str]]:
         else:
             i += 1
     return calls
+
+
+def _battle_state_calls(command: str) -> list[list[str]]:
+    """Appels `battle_state.py` de `command` (cf. `_script_calls`)."""
+    return _script_calls(command, "battle_state.py")
+
+
+_FAN_IN_SUBS = ("base", "apply", "cleanup")           # `align` : lance par le builder, jamais garde
+_FAN_IN_VALUE_OPTS = ("--battle", "--root", "--base", "--slice")
+
+
+def _fan_in_subcommand(args: list[str]) -> tuple[str | None, bool]:
+    """`(sous-commande, --battle present)` d'un appel `fan_in.py` (GH#157, textuel : pas d'argparse).
+
+    Sous-commande = premier mot sans tiret qui n'est pas la valeur d'une option (`--battle A apply`).
+    """
+    sub = None
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in _FAN_IN_VALUE_OPTS:
+            skip = True
+        elif not a.startswith("-"):
+            sub = a
+            break
+    return sub, any(a == "--battle" or a.startswith("--battle=") for a in args)
 
 
 def _battle_state_subcommand(args: list[str]) -> tuple[str | None, bool]:
@@ -1165,32 +1194,42 @@ def _mutation_guard(data: dict, state: Path) -> tuple[int, str]:
     """Garde-fou C4 (GH#170) : un appelant non-gate ne mute pas sans `--battle` la mauvaise battle.
 
     Bloque (exit 2) `battle_state.py <sous-commande>` sans `--battle` (hors `init` / `activate` /
-    lectures) quand la session pilote une autre battle que le pointeur (`session`) ou quand le
+    lectures) ou `fan_in.py base|apply|cleanup` sans `--battle` (GH#157 ; `align` et `--self-test` permis) quand la session pilote une autre battle que le pointeur (`session`) ou quand le
     pointeur appartient a une autre session (`foreign`). Sinon : permis. Ne leve jamais.
     """
     try:
         tool_input = data.get("tool_input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        if not isinstance(command, str) or "battle_state" not in command:
+        if not isinstance(command, str) or ("battle_state" not in command and "fan_in" not in command):
             return 0, ""
-        mutating = []
+        mutating = []                                  # (script, sous-commande)
         for args in _battle_state_calls(command):
             sub, has_battle = _battle_state_subcommand(args)
             if sub is None or sub in _MUTATION_FREE or has_battle:
                 continue
-            mutating.append(sub)
+            mutating.append(("battle_state.py", sub))
+        for args in _script_calls(command, "fan_in.py"):
+            sub, has_battle = _fan_in_subcommand(args)
+            if sub in _FAN_IN_SUBS and not has_battle:
+                mutating.append(("fan_in.py", sub))
         if not mutating:
             return 0, ""
-        bid, _bdata, source = _resolved(state, data)
+        script, sub0 = mutating[0]
+        bid, bdata, source = _resolved(state, data)
         if source == "foreign":
             return 2, (
-                f"BLOQUE : `battle_state.py {mutating[0]}` sans `--battle` : la battle du pointeur "
+                f"BLOQUE : `{script} {sub0}` sans `--battle` : la battle du pointeur "
                 f"appartient a une autre session. Ajoute `--battle <id>` (la battle que TU pilotes)."
             )
         if source == "session" and bid != active_battle_id(state):
+            hint = ""
+            wt = bdata.get("worktree") if isinstance(bdata, dict) else None
+            if script == "fan_in.py" and isinstance(wt, dict) and wt.get("path"):
+                hint = f" `--root {wt.get('path')}` (battle en worktree)"
             return 2, (
-                f"BLOQUE : `battle_state.py {mutating[0]}` sans `--battle` : cette session pilote "
-                f"`{bid}`, le pointeur vise une autre battle : ajoute `--battle {bid}`."
+                f"BLOQUE : `{script} {sub0}` sans `--battle` : cette session pilote "
+                f"`{bid}`, le pointeur vise une autre battle : ajoute `--battle {bid}`"
+                + (f" et{hint}." if hint else ".")
             )
     except Exception:  # noqa: BLE001 - garde-fou best-effort : jamais bloquant sur erreur
         return 0, ""
@@ -2529,6 +2568,34 @@ def _t_guard_sessions(bs) -> None:
         # mot vide (`--title ""`) : n'arrete pas l'appel, `&&` le fait
         assert _battle_state_calls('python battle_state.py init X --title "" --battle A && ls') == [
             ["init", "X", "--title", "", "--battle", "A"]], _battle_state_calls('python battle_state.py init X --title ""')
+        # GH#157 G-F1..G-F5 : garde-fou C4 etendu a `fan_in.py base|apply|cleanup`
+        fi = str(Path(bs.__file__).resolve().with_name("fan_in.py"))
+        for sub in ("apply --base abc --slice s1 /wt", "base", "cleanup --base abc --slice s1 /wt"):
+            code, msg = _decide(bsh(f'python3 "{fi}" {sub}', "sidA"), main)            # G-F1
+            assert code == 2 and "`A`" in msg and "--battle A" in msg, (sub, code, msg)
+        code, msg = _decide(bsh(f"python3 {fi} apply --base abc", "sidX"), main)       # G-F2 : foreign
+        assert code == 2 and "autre session" in msg, (code, msg)
+        code, msg = _decide(bsh(f"python3 {fi} cleanup --base abc", "sidX"), main)
+        assert code == 2, (code, msg)
+        for cmd, sid in ((f"python3 {fi} apply --battle A --base abc", "sidA"),        # G-F3
+                         (f"python3 {fi} apply --battle=A --base abc", "sidA"),
+                         (f"python3 {fi} --battle A base", "sidA"),
+                         (f"python3 {fi} align --base abc", "sidA"),
+                         (f"python3 {fi} --self-test", "sidA"),
+                         (f"python3 {fi} apply --base abc", "sidB"),                    # session == pointeur
+                         (f"python3 {fi} apply --base abc", None),                      # sans cle
+                         (f"python3 {fi} 'unclosed", "sidA")):
+            assert _decide(bsh(cmd, sid), main)[0] == 0, (cmd, sid)
+        code, msg = _decide(bsh(f'cd x && python3 "{fi}" apply --base abc --slice s1 /wt', "sidA"), main)
+        assert code == 2, (code, msg)                                                   # G-F4 : compose
+        assert _fan_in_subcommand(["--battle", "A", "apply"]) == ("apply", True)
+        assert _fan_in_subcommand(["--base", "x", "--root", "/r", "cleanup"]) == ("cleanup", False)
+        assert _fan_in_subcommand(["--self-test"]) == (None, False)
+        assert _script_calls(f'python3 "{fi}" base && ls', "fan_in.py") == [["base"]]
+        code, err = _run_hook(bsh(f'python3 "{fi}" apply --base abc', "sidA"), main)    # G-F1 sous-processus
+        assert code == 2 and "--battle" in err, (code, err)
+        code, err = _run_hook(bsh(f'python3 "{fi}" apply --battle A --base abc', "sidA"), main)
+        assert code == 0, (code, err)
         # G-S7 sous-processus reel du hook : deux session_id
         code, err = _run_hook(bsh(f'python3 "{script}" transition build done', "sidA"), main)
         assert code == 2 and "A" in err and "--battle" in err, (code, err)
@@ -2552,6 +2619,11 @@ def _t_guard_sessions(bs) -> None:
         assert code == 2 and "protege" in msg, (code, msg)
         assert _decide(ed("docs/x", "sidB"), main)[0] == 0
         assert _decide(ed("src/x", "sidX"), main)[0] == 0                         # foreign : pas de C8
+        # GH#157 : battle de la session en worktree -> le message ajoute `--root`
+        fi = str(Path(bs.__file__).resolve().with_name("fan_in.py"))
+        code, msg = _decide(_sev({"tool_name": "Bash", "agent_type": "claude", "tool_input": {
+            "command": f"python3 {fi} apply --base abc"}}, "sidA"), main)
+        assert code == 2 and "--battle A" in msg and "--root" in msg, (code, msg)
     # G-S9 : la resolution par cible (lot A) reste prioritaire (G-WT1..G-WT7 : `_t_guard_wt_main_session`)
     # Repli sans resolveur : comportement d'avant (pointeur seul)
     global _resolve_battle_src

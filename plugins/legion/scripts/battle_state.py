@@ -3137,9 +3137,32 @@ def _t_doc_fan_in() -> None:
     assert mb, "fan_in.py base absent du §D --auto de battle.md"
     assert mb.start() < sec.index("tree-snapshot") and mb.start() < pos["apply"], \
         "fan_in.py base doit précéder tree-snapshot et apply (§D --auto)"
+    # GH#157 : chaque appel fan_in.py (base|align|apply|cleanup) porte --battle ; en mode
+    # worktree, base / apply / cleanup portent aussi --root "<wt>" (meme ligne ou suivante)
     builder_md = Path(__file__).resolve().parents[1] / "agents/builder.md"
+    fan_re = re.compile(r'fan_in\.py"? (base|align|apply|cleanup)\b')
+    for name, body in (("battle.md", sec),
+                       ("builder.md", builder_md.read_text(encoding="utf-8")
+                        if builder_md.is_file() else "")):
+        for n, line in enumerate(body.splitlines(), 1):
+            if fan_re.search(line) and ("python" in line or "--base" in line):   # appel, pas prose
+                assert "--battle" in line, f"{name} (§D) ligne {n} : fan_in.py sans --battle"
     if builder_md.is_file():
-        assert "align" in builder_md.read_text(encoding="utf-8"), "builder.md doit citer align"
+        btxt = builder_md.read_text(encoding="utf-8")
+        assert "align" in btxt, "builder.md doit citer align"
+        assert re.search(r'fan_in\.py>?"? align --base <base> --battle <id>', btxt), \
+            "builder.md : la commande align doit porter --battle <id>"
+        assert "ignorée quand l'entrée 6 est présente" in btxt, "builder.md : entrée 6 prime sur 7"
+    lines = sec.splitlines()
+    for sub in ("base", "apply", "cleanup"):
+        for n, line in enumerate(lines):
+            if re.search(rf'fan_in\.py"? {sub}\b', line):
+                assert '--root "<wt>"' in " ".join(lines[n:n + 2]), \
+                    f'§D : fan_in.py {sub} sans --root "<wt>" (mode worktree)'
+    for n, line in enumerate(lines):   # WARN-2 : le worktree du builder n'est jamais passe a --root
+        assert not re.search(r'--root "<builder-wt>"(?! --guard)', line) or "tree-verify --base" in line, \
+            f"§D ligne {n}: <builder-wt> passe a --root hors tree-verify --base"
+    assert "<builder-wt>" in sec and "<worktree>" not in sec, "§D : placeholders <wt> / <builder-wt> incoherents"
     i_batch = sec.index("--batch-worktrees")
     i_merge = sec.index("merge-reports", pos["cleanup"])
     assert i_batch < pos["apply"] < pos["cleanup"] < i_merge, "ordre du fan-in (§D --auto)"
@@ -3256,7 +3279,10 @@ def _t_doc_worktree_mode() -> None:   # GH#152 : doctrine du mode worktree
     assert "git checkout -b <me>/<token>" in g1, "§G.1 --in-place : checkout -b perdu"
     # §D : lot --auto sequentiel en mode worktree
     d = battle[battle.index("**Mode — `--auto`.**"):battle.index("After build (either mode)")]
-    assert "Exception — worktree mode" in d and "sequential" in d, "§D : repli sequentiel absent"
+    # GH#157 : le lot parallele marche aussi en mode worktree (plus d'exception sequentielle)
+    assert "Exception — worktree mode" not in d, "§D : l'exception worktree mode est encore presente"
+    assert "not available in worktree mode" not in d, "§D : lot parallele encore declare indisponible"
+    assert "integration tree" in d and "--root \"<wt>\"" in d, "§D : arbre d'integration absent"
     # options validees par liste fermee
     assert "closed list" in battle and "`--in-place` (no value" in battle, "liste fermee de start"
 

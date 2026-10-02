@@ -29,6 +29,7 @@ Usage :
                                          [--batch-worktrees]
     python artifact_check.py tree-verify --before <fichier> --fingerprint <sha> --batch-worktrees
     python artifact_check.py tree-verify --base <sha> --root <worktree> --guard
+    python artifact_check.py tree-verify --base <sha> --battle <id> --root <worktree> --guard
     python artifact_check.py tree-snapshot --battle <id> --out <fichier> [--root <dir>]
     python artifact_check.py tree-verify --battle <id> --before <fichier> --fingerprint <sha>
                                          [--root <dir>] [--guard | --allow <glob>...]
@@ -58,7 +59,9 @@ worktree d'une battle vivante (`battle_state.worktree_battle_of`, GH#166), sinon
 active de la racine d'état (`battle_state.resolve_state_root` : dépôt principal depuis un
 worktree lié, comme `guard.py`). `tree-snapshot --root <wt>` et `tree-verify --root <wt>`
 peuvent être lancés depuis le dépôt principal (la session y reste) ;
-`--base` compare un worktree à un arbre propre au commit donné, dont le HEAD doit descendre du
+`--batch-worktrees` : le dossier du lot est `<principal>/.claude/worktrees/` (principal de
+`--root`), `ls-files` tourne depuis le principal ; `--root` et les worktrees de battle ne sont
+jamais acceptés comme builders (GH#157). `--base` compare un worktree à un arbre propre au commit donné, dont le HEAD doit descendre du
 commit donné (faute `[base]` sinon : worktree non aligné, jamais filtrable).
 `--battle <id>` (GH#170, battles concurrentes) : l'empreinte ne couvre que la battle visée. État
 protégé = `battle.json` de `<id>` + ses liaisons `.legion/sessions/*.json` (fautes
@@ -70,7 +73,9 @@ battle `X` dont `worktree.path` vaut `<état>/.claude/worktrees/X` et `worktree.
 et branche de `<id>`, `[main-tree]`, masques, hooks et le reste de la config restent des fautes.
 La clé `battle` du snapshot doit égaler `--battle` à la vérification (refus sinon, id invalide
 compris). `--guard` lit le guard de `<id>` ; refus si `--root` est le worktree d'une autre battle.
-Incompatible avec `--base`. Sans `--battle`, le comportement est inchangé. Fail-closed : hors dépôt,
+Avec `--base`, `--battle` ne sert qu'à `--guard` (guard de `<id>`) ; refus si `--root` est le
+worktree d'une battle (en mode `--base`, c'est un builder). Sans `--battle`, le comportement est
+inchangé. Fail-closed : hors dépôt,
 `git` absent, fichier illisible → refus (exit 2), jamais `ok`.
 """
 
@@ -993,11 +998,18 @@ def _has_symlink_between(base: str, path: str) -> bool:
     return False
 
 
-def _accept_batch_worktrees(before: dict, after: dict, root: str) -> None:
+def _main_root(root: str) -> str:
+    """Depot principal de `root` (`battle_state.main_repo_root`, sans le pointeur). Repli : `root`."""
+    return _state_root_of(root, "")
+
+
+def _accept_batch_worktrees(before: dict, after: dict, root: str,
+                            battle: str | None = None) -> None:
     """Seule exception a « la liste des worktrees est dans l'empreinte » (`--batch-worktrees`,
     verify du tronc apres un lot de builders `--auto` isoles) : retire de `after` les worktrees
-    APPARUS depuis le snapshot qui sont legitimes, c'est-a-dire (1) sous `<root>/.claude/worktrees/`,
-    (2) non `prunable`, (3) dont l'entree admin `<commun>/worktrees/<nom>/gitdir` pointe vers
+    APPARUS depuis le snapshot qui sont legitimes, c'est-a-dire (1) sous
+    `<principal>/.claude/worktrees/` (le principal de `root`, qui est `root` lui-meme hors worktree
+    de battle), ni `root` ni le worktree d'une battle connue (GH#157), (2) non `prunable`, (3) dont l'entree admin `<commun>/worktrees/<nom>/gitdir` pointe vers
     `<chemin>/.git` et dont le fichier `.git` renvoie vers `<commun>/worktrees/<nom>`. Un worktree
     disparu ou redirige, ou tout autre nouveau worktree, reste une faute `[git-state]`."""
     try:
@@ -1008,8 +1020,9 @@ def _accept_batch_worktrees(before: dict, after: dict, root: str) -> None:
     except (KeyError, TypeError, _Refuse):
         return
     common = os.path.realpath(os.path.join(root, os.fsdecode(common_raw.strip())))
-    rroot = os.path.realpath(root)
+    rroot = os.path.realpath(_main_root(root))     # le lot vit sous le principal (GH#157)
     base = os.path.join(rroot, ".claude", "worktrees")
+    not_builders = {os.path.realpath(root)} | set(_other_battles(rroot, battle or "").paths)
     # Un lien symbolique entre la racine et le lot (`.claude`, `.claude/worktrees`) redirigerait
     # « le lot » vers un dossier suivi : l'exception est alors refusee (faute, pas d'acceptation).
     if any(os.path.islink(x) for x in (os.path.join(rroot, ".claude"), base)):
@@ -1021,9 +1034,11 @@ def _accept_batch_worktrees(before: dict, after: dict, root: str) -> None:
         path, _, rest = ent.partition("\t")
         if not path.startswith(base + os.sep) or rest.endswith("prunable"):
             continue
+        if os.path.realpath(path) in not_builders:
+            continue     # worktree de l'arbre d'integration ou d'une battle : jamais un builder
         if _has_symlink_between(base, path):
             continue
-        tracked = _git_ok(root, "ls-files", "-z", "--", os.path.relpath(path, rroot))
+        tracked = _git_ok(rroot, "ls-files", "-z", "--", os.path.relpath(path, rroot))
         if tracked is None or tracked.strip(b"\0"):
             continue     # le chemin du worktree contient des fichiers suivis par le tronc
         for adm in aw["admin"]:
@@ -1043,6 +1058,19 @@ def _accept_batch_worktrees(before: dict, after: dict, root: str) -> None:
     aw["list"], aw["admin"] = keep_list, keep_admin
 
 
+def _is_battle_worktree(root: str) -> bool:
+    """`root` est-il le worktree d'une battle (`battle_state.worktree_battle_of`) ? Ne lève jamais :
+    en cas de doute sur l'import, False (les chemins de `_other_battles` couvrent le reste)."""
+    try:
+        if _SCRIPTS_DIR not in sys.path:
+            sys.path.insert(0, _SCRIPTS_DIR)
+        import battle_state as bs
+        from pathlib import Path
+        return bs.worktree_battle_of(Path(_main_root(root)), root) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def tree_verify(before_path: str | None, fingerprint: str | None, base: str | None,
                 root_arg: str | None, guard: bool, allow: list[str] | None,
                 batch_worktrees: bool = False, battle: str | None = None) -> dict:
@@ -1059,6 +1087,8 @@ def tree_verify(before_path: str | None, fingerprint: str | None, base: str | No
         root = os.path.realpath(root_arg or "")
         if root not in _worktrees(cur):
             raise _Refuse("--root n'est pas un worktree enregistré du dépôt courant")
+        if root in _other_battles(_main_root(root), "").paths or _is_battle_worktree(root):
+            raise _Refuse("--root est le worktree d'une battle : en mode --base, c'est un builder")
         after = _collect(root, legacy_state=True)
         if after.get("gitcfg"):
             after["gitcfg"] = dict(after["gitcfg"], gitstate=_git_state(root, base_mode=True))
@@ -1087,7 +1117,7 @@ def tree_verify(before_path: str | None, fingerprint: str | None, base: str | No
             raise _Refuse("racine du dépôt différente de celle du snapshot")
         after = _collect(root, battle=battle)
         if batch_worktrees:
-            _accept_batch_worktrees(before, after, root)
+            _accept_batch_worktrees(before, after, root, battle)
     committed = None
     if before.get("head") != after.get("head"):
         committed = _committed_paths(root, before.get("head"), after.get("head"))
@@ -1151,8 +1181,6 @@ def _tree_main(sub: str, rest: list[str]) -> int:
             return _usage("--guard et --allow sont exclusifs")
         if batch and "--base" in opts:
             return _usage("--batch-worktrees ne s'emploie qu'avec --before (verify du tronc)")
-        if "--base" in opts and "--battle" in opts:
-            return _usage("--battle ne s'emploie pas avec --base")
         if "--base" in opts:
             if "--before" in opts or "--fingerprint" in opts or "--root" not in opts:
                 return _usage("tree-verify --base <sha> --root <worktree> [--guard]")
@@ -2250,8 +2278,8 @@ def _t_tree_battle() -> None:
         assert rc == 2 and out["refused"] is True, out
         rc, out = r.run("tree-snapshot", "--out", snap, "--root", wt("A"), "--battle", "a b")
         assert rc == 2 and out["refused"] is True, out
-        rc, _ = r.run("tree-verify", "--base", "0" * 40, "--root", wt("A"), "--battle", "A")
-        assert rc == 1                                               # `--base` : pas de `--battle`
+        rc, out = r.run("tree-verify", "--base", "0" * 40, "--root", wt("A"), "--battle", "A")
+        assert rc == 2 and out["refused"] is True, (rc, out)         # `--base` + `--battle` : parse, refus de la racine de battle
         # T-S9 : `--guard` d'une racine qui appartient à une autre battle vivante
         r.git("worktree", "add", "-q", "-b", "me/B2", wt("B2"))
         declare("B2")
@@ -2300,6 +2328,67 @@ def _t_is_legion_case() -> None:
     real.cache_clear()
 
 
+def _t_tree_batch_battle() -> None:
+    """GH#157 : lot de builders sous le principal avec `--root` = worktree de battle
+    (T-B1, T-B2), `--base` + `--battle` (T-B4), refus d'une racine de battle (T-B5)."""
+    with _TreeRepo() as r:
+        sdir = os.path.join(r.root, ".legion")
+
+        def wt(x: str) -> str:
+            return os.path.join(r.root, ".claude", "worktrees", x)
+
+        def declare(x: str, allow: list[str], *, worktree: bool) -> None:
+            bd = os.path.join(sdir, "battles", x)
+            os.makedirs(bd, exist_ok=True)
+            body: dict = {"id": x, "guard": {"allow": allow}}
+            if worktree:
+                body["worktree"] = {"path": wt(x), "branch": f"me/{x}"}
+            _write(os.path.join(bd, "battle.json"), json.dumps(body).encode())
+
+        r.git("worktree", "add", "-q", "-b", "me/A", wt("A"))
+        declare("A", ["src/**"], worktree=True)
+        declare("P", ["docs/**"], worktree=False)
+        _write(os.path.join(sdir, "active-battle"), b"P")        # le pointeur appartient a P
+        snap = os.path.join(sdir, "_batch-before.json")
+        rc, out = r.run("tree-snapshot", "--out", snap, "--root", wt("A"), "--battle", "A")
+        assert rc == 0 and out["ok"] is True, (rc, out)
+        fp = out["fingerprint"]
+
+        def verify(*extra: str) -> tuple[int, dict]:
+            return r.run("tree-verify", "--before", snap, "--fingerprint", fp, "--root", wt("A"),
+                         "--battle", "A", *extra)
+
+        base = r.git("rev-parse", "HEAD").strip()
+        for n in ("agent-1", "agent-2"):                          # T-B1 : builders sous le principal
+            r.git("worktree", "add", "-q", "-b", f"worktree-{n}", wt(n), base)
+        rc, out = verify()
+        assert rc == 2 and "[git-state]" in out["changed"], out   # sans le drapeau : faute
+        rc, out = verify("--batch-worktrees")
+        assert rc == 0 and out["ok"] is True, out
+        evil = os.path.join(r.root, "outside")                    # T-B2 : hors du dossier du lot
+        r.git("worktree", "add", "-q", "-b", "evil", evil, base)
+        rc, out = verify("--batch-worktrees")
+        assert rc == 2 and "[git-state]" in out["changed"], out
+        r.git("worktree", "remove", "--force", evil)
+        r.git("branch", "-q", "-D", "evil")
+        rc, out = verify("--batch-worktrees")
+        assert rc == 0 and out["ok"] is True, out
+        # T-B4 : `--base` + `--battle A`, pointeur sur P : guard de A applique
+        _write(os.path.join(wt("agent-1"), "src", "x.txt"), b"x")
+        rc, out = r.run("tree-verify", "--base", base, "--battle", "A", "--root", wt("agent-1"), "--guard")
+        assert rc == 0 and out["ok"] is True, out
+        _write(os.path.join(wt("agent-1"), "docs", "y.txt"), b"y")   # hors de l'allow de A
+        rc, out = r.run("tree-verify", "--base", base, "--battle", "A", "--root", wt("agent-1"), "--guard")
+        assert rc == 2 and out["out_of_scope"] == ["docs/y.txt"], out
+        # T-B5 : en mode `--base`, `--root` ne peut pas etre un worktree de battle
+        rc, out = r.run("tree-verify", "--base", base, "--battle", "A", "--root", wt("A"), "--guard")
+        assert rc == 2 and out["refused"] is True, out
+        r.git("worktree", "add", "-q", "-b", "me/Z", wt("Z"), base)
+        declare("Z", ["src/**"], worktree=True)
+        rc, out = r.run("tree-verify", "--base", base, "--battle", "A", "--root", wt("Z"))
+        assert rc == 2 and out["refused"] is True, out
+
+
 _TREE_TESTS = (
     _t_tree_git_state, _t_tree_refs_and_worktrees,
     _t_tree_git_config_and_hooks, _t_tree_forced_git_options, _t_tree_empty_commit_and_ignores,
@@ -2308,6 +2397,7 @@ _TREE_TESTS = (
     _t_tree_allow_filter, _t_tree_guard, _t_tree_usage, _t_tree_refusals, _t_tree_no_git,
     _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree,
     _t_tree_worktree_battle, _t_tree_wt_from_main, _t_tree_battle_pure, _t_tree_battle,
+    _t_tree_batch_battle,
     _t_tree_stdout_bounded, _t_tree_nested_repo, _t_is_legion_case,
 )
 
