@@ -240,7 +240,7 @@ pr-status.json  ci-failed-<run-id>.log   # ADDRESS/status : sortie `gh` (PR/CI) 
 `battle.json` schema (**no need to open `ARCHITECTURE.md` at run time**). It is written
 **only by `scripts/battle_state.py`** (subcommands `init`, `transition`, `approve-plan`,
 `set-slices`, `slice`, `next-slice`, `check-cascade`, `merge-reports`, `bump-autocorrect`, `invalidate`, `set-delivery`,
-`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`), which checks every phase transition, writes atomically and resyncs the fleet
+`set-guard`, `set-meta`, `activate`, `close`, `abort`, `validate`, `touch-files`), which checks every phase transition, writes atomically and resyncs the fleet
 shard — never edit it by hand. On a re-plan, `set-slices --replace` swaps the slice list
 (before `approve-plan`; with no id it empties it — aggregated BUILD); `check-cascade` (read-only) gates the ADDRESS push. Its `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` tables are the
 single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
