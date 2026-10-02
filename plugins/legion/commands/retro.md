@@ -15,7 +15,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    **State root `<state>`.** A battle may run in a dedicated worktree
    (`<main>/.claude/worktrees/<id>`), but its state lives in the **main repo**. Every
    `.legion/…` path below means `<state>/.legion/…`, where `<state>` is the `state_root` printed
-   by `python "$CLAUDE_PLUGIN_ROOT/scripts/battle_worktree.py" where --battle <id>` (JSON,
+   by `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" where --battle <id>` (JSON,
    read-only, no network; `<id>` validated as in step 1b). Check it is an existing absolute
    directory and use **absolute** paths in shell commands and in `Read` / `Write`, never a path
    built from the cwd. This retrospective **removes nothing**: the worktree and the branch stay
@@ -30,7 +30,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    ```
    and, only if `gh` exited `0`:
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-delivery --pr-json "<state>/.legion/battles/<id>/pr-status.json" --battle <id>
    ```
    - `open` → warn that the PR is not merged and **ask for confirmation** before going on.
    - `closed` → note it in `retro.md` (`Outcome`: `Shipped: no — PR fermée sans merge`).
@@ -103,7 +103,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
 4. **Close the battle first** (release the guard before writing out-of-repo):
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" close --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" close --battle <id>
    ```
    It sets `phases.reflect.status = "done"` (and resyncs the fleet, dropping the
    battle from the active view), clears `<state>/.legion/active-battle` when it points at
@@ -137,7 +137,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    then append them to the cross-battle journal:
 
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/plugin_retex.py" append \
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/plugin_retex.py" append \
      --file "<state>/.legion/battles/<id>/plugin-retex.json" --battle "<id>" --repo "<repo>"
    ```
 
@@ -195,7 +195,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
       `<state>/.legion/battles/<id>/opp-dedup-in.json`, then classify (deterministic, offline):
 
       ```bash
-      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" dedup --file "<state>/.legion/battles/<id>/opp-dedup-in.json"
+      python "${CLAUDE_PLUGIN_ROOT}/scripts/opportunity.py" dedup --file "<state>/.legion/battles/<id>/opp-dedup-in.json"
       ```
 
       It returns `{ to_create, duplicates, probable }`. **`duplicates`** (fingerprint
@@ -207,7 +207,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
       marker (`<!-- legion-opportunity: <fp> -->`), the pivot of the anti-duplicate net:
 
       ```bash
-      python "$CLAUDE_PLUGIN_ROOT/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> --out "<state>/.legion/battles/<id>/opp-<fingerprint>.md"
+      python "${CLAUDE_PLUGIN_ROOT}/scripts/opportunity.py" render --file <candidate.json> --battle "<id>" --origin-issue <n> --out "<state>/.legion/battles/<id>/opp-<fingerprint>.md"
       ```
 
    e. **CONFIRM (outward effect).** Show the user the list to create — each title + body,

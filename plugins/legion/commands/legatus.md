@@ -12,7 +12,7 @@ run from the current directory.
 Run one command (fall back to `python3` when `python` is absent, e.g. on WSL2/Linux):
 
 ```bash
-$(command -v python || command -v python3) "$CLAUDE_PLUGIN_ROOT/scripts/legatus.py" [--dry-run] [--port <N>]
+$(command -v python || command -v python3) "${CLAUDE_PLUGIN_ROOT}/scripts/legatus.py" [--dry-run] [--port <N>]
 ```
 
 **Pass through only the two supported options**, never the raw argument string:

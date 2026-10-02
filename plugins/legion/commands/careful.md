@@ -14,7 +14,7 @@ Toggle **careful mode** on the active battle. Arguments: `$ARGUMENTS`
 2. Set `guard.careful` through the state script — `on` by default / no arg, `off`
    for `off`:
    ```bash
-   python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-guard --careful on --battle <id>
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-guard --careful on --battle <id>
    ```
    (`python3` when `python` is absent.) Never edit `battle.json` by hand: the script
    validates, writes atomically and resyncs the fleet. Exit `2` = refused → relay the

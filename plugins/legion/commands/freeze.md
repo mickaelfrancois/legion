@@ -16,13 +16,13 @@ Set the write perimeter of the **active battle**. Arguments: `$ARGUMENTS`
 2. Update the perimeter through the state script:
    - `off` → clear `guard.allow` so editing is unrestricted again:
      ```bash
-     python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-guard --allow --battle <id>
+     python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-guard --allow --battle <id>
      ```
    - otherwise → set `guard.allow` to the **exact list of globs** provided
      (repo-relative, e.g. `src/Billing.Api/** tests/**`). Do not invent globs — use
      what the user gave:
      ```bash
-     python "$CLAUDE_PLUGIN_ROOT/scripts/battle_state.py" set-guard --allow <glob> [<glob> ...] --battle <id>
+     python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-guard --allow <glob> [<glob> ...] --battle <id>
      ```
    (`python3` when `python` is absent.) Never edit `battle.json` by hand: the script
    validates, writes atomically and resyncs the fleet. Exit `2` = refused → relay the
