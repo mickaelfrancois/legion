@@ -63,7 +63,7 @@ Arguments: `$ARGUMENTS`
 - `address` → §H (handle human PR review comments — repeatable, post-deliver)
 - `resume <battle-id>` → §B
 - `status` (or empty) → §C
-- `close [<battle-id>]` → §J (after the PR is merged: remove the worktree and the local branch, update the main checkout). The only accepted value is a `<battle-id>` matching `^[A-Za-z0-9][A-Za-z0-9-]*$`; refuse any option.
+- `close [<battle-id>]` → §J (after the PR is merged, **or for an aborted battle**: remove the worktree and the local branch; a delivered battle also updates the main checkout). The only accepted value is a `<battle-id>` matching `^[A-Za-z0-9][A-Za-z0-9-]*$`; refuse any option.
 - `abort [<battle-id>] [--reason <text>]` → §I (abandon a battle that will not be delivered)
 
 ---
@@ -1508,14 +1508,16 @@ targets the `.legion/active-battle` pointer, which may belong to another session
 5. The artifacts stay on disk under `<state>/.legion/battles/<id>/`. **The worktree and its
    branch are kept** (`abort` never removes them: they may hold unpushed work). If
    `battle.json` has a `worktree` block, tell the human its `path` and `branch` and that
-   removing them is their call (`git worktree remove`, then `git branch -D` once they are sure).
+   `/legion:battle close <id>` (§J) removes them, but only when no commit would be lost (it
+   refuses with `unpushed` otherwise); pushing or dropping those commits stays the human's call.
    Report: battle id, reason, assignee released or not, PR to handle or not, worktree kept or
    not.
 
-## §J — close a battle (after the PR is merged)
+## §J — close a battle (after the PR is merged, or after an abort)
 
 Use once the PR is **merged**: it removes the battle's worktree and local branch and brings the
-main checkout up to date. Only the human asks for it; never close on your own initiative.
+main checkout up to date. Also usable for an **aborted** battle that has a `worktree` block (see
+"Aborted battle" below). Only the human asks for it; never close on your own initiative.
 
 **Allowed arguments** — nothing else: an optional `<battle-id>`. Never paste `$ARGUMENTS` into a
 shell command: read the value, check it against `^[A-Za-z0-9][A-Za-z0-9-]*$`, refuse anything
@@ -1563,6 +1565,23 @@ tool is absent: ask the user to relaunch `claude` from the main repo (`state_roo
    main checkout sits on it (clean tree only).
 6. **Report**: worktree removed or not, branch deleted or not, main checkout updated or not,
    warnings. The remote branch is not deleted (GitHub's auto-delete setting decides).
+
+**Aborted battle.** When `battle.json` has `aborted` set **and** a `worktree` block, `close-check`
+and `close` switch to an "aborted" mode (`aborted: true` in their output). It replaces the merge
+proof with a proof that no commit is lost. Same steps, with these differences:
+
+- Skip step 1 (no PR proof) and step 4 (the retrospective is optional after an abort).
+- Step 2 becomes `git fetch --prune --no-tags origin`. The `--prune` is part of the proof: without
+  it a deleted remote branch leaves a stale `origin/<branch>` that would pass for a saved commit.
+- Step 3 controls are `branch_safe`, `unpushed`, `worktree_on_branch`, `worktree_clean` and
+  `not_inside` (no `pr_merged`, no `contained`). `unpushed` is ok when the branch is gone, when its
+  tip equals `worktree.base` (and `base` is still reachable from another ref), or when its tip is
+  contained in a `refs/remotes/origin/**` ref. `worktree_on_branch` fails on a detached or
+  wrong-branch worktree (its commits would vanish with it).
+- Step 5 never updates the main checkout: expect `main_updated: false`, without a warning. A commit
+  that is not on `origin` gives exit `2`, `reason: "unpushed"`, and nothing is removed.
+- Never push, commit or stash anything for the user. An aborted battle calls no `battle_state.py`
+  mutation (they are refused).
 
 ## Guardrails
 

@@ -3283,6 +3283,11 @@ def _t_doc_worktree_mode() -> None:   # GH#152 : doctrine du mode worktree
     assert "Exception — worktree mode" not in d, "§D : l'exception worktree mode est encore presente"
     assert "not available in worktree mode" not in d, "§D : lot parallele encore declare indisponible"
     assert "integration tree" in d and "--root \"<wt>\"" in d, "§D : arbre d'integration absent"
+    # GH#159 : nettoyage d'une battle abandonnee (preuve unpushed, fetch --prune)
+    i_sec = battle[battle.index("## §I"):battle.index("## §J")]
+    assert "git worktree remove" not in i_sec, "§I : git worktree remove a la main de retour"
+    j_sec = battle[battle.index("## §J"):battle.index("## Guardrails")]
+    assert "unpushed" in j_sec and "--prune" in j_sec, "§J : unpushed / --prune absents"
     # options validees par liste fermee
     assert "closed list" in battle and "`--in-place` (no value" in battle, "liste fermee de start"
 
