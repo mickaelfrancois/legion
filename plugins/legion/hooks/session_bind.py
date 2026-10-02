@@ -55,20 +55,23 @@ def _words(command: str) -> list[str] | None:
         return None
 
 
-def _battle_state_args(command: str) -> list[str] | None:
-    """Mots suivant `battle_state.py` jusqu'au premier operateur shell, ou `None`."""
+def _battle_state_calls(command: str) -> list[list[str]]:
+    """Pour chaque appel `battle_state.py` : mots qui le suivent jusqu'au prochain operateur shell."""
     words = _words(command)
     if not words:
-        return None
-    for i, w in enumerate(words):
-        if os.path.basename(w.replace("\\", "/")) == "battle_state.py":
-            out: list[str] = []
-            for x in words[i + 1:]:
-                if x and set(x) <= _PUNCT:
-                    break
-                out.append(x)
-            return out
-    return None
+        return []
+    calls: list[list[str]] = []
+    i = 0
+    while i < len(words):
+        if os.path.basename(words[i].replace("\\", "/")) == "battle_state.py":
+            j = i + 1
+            while j < len(words) and not (words[j] and set(words[j]) <= _PUNCT):
+                j += 1
+            calls.append(words[i + 1:j])
+            i = j
+        else:
+            i += 1
+    return calls
 
 
 def _parse(argv: list[str]):
@@ -77,7 +80,7 @@ def _parse(argv: list[str]):
     try:
         with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
             ns, _rest = _bs._build_parser().parse_known_args(argv)
-    except SystemExit:
+    except (Exception, SystemExit):  # noqa: BLE001 - appel malforme (_Refuse, argparse) : ignore
         return None
     if getattr(ns, "cmd", None) not in BIND_COMMANDS or not isinstance(getattr(ns, "id", None), str):
         return None
@@ -94,18 +97,43 @@ def _stdout_of(data: dict) -> str | None:
     return None
 
 
-def _proof(data: dict, root: Path, bid: str) -> bool:
-    """Succes de la commande : stdout JSON ok, sinon (stdout absent/illisible) pointeur == id vivant."""
-    out = _stdout_of(data)
-    if out is not None:
+def _json_results(out: str) -> list[dict]:
+    """Objets JSON de stdout : le texte entier, sinon une ligne = un objet (commandes enchainees)."""
+    try:
+        res = json.loads(out.strip())
+        return [res] if isinstance(res, dict) else []
+    except (ValueError, RecursionError):
+        pass
+    found: list[dict] = []
+    for line in out.splitlines():
         try:
-            res = json.loads(out.strip())
+            res = json.loads(line.strip())
         except (ValueError, RecursionError):
-            res = None
+            continue
         if isinstance(res, dict):
-            return res.get("ok") is True and res.get("battle") == bid
-    active = _bs.load_active_battle(root)
-    return active is not None and active[0] == bid and _bs._is_live(active[1])
+            found.append(res)
+    return found
+
+
+def _proofs(data: dict, root_of: list[Path], ids: list[str]) -> list[bool]:
+    """Succes de chaque appel `init`/`activate` (dans l'ordre).
+
+    Stdout avec JSON : seules les lignes portant `previous_active` (propre a init/activate) comptent ;
+    la N-ieme ligne prouve le N-ieme appel (`ok: true` et `battle == id`). Nombres differents :
+    ambigu, rien n'est lie. Stdout sans JSON : pointeur == id vivant (repli).
+    """
+    out = _stdout_of(data)
+    results = _json_results(out) if out is not None else []
+    if results:
+        lines = [r for r in results if "previous_active" in r]
+        if len(lines) != len(ids):
+            return [False] * len(ids)
+        return [r.get("ok") is True and r.get("battle") == bid for r, bid in zip(lines, ids)]
+    proofs = []
+    for root, bid in zip(root_of, ids):
+        active = _bs.load_active_battle(root)
+        proofs.append(active is not None and active[0] == bid and _bs._is_live(active[1]))
+    return proofs
 
 
 def _handle(data) -> None:
@@ -122,19 +150,25 @@ def _handle(data) -> None:
         command = inp.get("command") if isinstance(inp, dict) else None
         if not isinstance(command, str):
             return
-        argv = _battle_state_args(command)
-        if argv is None:
-            return
-        ns = _parse(argv)
-        if ns is None:
+        calls = _battle_state_calls(command)
+        if not calls:
             return
         keys = _bs.session_keys(data)
         if not keys:
             return
-        repo = getattr(ns, "repo", None)
-        root = Path(repo) if repo else _bs.main_repo_root(cwd)
-        if _proof(data, root, ns.id):
-            _bs.bind_session(root, keys[0], ns.id)
+        roots: list[Path] = []
+        ids: list[str] = []
+        for argv in calls:  # appels init/activate valides, dans l'ordre
+            ns = _parse(argv)
+            if ns is None:
+                continue
+            repo = getattr(ns, "repo", None)
+            roots.append(Path(repo) if repo else _bs.main_repo_root(cwd))
+            ids.append(ns.id)
+        # liaison finale = dernier appel reussi (une session = une battle)
+        for root, bid, ok in zip(roots, ids, _proofs(data, roots, ids)):
+            if ok:
+                _bs.bind_session(root, keys[0], bid)
     except Exception:  # noqa: BLE001 - contrat : un hook ne plante jamais la session
         return
 
@@ -159,7 +193,7 @@ def _self_test() -> int:
     if _IMPORT_ERROR is not None:
         print(f"FAIL: import battle_state : {_IMPORT_ERROR}", file=sys.stderr)
         return 1
-    tests = [_t_init, _t_activate_compound, _t_failure_proofs, _t_repo, _t_nothing, _t_probe, _t_hooks_json]
+    tests = [_t_init, _t_activate_compound, _t_failure_proofs, _t_per_call, _t_chained, _t_repo, _t_nothing, _t_probe, _t_hooks_json]
     for t in tests:
         t()
     print(f"OK: {len(tests)} tests session_bind")
@@ -195,7 +229,7 @@ def _binding(root: Path, key: str):
 
 
 def _ok(bid: str) -> str:
-    return json.dumps({"ok": True, "battle": bid})
+    return json.dumps({"ok": True, "battle": bid, "previous_active": None})
 
 
 def _t_init() -> None:
@@ -232,6 +266,39 @@ def _t_failure_proofs() -> None:
         assert _binding(root, "sid-1") is None
         _handle(_payload(f'python battle_state.py activate B --repo "{root}"', root))  # pointeur = B
         assert _binding(root, "sid-1") == "B"                        # repli sur le pointeur
+
+
+def _t_per_call() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _mk(tmp)
+        _init(root, "A")
+        # activate A echoue, puis set-guard --battle A reussit : A n'est PAS lie
+        cmd = (f'python battle_state.py activate A --repo "{root}" ; '
+               f'python battle_state.py set-guard --battle A --repo "{root}"')
+        out = json.dumps({"ok": False, "battle": "A"}) + "\n" + json.dumps({"ok": True, "battle": "A"})
+        _handle(_payload(cmd, root, stdout=out))
+        assert _binding(root, "sid-1") is None
+        # appel malforme puis activate B valide : B est lie
+        _init(root, "B")
+        cmd = (f'python battle_state.py init --nope ; python battle_state.py activate B --repo "{root}"')
+        _handle(_payload(cmd, root, stdout=_ok("B")))
+        assert _binding(root, "sid-1") == "B"
+
+
+def _t_chained() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _mk(tmp)
+        _init(root, "A")
+        _init(root, "B")
+        # lecture puis activation : la liaison suit l'activation (GH#177)
+        cmd = f'python battle_state.py validate --battle A --repo "{root}" && python battle_state.py activate B --repo "{root}"'
+        _handle(_payload(cmd, root, stdout=_ok("B")))
+        assert _binding(root, "sid-1") == "B"
+        # init puis activate : deux lignes JSON ok, liaison finale = B (une session = une battle)
+        cmd = (f'python battle_state.py init A --ticket t --title t --profile feature --repo "{root}" && '
+               f'python battle_state.py activate B --repo "{root}"')
+        _handle(_payload(cmd, root, sid="sid-2", stdout=_ok("A") + "\n" + _ok("B")))
+        assert _binding(root, "sid-2") == "B"
 
 
 def _t_repo() -> None:

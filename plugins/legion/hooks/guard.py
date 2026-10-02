@@ -76,7 +76,9 @@ Regles :
   `battle_state.py <sous-commande>` sans `--battle` (hors `init`, `activate`, `validate`,
   `session-status`) est bloquee (exit 2) si la session pilote une battle differente du pointeur
   (`source = session`) ou si le pointeur appartient a une autre session (`foreign`). Best-effort
-  (`shlex`) : commande non analysable ou erreur -> permis. Bypass `LEGION_GUARD_OFF=1`.
+  (`shlex`) : commande non analysable ou erreur -> permis. La sous-commande et `--battle` sont lus
+  par le vrai parser du CLI (GH#177 : `--repo /x validate` = `validate`) ; parser refuse ou absent ->
+  repli textuel. Bypass `LEGION_GUARD_OFF=1`.
 - file_path doit matcher >= 1 glob de `allow` ET aucun de `deny` -> autorise.
 - Hors perimetre -> exit 2 (blocage) avec la battle et les globs autorises.
 - Bypass delibere : env var `LEGION_GUARD_OFF=1` (log, ne bloque pas).
@@ -100,6 +102,8 @@ Tests CLI hors Claude Code :
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -179,6 +183,12 @@ try:
     from battle_state import probe as _probe_src
 except Exception:  # noqa: BLE001
     _probe_src = None
+# Vrai parser du CLI (GH#177) : lit la sous-commande et `--battle` sans confondre la valeur d'une
+# option globale (`--repo /x`) avec la sous-commande. Absent -> repli textuel (comportement d'avant).
+try:
+    from battle_state import _build_parser as _build_parser_src
+except Exception:  # noqa: BLE001
+    _build_parser_src = None
 
 
 def _resolved(state: Path, data) -> tuple[str | None, dict | None, str]:
@@ -1122,13 +1132,33 @@ def _battle_state_calls(command: str) -> list[list[str]]:
     while i < len(words):
         if os.path.basename(words[i].replace("\\", "/")) == "battle_state.py":
             j = i + 1
-            while j < len(words) and not set(words[j]) <= set("&|;()"):
+            while j < len(words) and not (words[j] and set(words[j]) <= set("&|;()")):
                 j += 1
             calls.append(words[i + 1:j])
             i = j
         else:
             i += 1
     return calls
+
+
+def _battle_state_subcommand(args: list[str]) -> tuple[str | None, bool]:
+    """`(sous-commande, --battle present)` d'un appel `battle_state.py` (GH#177).
+
+    Lu par le vrai parser du CLI (muet) : `--repo /x validate` -> `validate`. Parser absent ou qui
+    refuse la commande -> repli textuel : premier mot sans tiret, `--battle` cherche dans les mots.
+    """
+    if _build_parser_src is not None:
+        sink = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
+                ns, _rest = _build_parser_src().parse_known_args(args)
+            sub = getattr(ns, "cmd", None)
+            if isinstance(sub, str):
+                return sub, hasattr(ns, "battle")
+        except (Exception, SystemExit):  # noqa: BLE001 - le parser refuse : repli
+            pass
+    sub = next((a for a in args if not a.startswith("-")), None)
+    return sub, any(a == "--battle" or a.startswith("--battle=") for a in args)
 
 
 def _mutation_guard(data: dict, state: Path) -> tuple[int, str]:
@@ -1145,10 +1175,8 @@ def _mutation_guard(data: dict, state: Path) -> tuple[int, str]:
             return 0, ""
         mutating = []
         for args in _battle_state_calls(command):
-            sub = next((a for a in args if not a.startswith("-")), None)
-            if sub is None or sub in _MUTATION_FREE:
-                continue
-            if any(a == "--battle" or a.startswith("--battle=") for a in args):
+            sub, has_battle = _battle_state_subcommand(args)
+            if sub is None or sub in _MUTATION_FREE or has_battle:
                 continue
             mutating.append(sub)
         if not mutating:
@@ -2483,6 +2511,24 @@ def _t_guard_sessions(bs) -> None:
                          ("ls -la", "sidA"),
                          (f"python3 {script} 'unclosed", "sidA")):
             assert _decide(bsh(cmd, sid), main)[0] == 0, (cmd, sid)
+        # GH#177 : option globale `--repo <x>` avant la sous-commande (le parser la lit, pas le texte)
+        rp = f'python3 {script} --repo {main}'
+        for cmd, sid in ((f"{rp} validate", "sidA"),
+                         (f"{rp} init A --ticket t --title t --profile feature", "sidA"),
+                         (f"{rp} --battle A set-guard --allow y", "sidA"),
+                         (f"{rp} set-guard --allow y", "sidB")):          # session == pointeur
+            assert _decide(bsh(cmd, sid), main)[0] == 0, (cmd, sid)
+        code, msg = _decide(bsh(f"{rp} set-guard --allow y", "sidA"), main)
+        assert code == 2 and "`A`" in msg and "--battle A" in msg, (code, msg)
+        # commande que le parser refuse : regle d'avant (premier mot sans tiret)
+        code, msg = _decide(bsh(f"python3 {script} bogus-cmd", "sidA"), main)
+        assert code == 2, (code, msg)
+        assert _battle_state_subcommand(["--repo", "/x", "validate"]) == ("validate", False)
+        assert _battle_state_subcommand(["--battle=A", "close"]) == ("close", True)
+        assert _battle_state_subcommand(["bogus-cmd", "--battle", "A"]) == ("bogus-cmd", True)
+        # mot vide (`--title ""`) : n'arrete pas l'appel, `&&` le fait
+        assert _battle_state_calls('python battle_state.py init X --title "" --battle A && ls') == [
+            ["init", "X", "--title", "", "--battle", "A"]], _battle_state_calls('python battle_state.py init X --title ""')
         # G-S7 sous-processus reel du hook : deux session_id
         code, err = _run_hook(bsh(f'python3 "{script}" transition build done', "sidA"), main)
         assert code == 2 and "A" in err and "--battle" in err, (code, err)
