@@ -251,7 +251,7 @@ fermé) est inchangée. Deux ajouts rétrocompatibles dans `battle.json` : le bl
 `worktree {path, branch, base, created_at}` (écrit par `battle_state.py set-meta --worktree-path
 --worktree-branch --worktree-base`, les trois ensemble ; absent ou `null` = en place), et
 `delivery.head_ref` / `delivery.head_oid` (lus du JSON de `gh pr view`, posés par `set-delivery
---pr-json`). `scripts/battle_worktree.py` (`create`, `where`, `close-check`, `close`) fait les
+--pr-json`). `scripts/battle_worktree.py` (`create`, `start-check`, `where`, `close-check`, `close`) fait les
 opérations git locales sans jamais écrire `battle.json`. `close` exige `phases.reflect` `done`, la
 PR mergée et la branche contenue dans `origin/<default>` (ou PR mergée avec `head_oid` == tip
 local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`. Une battle abandonnée avec bloc `worktree` passe en mode abandonné : `unpushed` (aucun commit absent de `refs/remotes/origin`, ou tip == base) et `worktree_on_branch` remplacent `pr_merged` et `contained`, `reflect` n'est pas exigé et le principal n'est pas mis à jour.
@@ -444,7 +444,7 @@ plugins/legion/
 │   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
 │   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`--battle <id>` / `--root <worktree.path>` : `base` fige l'arbre d'intégration, `align` aligne un worktree de builder, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
-│   ├── battle_worktree.py       # worktree dédié d'une battle : `create` / `where` / `close-check` / `close` (opérations locales, jamais `battle.json`, jamais le réseau) (--self-test)
+│   ├── battle_worktree.py       # worktree dédié d'une battle : `create` / `start-check` / `where` / `close-check` / `close` (refus de cohabitation en place / worktree ; opérations locales, jamais `battle.json`, jamais le réseau) (--self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
 └── skills/

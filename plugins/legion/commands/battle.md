@@ -149,6 +149,21 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    issue/slug token (sanitize to `[A-Za-z0-9-]`; a numeric issue `1234` → token
    `GH-1234`). If no token is given, ask for one short slug — do not invent it.
 
+1b. **Mode check** (read-only, **before** `init`, in both modes). Run from the main repo,
+   with `--in-place` only if that option was validated:
+
+   ```bash
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_worktree.py" start-check --battle <id> [--in-place]
+   ```
+
+   A `--in-place` battle and a worktree battle never live together. It prints
+   `{ ok, mode, concurrent, in_place }` (exit `0`) or, on refusal (exit `2`), `reason`, `detail` and
+   `battles`: `in_place_live` (worktree start refused: a live `--in-place` battle writes in the
+   main checkout) or `worktree_live` (`--in-place` start refused: a live worktree battle exists).
+   On refusal relay the reason and the ids, advise finishing or aborting that battle first, and
+   **do not run `init`**: nothing has been created (no `.legion/battles/<id>/`, no pointer, no
+   session binding). The battle need not exist yet.
+
 2. **Create the battle** with `init` (never `cd`; relative to the working directory):
 
    ```bash
@@ -201,15 +216,18 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    `HEAD`, branch and index. It prints `{ ok, path, branch, base, created, copied, skipped, concurrent, warnings }`.
    `created: false` means a previous run already made a matching worktree (idempotent): go on.
    Concurrent battles are supported, each in its own worktree: `concurrent` lists the other live
-   worktree battles (information only, never a refusal). `warnings` may carry `in_place_live: <id>`:
-   a live `--in-place` battle writes in the main checkout and makes the `[main-tree]` check fault
-   for the others; relay it and advise finishing that battle first.
+   worktree battles (information only, never a refusal); `warnings` is always empty.
    Exit `2` (refused) carries `reason`; relay it and **do not advance**:
    - `dirty` (modified or untracked files in the main checkout): list them, ask the user to
      commit or stash them, or to restart with `--in-place`;
    - `not_ignored`: see §A.preflight item 4;
    - `branch_exists` / `path_exists`: a stale branch or directory. The user removes or renames
      it; never delete it yourself, never reuse it;
+   - `in_place_live` (a live `--in-place` battle writes in the main checkout; step 1b normally
+     catches it, so this is a race: that battle started in between). The battle `<id>` was just
+     `init`ed without a block: **stop**, relay the ids, and propose either
+     `/legion:battle abort <id>` or a new `create` once the in-place battle is closed or aborted.
+     Never abort automatically;
    - `aborted`, `no_commit`, `invalid`: relay the message.
 
    Then record the block, with the three values **taken from the `create` JSON** (all three

@@ -335,7 +335,7 @@ context required. A battle is resolved **by target** first (a path under `.claud
 
 **Mode worktree (défaut, `--in-place` pour l'ancien flux).** `/battle start` crée un worktree
 dédié `<repo>/.claude/worktrees/<id>` sur la branche `<me>/<token>` (`battle_worktree.py create`,
-puis `battle_state.py set-meta --worktree-path/--worktree-branch/--worktree-base`). La session
+puis `battle_state.py set-meta --worktree-path/--worktree-branch/--worktree-base`). Une battle `--in-place` et une battle en worktree ne cohabitent pas : `battle_worktree.py start-check` (avant `init`) et `create` refusent (`worktree_live` / `in_place_live`). La session
 **reste dans le dépôt principal** du `start` au `close` : elle n'entre pas dans le worktree
 (`EnterWorktree` n'est plus utilisé ; récupération seulement : session déjà dans un worktree →
 `ExitWorktree(keep)`, puis continuer depuis le principal). Le code, le build, les tests, le commit
