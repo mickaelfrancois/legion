@@ -164,17 +164,23 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    the **third** REFLECT output, alongside the project-memory learning of step 5 and the
    central plugin-RETEX journal of step 6). During a battle, gates and the builder log
    observations that fall **outside** the feature's scope in a
-   `## Hors périmètre — candidats issue` section of their artifact. Turn the actionable
-   ones into follow-up issues on the **target repo**, **without duplicates**. All `gh`
+   `## Hors périmètre — candidats issue` section of their artifact. Turn only the confirmed
+   **bugs** into follow-up issues on the **target repo**, **without duplicates**. All `gh`
    writes stay here — the script never touches the network.
 
    a. **Aggregate** every `## Hors périmètre — candidats issue` section from the artifacts
       read at step 2 (`plan.md`, each `gate-*.md`, `build-report.md`). No such section
       anywhere → skip this step entirely (write nothing, report `RAS`).
 
-   b. **Filter** — keep only what is **out of scope** AND **actionable** AND
-      **substantial**. Drop nits, vague remarks, and anything the shipped work already
-      covers. A loose filter spams the repo; be strict.
+   b. **Filter — confirmed bugs only.** Keep a candidate only if it is a **bug**: a
+      wrong behaviour that was **reproduced or observed** during the battle (a test, a
+      command output, a gate finding with a concrete failing case), out of the shipped
+      scope. Everything else is **not** filed as an issue: improvements, technical debt,
+      missing tests, defensive hardening without an observed failure, ideas, UI wishes.
+      Journal those in the plugin RETEX (step 6) when they concern the tooling, or just
+      list them in `retro.md` under « Hors périmètre écarté ». A battle that files no
+      issue is the expected case. (RETEX: filing every actionable remark grew the backlog
+      as fast as battles closed it.)
 
    c. **Build the candidate list + fetch existing issues.** Write the kept candidates to
       `<state>/.legion/battles/<id>/opportunities.json` (under the battle dir — always writable,
