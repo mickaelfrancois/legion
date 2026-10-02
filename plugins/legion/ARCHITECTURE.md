@@ -254,7 +254,7 @@ fermé) est inchangée. Deux ajouts rétrocompatibles dans `battle.json` : le bl
 --pr-json`). `scripts/battle_worktree.py` (`create`, `where`, `close-check`, `close`) fait les
 opérations git locales sans jamais écrire `battle.json`. `close` exige `phases.reflect` `done`, la
 PR mergée et la branche contenue dans `origin/<default>` (ou PR mergée avec `head_oid` == tip
-local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`.
+local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`. Une battle abandonnée avec bloc `worktree` passe en mode abandonné : `unpushed` (aucun commit absent de `refs/remotes/origin`, ou tip == base) et `worktree_on_branch` remplacent `pr_merged` et `contained`, `reflect` n'est pas exigé et le principal n'est pas mis à jour.
 
 **Écrivain unique.** `battle.json` et le pointeur `active-battle` ne sont écrits que par
 `scripts/battle_state.py` (le pointeur et la déliaison des sessions à `close` / `abort` ; la liaison `.legion/sessions/<clé>.json` est écrite par le hook `hooks/session_bind.py` via `battle_state.bind_session`, sur chaque appel `init` / `activate` d'une commande enchaînée ; le garde-fou `guard.py` lit la sous-commande et `--battle` par le vrai parser, donc `--repo /x validate` reste une lecture ; il couvre aussi `fan_in.py base|apply|cleanup` lancé sans `--battle` quand la session est liée à une autre battle que le pointeur, ou étrangère : exit 2, message qui nomme `--battle <id> --root <worktree.path>`. `align` et `--self-test` restent permis) (sous-commandes `init`, `transition`, `approve-plan`,

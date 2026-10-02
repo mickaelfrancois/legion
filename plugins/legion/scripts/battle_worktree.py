@@ -35,6 +35,12 @@ active) :
   et propre (sinon `main_updated:false` + warning). Battle sans bloc `worktree` : même preuve,
   puis suppression de la branche locale (`checkout <default>` d'abord, arbre propre exigé).
   Idempotent.
+- Battle abandonnée (`aborted` **et** bloc `worktree`) : `close-check` / `close` remplacent `pr_merged`
+  + `contained` + `reflect done` par la preuve qu'aucun commit n'est perdu : contrôle `unpushed` (branche
+  absente, ou tip == base encore atteignable depuis une autre ref, ou tip contenu dans
+  `refs/remotes/origin/**` après un `git fetch --prune` de l'appelant) et contrôle `worktree_on_branch`
+  (un worktree en HEAD détaché perdrait ses commits). Pas de `merge --ff-only` : `main_updated:false`.
+  La rétro n'est pas exigée. Sortie de `close` : champ `aborted` ajouté.
 
 Usage :
     python battle_worktree.py create --battle <id>
@@ -423,14 +429,26 @@ def _close_check(cwd: str, battle_id: str) -> tuple[dict, dict]:
     tip, branch, wt, source = _tip_and_branch(main, battle_id, battle)
     default = _default_branch(main)
     merged = delivery.get("pr_state") == "merged"
-    checks = [{"name": "pr_merged", "ok": merged,
-               "detail": f"delivery.pr_state = {delivery.get('pr_state')!r}"}]
+    aborted_mode = battle.get("aborted") is not None and wt is not None
+    checks = [] if aborted_mode else [{"name": "pr_merged", "ok": merged,
+                                       "detail": f"delivery.pr_state = {delivery.get('pr_state')!r}"}]
     shape_ok = (branch != default and not branch.startswith("-")
                 and _run(main, "check-ref-format", "--branch", branch)[0] == 0)
     checks.append({"name": "branch_safe", "ok": shape_ok,
                    "detail": "forme attendue, distincte de la branche par défaut" if shape_ok else
                              f"branche à supprimer {branch!r} : branche par défaut ({default}) ou nom invalide"})
-    if tip is None and source == "derived":
+    if aborted_mode:
+        checks.append(_unpushed_check(main, branch, tip, wt))
+        path = _real(wt["path"])
+        if os.path.isdir(path) and path in _registered(main):
+            on = _registered(main)[path]
+            checks.append({"name": "worktree_on_branch", "ok": on == branch,
+                           "detail": f"worktree sur {branch}" if on == branch else
+                                     f"worktree sur {on or 'HEAD détaché'}, pas sur {branch} : "
+                                     "des commits pourraient être perdus à la suppression"})
+        else:
+            checks.append({"name": "worktree_on_branch", "ok": True, "detail": "worktree absent"})
+    elif tip is None and source == "derived":
         contained = {"name": "contained", "ok": False,
                      "detail": f"branche {branch} absente, mais ce nom est déduit de git config, pas de la "
                                "PR : rafraîchir la PR (gh pr view … headRefName,headRefOid puis "
@@ -448,7 +466,8 @@ def _close_check(cwd: str, battle_id: str) -> tuple[dict, dict]:
             contained = {"name": "contained", "ok": False,
                          "detail": f"{branch} ({tip[:12]}) n'est pas dans origin/{default} : "
                                    "commits locaux non poussés ou fetch manquant"}
-    checks.append(contained)
+    if not aborted_mode:
+        checks.append(contained)
     modified: list[str] = []
     untracked: list[str] = []
     if wt:
@@ -466,7 +485,38 @@ def _close_check(cwd: str, battle_id: str) -> tuple[dict, dict]:
     res = {"ok": all(c["ok"] for c in checks), "checks": checks,
            "modified": modified[:_MAX_LIST], "untracked": untracked[:_MAX_LIST]}
     return res, {"main": main, "battle": battle, "tip": tip, "branch": branch, "wt": wt,
-                 "default": default}
+                 "default": default, "aborted": aborted_mode}
+
+
+def _remote_containing(main: str, oid: str) -> list[str]:
+    """Refs `refs/remotes/origin/**` qui contiennent `oid` (vide si aucune)."""
+    rc, out, _ = _run(main, "for-each-ref", "--contains", oid, "--format=%(refname)", "refs/remotes/origin/")
+    return [ln for ln in out.splitlines() if ln] if rc == 0 else []
+
+
+def _reachable_elsewhere(main: str, oid: str, branch: str) -> bool:
+    """`oid` est atteignable depuis une ref autre que `refs/heads/<branch>` (heads ou origin)."""
+    rc, out, _ = _run(main, "for-each-ref", "--contains", oid, "--format=%(refname)",
+                      "refs/heads/", "refs/remotes/origin/")
+    if rc != 0:
+        return False
+    return any(ln and ln != f"refs/heads/{branch}" for ln in out.splitlines())
+
+
+def _unpushed_check(main: str, branch: str, tip: str | None, wt: dict) -> dict:
+    """Preuve qu'aucun commit n'est perdu à la suppression d'une battle abandonnée."""
+    if tip is None:
+        return {"name": "unpushed", "ok": True, "detail": f"branche {branch} absente (déjà supprimée)"}
+    base = wt.get("base")
+    if tip == base and isinstance(base, str) and _SHA_RE.fullmatch(base) \
+            and _reachable_elsewhere(main, base, branch):
+        return {"name": "unpushed", "ok": True, "detail": f"{branch} == base : aucun commit de battle"}
+    refs = _remote_containing(main, tip)
+    if refs:
+        return {"name": "unpushed", "ok": True, "detail": f"{branch} contenue dans {refs[0]}"}
+    return {"name": "unpushed", "ok": False,
+            "detail": f"{branch} ({tip[:12]}) a des commits absents de refs/remotes/origin : pousser la "
+                      "branche ou abandonner ces commits à la main ; fetch --prune manquant ?"}
 
 
 def close(cwd: str, battle_id: str) -> dict:
@@ -479,7 +529,8 @@ def close(cwd: str, battle_id: str) -> dict:
 def _close(cwd: str, battle_id: str) -> dict:
     res, ctx = _close_check(cwd, battle_id)
     main, battle, branch, wt, default = ctx["main"], ctx["battle"], ctx["branch"], ctx["wt"], ctx["default"]
-    if not _reflect_done(battle):
+    aborted = ctx["aborted"]
+    if not aborted and not _reflect_done(battle):
         raise _Refusal("reflect_pending", "phases.reflect n'est pas `done` : lancer /legion:retro d'abord")
     failed = [c for c in res["checks"] if not c["ok"]]
     if failed:
@@ -509,7 +560,9 @@ def _close(cwd: str, battle_id: str) -> dict:
         branch_deleted = True
     pruned = _run(main, "worktree", "prune")[0] == 0
     main_updated = False
-    if main_cur != default:
+    if aborted:
+        pass  # battle abandonnée : rien n'a été mergé, le principal n'est jamais avancé
+    elif main_cur != default:
         warnings.append(f"principal sur {main_cur or 'HEAD détaché'}, pas sur {default} : non avancé")
     elif _status(main) != ([], []):
         warnings.append(f"principal sur {default} mais pas propre : non avancé")
@@ -521,7 +574,7 @@ def _close(cwd: str, battle_id: str) -> dict:
             warnings.append(f"merge --ff-only origin/{default} impossible : "
                             f"{(err.strip().splitlines() or ['?'])[0]}")
     return {"ok": True, "removed": removed, "branch_deleted": branch_deleted, "pruned": pruned,
-            "main_updated": main_updated, "warnings": warnings}
+            "main_updated": main_updated, "warnings": warnings, "aborted": aborted}
 
 
 # --- CLI -----------------------------------------------------------------------------------
@@ -951,6 +1004,116 @@ def _t_close_derived_name_absent(tmp: str) -> None:
     fx.battle(delivery={"pr_state": "merged", "head_ref": "livree/7"}, phases={"reflect": {"status": "done"}})
     cc = close_check(fx.main, "B")
     assert cc["ok"] and "déjà supprimée" in {c["name"]: c for c in cc["checks"]}["contained"]["detail"], cc
+
+
+def _aborted_fx(tmp: str) -> tuple[_Fx, dict]:
+    """Battle `B` abandonnée (`aborted`), avec worktree créé, rétro `pending`."""
+    fx = _Fx(tmp)
+    res = fx.created()
+    fx.battle(aborted={"at": "T", "reason": None}, worktree=fx.wt_block(res))
+    return fx, res
+
+
+def _checks(cc: dict) -> dict:
+    return {c["name"]: c["ok"] for c in cc["checks"]}
+
+
+def _t_close_aborted_no_commit(tmp: str) -> None:
+    fx, res = _aborted_fx(tmp)
+    cc = close_check(fx.main, "B")
+    assert cc["ok"] and "pr_merged" not in _checks(cc) and "contained" not in _checks(cc), cc
+    assert _checks(cc)["unpushed"] and _checks(cc)["worktree_on_branch"], cc
+    before = _snapshot(fx)
+    out = close(fx.main, "B")
+    assert out["ok"] and out["removed"] and out["branch_deleted"] and out["pruned"], out
+    assert out["aborted"] is True and out["main_updated"] is False and out["warnings"] == [], out
+    assert _snapshot(fx) == before, "principal modifié"
+    assert not os.path.exists(res["path"]) and _branch_tip(fx.main, res["branch"]) is None
+    assert fx.git(fx.main, "worktree", "list", "--porcelain").count("worktree ") == 1
+    again = close(fx.main, "B")
+    assert again["ok"] and not again["removed"] and not again["branch_deleted"], again
+
+
+def _t_close_aborted_unpushed(tmp: str) -> None:
+    fx, res = _aborted_fx(tmp)
+    tip = fx.commit_in(res["path"], "f1.txt")
+    before = _snapshot(fx)
+    out = close(fx.main, "B")
+    assert not out["ok"] and out["reason"] == "unpushed", out
+    p = subprocess.run([sys.executable, os.path.abspath(__file__), "close", "--battle", "B"],
+                       cwd=fx.main, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert p.returncode == 2 and json.loads(p.stdout)["reason"] == "unpushed", (p.returncode, p.stdout, p.stderr)
+    assert os.path.isdir(res["path"]) and _branch_tip(fx.main, res["branch"]) == tip
+    assert _snapshot(fx) == before
+
+
+def _t_close_aborted_pushed(tmp: str) -> None:
+    fx, res = _aborted_fx(tmp)
+    tip = fx.commit_in(res["path"], "f1.txt")
+    fx.merge_to_origin(res["branch"])  # pousse la branche, avance origin/main, fetch
+    head = fx.git(fx.main, "rev-parse", "HEAD")
+    assert head != fx.git(fx.main, "rev-parse", "origin/main")
+    out = close(fx.main, "B")
+    assert out["ok"] and out["removed"] and out["branch_deleted"] and out["main_updated"] is False, out
+    assert not os.path.exists(res["path"]) and _branch_tip(fx.main, res["branch"]) is None
+    assert fx.git(fx.main, "rev-parse", "HEAD") == head
+    assert fx.git(fx.main, "rev-parse", f"refs/remotes/origin/{res['branch']}") == tip
+
+
+def _t_close_aborted_dirty(tmp: str) -> None:
+    fx, res = _aborted_fx(tmp)
+    fx.write(res["path"], "u.txt", "u\n")
+    out = close(fx.main, "B")
+    assert not out["ok"] and out["reason"] == "worktree_clean" and "u.txt" in out["untracked"], out
+    assert os.path.isdir(res["path"]) and _branch_tip(fx.main, res["branch"]) is not None
+
+
+def _t_close_aborted_detached(tmp: str) -> None:
+    fx, res = _aborted_fx(tmp)
+    fx.git(res["path"], "checkout", "-q", "--detach")
+    fx.commit_in(res["path"], "lost.txt")
+    out = close(fx.main, "B")
+    assert not out["ok"] and out["reason"] == "worktree_on_branch", out
+    assert os.path.isdir(res["path"]) and _branch_tip(fx.main, res["branch"]) is not None
+
+
+def _t_close_not_aborted_unchanged(tmp: str) -> None:
+    fx = _Fx(tmp)
+    res = fx.created()
+    fx.battle(worktree=fx.wt_block(res), delivery={"pr_state": "open"}, phases={"reflect": {"status": "done"}})
+    cc = close_check(fx.main, "B")
+    assert _checks(cc)["pr_merged"] is False and "unpushed" not in _checks(cc), cc
+    assert "worktree_on_branch" not in _checks(cc), cc
+    out = close(fx.main, "B")
+    assert not out["ok"] and out["reason"] == "pr_merged", out
+    assert os.path.isdir(res["path"]) and _branch_tip(fx.main, res["branch"]) is not None
+    fx.battle(aborted={"at": "T", "reason": None}, delivery={"pr_state": "open"})  # abandonnée sans worktree
+    out = close(fx.main, "B")
+    assert not out["ok"] and out["reason"] in ("pr_merged", "reflect_pending", "contained"), out
+
+
+def _t_close_aborted_stale_remote(tmp: str) -> None:
+    fx, res = _aborted_fx(tmp)
+    fx.commit_in(res["path"], "f1.txt")
+    fx.git(fx.main, "push", "-q", "origin", res["branch"])
+    fx.git(fx.origin, "branch", "-q", "-D", res["branch"])  # supprimée côté distant, ref locale périmée
+    assert close_check(fx.main, "B")["ok"], "sans --prune la ref périmée passe (d'où le fetch --prune de §J)"
+    fx.git(fx.main, "fetch", "-q", "--prune", "--no-tags", "origin")
+    out = close(fx.main, "B")
+    assert not out["ok"] and out["reason"] == "unpushed", out
+    assert os.path.isdir(res["path"]) and _branch_tip(fx.main, res["branch"]) is not None
+
+
+def _t_close_aborted_base_orphan(tmp: str) -> None:
+    fx = _Fx(tmp)
+    fx.commit_in(fx.main, "local.txt")  # commit local non poussé du principal
+    res = fx.created()
+    fx.battle(aborted={"at": "T", "reason": None}, worktree=fx.wt_block(res))
+    fx.git(fx.main, "reset", "-q", "--hard", "HEAD~1")  # base n'existe plus que sur la branche de battle
+    assert _branch_tip(fx.main, res["branch"]) == res["base"]
+    out = close(fx.main, "B")
+    assert not out["ok"] and out["reason"] == "unpushed", out
+    assert os.path.isdir(res["path"]) and _branch_tip(fx.main, res["branch"]) == res["base"]
 
 
 def _t_cross_state_guard(tmp: str) -> None:

@@ -351,7 +351,7 @@ optionnel `worktree {path, branch, base, created_at}` (absent ou `null` = en pla
 `/battle close [<id>]`, lancé depuis le principal, prouve que la PR est mergée et la branche
 contenue dans `origin/<default>` (ascendance, ou PR mergée et `head_oid` == tip local, pour le
 squash/rebase), que le worktree est propre, puis supprime worktree et branche locale
-(`battle_worktree.py close-check` / `close`, jamais `--force`). Un `build all --auto` en mode
+(`battle_worktree.py close-check` / `close`, jamais `--force`). Pour une battle abandonnée avec bloc `worktree`, `close` remplace ces preuves par « aucun commit perdu » (`unpushed`, après `git fetch --prune --no-tags origin`), sans rétro ni mise à jour du principal. Un `build all --auto` en mode
 worktree lance le lot parallèle : `fan_in.py base|apply|cleanup` portent `--battle <id> --root
 <worktree.path>` (l'arbre d'intégration est le worktree de la battle) et les builders vivent sous
 `<principal>/.claude/worktrees/agent-*`, à côté du worktree de la battle (refusé comme worktree de builder).
