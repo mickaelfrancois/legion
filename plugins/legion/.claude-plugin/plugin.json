@@ -1,7 +1,7 @@
 {
   "name": "legion",
   "description": "Battle orchestration stack for solo/indie .NET projects on GitHub, inspired by gstack. Drives a Think→Plan→Build→Lint→Review→Test→Deliver→Reflect pipeline with role-based gate agents, a builder producer, per-repo battle state, a multi-repo fleet view and write-scope guardrails. Orchestrates — it delegates the actual .NET work to dotnet-claude-kit.",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "author": {
     "name": "Mickaël FRANCOIS"
   }
