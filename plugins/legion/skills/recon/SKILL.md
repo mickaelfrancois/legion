@@ -34,8 +34,8 @@ back as a **« Cadrage »** section on the issue. The payoff is downstream:
   environment (current behaviour, a file, an existing convention): establishing it is
   your job. A **decision** is about what to build (scope, criterion, trade-off,
   priority): only the user takes it. Never write a `**Décisions.**` line for a question
-  that was not asked in a round. A recommendation accepted by `ok` or by silence is a
-  valid decision — it was asked.
+  that was not asked in a round. A recommendation accepted by selecting it is a valid
+  decision — it was asked.
 
 ## §1 — Preflight
 
@@ -71,7 +71,7 @@ back as a **« Cadrage »** section on the issue. The payoff is downstream:
 
 Interview the user **relentlessly** about the feature until you reach a **shared
 understanding**. Map the decisions as a tree: each decision opens the ones that
-depend on it. Ask in **rounds**, and let the user answer only where they disagree.
+depend on it. Ask in **rounds**, each round being **one `AskUserQuestion` call**.
 
 ### Pre-scan (coverage) — before the first round
 
@@ -83,11 +83,14 @@ Rate each of the seven branches from the issue as it stands: **intent**, **in sc
 - **Partial** — present but ambiguous or incomplete.
 - **Missing** — absent.
 
-Show the ratings as a compact table (branch | rating | one-line reason) before the
-first round, and let the user correct it ("non, le périmètre est Partial"). A branch
-wrongly rated Clear would never be questioned, so the table is the user's check.
-**Only Partial and Missing branches are questioned.** On the create path (§1, no issue
-yet), every branch is Missing.
+Show the ratings as a compact table (branch | rating | one-line reason) in text before
+the first round. A branch wrongly rated Clear would never be questioned, so the table is
+the user's check: the **first question of round 1** validates it (header `Pré-scan`,
+options « Correct (Recommandé) » / « À corriger » — the user names the correction
+through the free answer, e.g. « le périmètre est Partial »). A correction adds the
+newly Partial/Missing branches' questions to the next round. **Only Partial and Missing
+branches are questioned.** On the create path (§1, no issue yet), every branch is
+Missing — the validation question is still asked.
 
 ### Rounds
 
@@ -95,39 +98,46 @@ yet), every branch is Missing.
   answer hinges on another question still open goes to a **later** round, never the
   same one. Resolve a decision before asking the ones that depend on it; surface
   trade-offs as you go.
-- **Number the questions; at most 5 per round.** If more than 5 can be asked, keep the
-  5 with the highest impact on scope or acceptance criteria and carry the rest to the
-  next round. There is no cap on the number of rounds.
+- **At most 4 questions per round** — the `AskUserQuestion` limit. If more can be
+  asked, keep the 4 with the highest impact on scope or acceptance criteria and carry
+  the rest to the next round. There is no cap on the number of rounds.
 - **Recommend an answer to every question, with a short justification.** Don't ask
   blank questions: the user reacts to a concrete proposal rather than starting from
   nothing.
-- **Lettered options when there are real alternatives.** Such a question offers **2 to 4
-  lettered options** (a, b, c, d) in their natural order — do not move the recommended
-  one to the top. The ➡️ line gives the recommended **letter** and its justification.
-  Add no « autre » option: a free answer is always accepted (« 2: autre chose… »). Keep
-  an open question only when the answers cannot be listed (a name, a free threshold).
-  Why: without visible alternatives the user can still answer freely, but only by
-  inventing an answer, so in practice they rarely deviate from the recommendation.
-- **Plain text, not `AskUserQuestion`.** A text round lets the user answer only the
-  numbers they want to change; the tool forces one interaction per question.
-- **Format of a round:**
-  ```markdown
-  **Q1 — <titre court>.** <la question>
-  - a. <option>
-  - b. <option>
-  - c. <option>
-
-  ➡️ Recommandé : **b** — <justification courte>
-
-  **Q2 — <titre court>.** <question ouverte : réponse non énumérable>
-  ➡️ Recommandé : <réponse> — <justification courte>
+- **2 to 4 options per question, the recommended one first.** Its label ends with
+  ` (Recommandé)`; its `description` carries the short justification. The other
+  options' descriptions state their consequence or trade-off. Add no « autre » option:
+  the tool always offers a free answer.
+- **Open questions** (a name, a free threshold — answers that cannot be listed) still
+  go through the tool: the recommended value is the first option, plus one plausible
+  alternative; the free answer covers the rest.
+- **`header`** is the question's short title (≤ 12 characters). Use `multiSelect` only
+  when several answers genuinely combine (e.g. which items enter the scope); a
+  multi-select question still marks its recommended options ` (Recommandé)`.
+- **Text around the call.** Before the call, give in plain text whatever the
+  questions need and cannot hold — the facts found in the repo, a trade-off too long
+  for a description, the « En attente d'exploration » line. Keep it short.
+- **Format of a round** (one call):
+  ```json
+  {"questions": [
+    {"question": "<la question>", "header": "<titre court>", "multiSelect": false,
+     "options": [
+       {"label": "<option> (Recommandé)", "description": "<justification courte>"},
+       {"label": "<option>", "description": "<conséquence / compromis>"}
+     ]}
+  ]}
   ```
-  End the round with one line: « Réponds `ok`, ou seulement les numéros à changer. »
 
-### Answers by exception
+### Reading the answers
 
-- **`ok` accepts the whole round.** A question left unanswered in a reply **accepts
-  its recommendation**. The user only answers to deviate (« 2: b »).
+- **The recommended option selected** → the recommendation is the decision.
+- **Another option selected** → it is the decision, logged with its ` _(écart : …)_`
+  (see §3).
+- **A free answer** → read what it actually says. It may be a decision (logged as
+  text, with its écart), a correction of the pre-scan, a question back, or a request
+  to stop: follow it — never map it onto the nearest option.
+- **No answer** (call refused, dismissed, tool unavailable) → nothing is decided:
+  never assume the recommendations. Say so in text and ask how to proceed.
 - **An answer that contradicts an earlier decision reopens that branch** in the next
   round: its « Décisions » line is **replaced**, never duplicated, and the questions
   that depended on it are asked again.
@@ -148,10 +158,10 @@ yet), every branch is Missing.
 - **Never block a round on an exploration.** While `Explore` runs, the round asks the
   questions that do not depend on it. A question that needs the fact being searched
   depends on an open answer (see Rounds): it moves to the round after the result. Say
-  so in the round with one line: « En attente d'exploration : <fait> ». If every
-  remaining question waits on an exploration, announce the wait and hold the round
-  until `Explore` returns — do not fall back to a direct large search, which would
-  bring the dumps back into the interview.
+  so in the text before the call with one line: « En attente d'exploration : <fait> ».
+  If every remaining question waits on an exploration, announce the wait and hold the
+  round until `Explore` returns — do not fall back to a direct large search, which
+  would bring the dumps back into the interview.
 - **Fallback.** `Explore` unavailable, failing or empty → search directly with
   `Grep` / `Read`. Still nothing → an **assumption to confirm in PLAN** (rule below).
   Never ask the user for a fact the repo can give.
@@ -180,10 +190,11 @@ acceptance criteria are checkable, the out-of-scope is stated explicitly, and th
 dependencies are resolved. That is "shared understanding" — don't stop earlier, don't
 drag past it.
 
-**Nothing to sharpen.** If every branch is Clear (after any correction of the table),
-run no round: go to §3 and write a **minimal « Cadrage »** built from the issue, without
-a new « Décisions » line — but if the issue already carries a `**Décisions.**` rubric
-(re-run), keep it as is (see §3). It still goes through §4 — same OK, same `legion-recon`
+**Nothing to sharpen.** If every branch is Clear, round 1 holds only the pre-scan
+validation question; once it is answered « Correct », run no further round: go to §3
+and write a **minimal « Cadrage »** built from the issue, without a new « Décisions »
+line — but if the issue already carries a `**Décisions.**` rubric (re-run), keep it as
+is (see §3). It still goes through §4 — same OK, same `legion-recon`
 label — so the issue carries the structured rubrics `start` seeds `spec.md` from.
 
 ## §3 — Synthesize the « Cadrage »
@@ -226,8 +237,8 @@ pour l'instant" rather than leaving it blank).
 `- <question courte> → <réponse retenue>`. When the answer departs from your
 recommendation, append ` _(écart : reco « <recommandation> »)_`, so the `architect`
 sees the rejected recommendation without reading the issue. Write the retained answer
-and the recommendation **as text** (the option's wording), never as a bare letter: a
-letter means nothing outside its round. Keep the label
+and the recommendation **as text** (the option's wording, without the ` (Recommandé)`
+suffix), never as a bare option number. Keep the label
 **exactly** `**Décisions.**`: `/legion:battle start` looks for it to copy these lines
 into `spec.md`. Omit the rubric when no question was asked **and** the issue carries
 no earlier `**Décisions.**` rubric — an earlier one is always kept (see the re-run
@@ -247,9 +258,13 @@ decisions the `architect` must still see.
      re-run).
    - Otherwise **append** the « Cadrage » section **below the original idea**, leaving
      the original text **intact**.
-2. **CONFIRM.** Show the user the full new issue body (or a clear diff), and note that
-   the write also **poses the `legion-recon` label**. **Wait for an explicit OK.** Do not
-   write before that. The label follows this **same OK** — never ask a second time for it.
+2. **CONFIRM.** Show the user the full new issue body (or a clear diff) in text, then
+   ask through `AskUserQuestion` (header `Publication`), noting that the write also
+   **poses the `legion-recon` label**. Options: « Publier (Recommandé) » ·
+   « Modifier » (the user says what to change; apply it and ask again) · « Afficher le
+   bloc seulement » (print the « Cadrage » for manual paste, write nothing). Only
+   « Publier » is an OK: no answer, or a free answer that is not a clear OK, writes
+   nothing. The label follows this **same OK** — never ask a second time for it.
 3. **Write** via a temp body file (avoids shell-quoting issues with multi-line French),
    and **pose the `legion-recon` label** in the same confirmed write. Create the label
    first (idempotent, same pattern as `legion-opportunity` in `commands/retro.md`), then
@@ -271,10 +286,12 @@ decisions the `architect` must still see.
 
 - Pre-THINK and stateless: nothing under `.legion/`, no battle started.
 - Pre-scan shown first; only Partial / Missing branches are questioned.
-- Rounds of ≤5 independent numbered questions, a recommended answer + short
-  justification each; real alternatives as 2-4 lettered options (➡️ = letter +
-  justification, a free answer still accepted; « Décisions » lines in text, not
-  letters); `ok` or silence = recommendation accepted; explore the repo
+- Pre-scan validated by the first question of round 1.
+- One round = one `AskUserQuestion` call of ≤4 independent questions; 2-4 options each,
+  the recommended one first, labelled ` (Recommandé)`, its justification in the
+  description; open questions too (recommended value + one alternative, free answer
+  for the rest); « Décisions » lines in text; a free answer is read for what it says;
+  no answer = nothing decided; explore the repo
   before asking — large searches via a background `Explore` (never blocking the round),
   direct `Read`/`Grep` otherwise; every `file:line` re-checked with `Read`.
 - A contradicting answer reopens its branch and replaces its « Décisions » line.
@@ -283,7 +300,8 @@ decisions the `architect` must still see.
   line without a question asked in a round; a contradicting fact reopens the branch,
   never a silent correction.
 - « Cadrage » in French; identifiers English.
-- Confirm before the `gh issue edit`; degrade to paste-ready output if `gh` is absent.
+- Confirm before the `gh issue edit` through `AskUserQuestion` (only « Publier » is an
+  OK); degrade to paste-ready output if `gh` is absent.
 - Pose the `legion-recon` label at the outward write (both the `gh issue edit` and the
   `gh issue create` fallback), created idempotently: **non-blocking** (a label failure
   warns, the « Cadrage » prevails) and under the **same OK** as the body — never a second
