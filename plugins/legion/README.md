@@ -58,8 +58,9 @@ optionnelle et répétable : elle n'existe que si la PR reçoit des commentaires
 
 ### Run autonome (défaut)
 
-Le seul rendez-vous garanti avec toi est l'**approbation du plan** (après PLAN). Sur
-ton OK, l'orchestrateur enchaîne seul `build → lint → review → test → security →
+Le seul rendez-vous garanti avec toi est l'**approbation du plan** (après PLAN). Tu peux
+d'abord ouvrir `plan.md` dans VS Code et l'annoter : l'`architect` intègre tes annotations
+puis la question revient. Sur ton OK, l'orchestrateur enchaîne seul `build → lint → review → test → security →
 deliver`, **pousse et ouvre la PR sans nouvelle confirmation** — tu relis le code sur
 GitHub. Un build qui **compile** déclenche la cascade (les warnings sont **non
 bloquants** : juste loggés dans `build-report.md` et relayés). Un `revise` ouvre une

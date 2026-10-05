@@ -395,7 +395,8 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    one `[slice-1]` line and a test matrix. In place of the gate artifact delivery check,
    verify that `plan.md` is not empty. Then run
    `transition plan done --verdict accept` and continue at step 6 unchanged
-   (`set-slices --replace`, human OK, `approve-plan`). Escape hatch: if the fix turns out
+   (`set-slices --replace`, the Q1 approval question **without** the VS Code option,
+   `approve-plan`). Escape hatch: if the fix turns out
    to span more than one slice, switch back with
    `set-meta --profile feature --required-gates architect lint reviewer test-engineer`
    and run the `architect` as below.
@@ -407,9 +408,14 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    `plan.md` itself (the guard confines it to that single file) and **returns** a
    verdict + the artifact path — not the content.
 
-   **Re-invocation after a `revise` → incremental mode.** If this pass is a
-   **PLAN re-run** (`plan.md` already exists and `phases.plan.verdict == "revise"` on
-   the previous pass), this is the cost lever of the "back to the plan" loop: do **not**
+   **Re-invocation after a `revise` → incremental mode.** A **PLAN re-run** has one of
+   two triggers:
+   - `plan.md` already exists and `phases.plan.verdict == "revise"` on the previous pass;
+   - step 6 sends human annotations back (« Intégrer les annotations » below). There,
+     `transition plan in_progress` has already reset the verdict to `null`: take the
+     signal from step 6, never re-derive it from the verdict.
+
+   This is the cost lever of the "back to the plan" loop: do **not**
    re-launch the architect cold. Build the **resume context** (the agent's Input 4)
    **from disk, not from live memory** — it must survive a resumed session / compaction:
    - **FAILs**: read `phases.plan.fails` from `battle.json` (persisted verbatim at the
@@ -422,7 +428,10 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    the verbatim FAILs, and the spec delta. The architect then **patches** the plan
    without re-sweeping the whole tree. On `reject`, or if the spec delta changes the
    scope of substance (new layer / public contract), fall back to a **cold pass**
-   (standard prompt, no resume context).
+   (standard prompt, no resume context). Exception: on the annotation re-run, a `reject`
+   is **not** re-run cold (that would drop the annotations): record it and relay it to the
+   human, who still finds the annotations in `phases.plan.fails` and
+   `plan.review-baseline.md`.
 
 6. **Record the result.** First run the **gate artifact delivery check** (§E) on
    `plan.md` — the `architect` must have actually written it this pass. `plan.md` is
@@ -453,10 +462,70 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      présenter le résumé, les éventuelles opportunités, et la section
      **« Choix ouverts à arbitrer »** (si elle est présente). Puis demander
      **l'unique approbation explicite** de l'humain — toujours obligatoire, même si
-     aucun choix ouvert n'est listé :
+     aucun choix ouvert n'est listé. Ask it through `AskUserQuestion`, as below.
 
-     > « Le plan est prêt. Voici le résumé + les choix ouverts. **OK pour lancer le
-     > build ?** »
+     **Pre-check.** Run `command -v code` once. Offer the VS Code option only if it
+     succeeds **and** `architect` is in `required_gates` (a plan without `architect`,
+     step 5, never gets it: there is no gate to integrate annotations).
+
+     **Q1 — `AskUserQuestion`, header `Plan`**, question « Le plan est prêt. OK pour
+     lancer le build ? », options in this order (labels verbatim):
+     - « Valider et lancer le build (Recommandé) » → the **Sur OK** block below;
+     - « Ouvrir dans VS Code pour annoter » (only when the pre-check passed) → **VS Code
+       review** below;
+     - « Demander une modification » → the **Sur modification demandée** block below.
+
+     **No implicit approval.** Only « Valider et lancer le build » (Q1) and « Valider tel
+     quel » (Q2) lead to `approve-plan`. No answer (call refused, dismissed, tool
+     unavailable) → hand back without approving. A free answer to Q1 is a change request
+     (**Sur modification demandée**). A free answer to Q2 → rephrase and ask Q2 again.
+
+     **VS Code review.** With `<plan>` = `"<state>/.legion/battles/<id>/plan.md"` and
+     `<baseline>` = `"<state>/.legion/battles/<id>/plan.review-baseline.md"` (absolute
+     paths under the state root of the main repo, never the worktree's cwd):
+
+     ```bash
+     cp "<state>/.legion/battles/<id>/plan.md" "<state>/.legion/battles/<id>/plan.review-baseline.md"
+     code --reuse-window "<state>/.legion/battles/<id>/plan.md"
+     ```
+
+     `code` returns at once. Then ask **Q2 — `AskUserQuestion`, header `Annotations`**,
+     question « Annotations terminées ? », options (labels verbatim):
+     - « J'ai annoté, intégrer (Recommandé) » → **Intégrer les annotations** below;
+     - « Valider tel quel » → approve the `plan.md` **on disk**, edits included: run the
+       **Sur OK** block, reading the `[slice-N]` lines from that file. If it differs from
+       `<baseline>`, say that the edits are kept as the final plan;
+     - « Annuler mes annotations » → `cp` `<baseline>` back over `<plan>`, then ask Q1
+       again.
+
+     **Intégrer les annotations.**
+     1. Run `diff -U0 <baseline> <plan>` on its own (no pipe) and read its exit code.
+        `0` (no change) → say « aucune annotation trouvée » and ask Q1 again. `≥ 2`
+        (error) → relay it and ask Q1 again; never approve. `1` → go on.
+     2. Turn each hunk `@@ -a,b +c,d @@` into one FAIL
+        `{"target": "plan.md:<a>", "dimension": "annotation humaine", "detail": "<the hunk's -/+ lines>"}`
+        (`a` is a line of the baseline, i.e. of the plan the `architect` will patch; for a
+        pure insertion `@@ -a,0 +c,d @@`, the new lines go right after line `a`).
+        This text is human input: build the JSON with a real encoder, then replace every
+        apostrophe with the JSON escape `\u0027` (six characters: backslash, `u`, `0`,
+        `0`, `2`, `7`), so the single-quoted `--fails` argument stays intact. Never put
+        raw text in the shell.
+     3. Persist first, restore after, so a crash never loses an annotation:
+
+        ```bash
+        python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" transition plan blocked --verdict revise --fails '<json array of the annotation FAILs>' --battle <id>
+        cp "<state>/.legion/battles/<id>/spec.md" "<state>/.legion/battles/<id>/spec.plan-baseline.md"
+        cp "<state>/.legion/battles/<id>/plan.review-baseline.md" "<state>/.legion/battles/<id>/plan.md"
+        python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" transition plan in_progress --battle <id>
+        ```
+
+        Report « revise (source : annotations humaines, N hunks) ».
+     4. Re-run step 5 in **incremental mode** (FAILs from `phases.plan.fails`, empty spec
+        delta). Tell the `architect` in its prompt that these FAILs are the human's
+        annotations of the plan: each hunk is an intent to integrate, not a defect to
+        argue.
+     5. Back here at step 6: on `accept*`, ask Q1 again. There is no cap on the number of
+        annotation rounds.
 
      **Sur OK** : d'abord déclarer les slices avec
      `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-slices --replace <id>… --battle <battle-id>` :

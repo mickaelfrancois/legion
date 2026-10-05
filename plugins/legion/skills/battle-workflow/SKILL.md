@@ -37,7 +37,9 @@ advance on `revise` or `reject` — a fix loops back to BUILD.
 
 **Point d'arbitrage unique.** Le seul rendez-vous garanti avec l'humain est
 l'**approbation du plan** (après PLAN, avant BUILD). L'orchestrateur présente le
-résumé du `plan.md` avec ses choix ouverts et attend un OK explicite. Toujours
+résumé du `plan.md` avec ses choix ouverts et attend un OK explicite, posé par un
+`AskUserQuestion` (valider, ouvrir `plan.md` dans VS Code pour l'annoter, ou demander une
+modification). Les annotations reviennent à l'`architect` en re-passe `revise`. Toujours
 obligatoire, même sans choix ouvert. En mode `autonomous` (défaut), sur OK,
 l'orchestrateur enchaîne directement BUILD → gates → DELIVER sans rendre la main —
 sauf escalade. En mode `step`, chaque transition de phase rend la main.
@@ -232,7 +234,7 @@ Per repo — `.legion/battles/<battle-id>/`:
 
 ```
 battle.json   # metadata, profile, required_gates, per-phase status, guard, delivery.pr_url, pr_state, ci
-spec.md  plan.md  build-report-<slice_id>.md (intermediate)  build-report.md (consolidated)  gate-lint.md  gate-review.md  gate-test.md
+spec.md  plan.md  plan.review-baseline.md  build-report-<slice_id>.md (intermediate)  build-report.md (consolidated)  gate-lint.md  gate-review.md  gate-test.md
 gate-security.md  pr-body.md  wi-comment.md  usage.jsonl  retro.md
 pr-status.json  ci-failed-<run-id>.log   # ADDRESS/status : sortie `gh` (PR/CI) et log CI en échec
 ```
@@ -268,6 +270,8 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
     // dans le dossier de la battle. Les deux forment le contexte de reprise du re-run
     // incrémental (les FAILs vivent sinon dans le seul contexte live et disparaissent
     // sur session reprise / compaction). Vidé ([]) dès qu'un passage rend `accept*`.
+    // Les FAILs peuvent aussi venir des annotations humaines du plan (battle.md §A.1 étape 6) :
+    // `dimension: "annotation humaine"`, diff contre le snapshot `plan.review-baseline.md`.
     // Les phases de cascade (lint|review|test|security) portent aussi `verdict` et `fails`
     // (FAILs ciblés du dernier passage, alimentés par `bump-autocorrect --fails`) et `covers`
     // (ids des slices `done` couvertes par le verdict ; remis à null avec le verdict ;
