@@ -134,7 +134,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 | `/legion:battle build [slice\|all] [--auto]` | Code une slice (toi en direct, ou l'agent builder). |
 | `/legion:battle review` / `test` | Lance les gates lint → reviewer → test-engineer → security. |
 | `/legion:battle deliver` | Commit sur la branche `<moi>/<n>` (créée au `start` en mode worktree, sinon ici),  push, PR avec `Closes #<n>` (auto en mode autonome ; confirmation avant push en `--step`). |
-| `/legion:battle address` | *(post-deliver, répétable)* Traite les commentaires de revue de la PR : la gate `pr-triage` classe chaque fil, l'orchestrateur corrige (invalide et relance la cascade depuis `lint` si besoin), répond et résout. |
+| `/legion:battle address` | *(post-deliver, répétable)* Traite les commentaires de revue de la PR et, si elle est en conflit avec la branche par défaut, résout le conflit : la gate `pr-triage` classe chaque fil, l'orchestrateur corrige (invalide et relance la cascade depuis `lint` si besoin), répond et résout. |
 | `/legion:battle resume <id>` | Reprend une battle existante (respecte son `run.mode`). |
 | `/legion:battle status` | État des phases de la battle courante. |
 | `/legion:battle abort [<id>] [--reason …]` | Abandonne une battle qui ne sera pas livrée : la marque `aborted`, vide le pointeur, retire ton assignation de l'issue (au mieux). Ne ferme ni l'issue ni la PR. |

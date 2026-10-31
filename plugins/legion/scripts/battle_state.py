@@ -57,7 +57,7 @@ Cœur pur :
 - `invalidate(battle, reason, now_iso) -> (ok, reason, battle, detail)` : remet a `pending`
   les gates de cascade `done`/`blocked` (les FAIL sont conserves), trace dans
   `run.invalidations` ; `reason == "polish"` = ronde de polissage, une seule fois, hors budget ;
-- `pr_status_from_gh(obj) -> {pr_state, ci, failing}` (GH#74) : interprète la sortie JSON de
+- `pr_status_from_gh(obj) -> {pr_state, ci, failing[, merge]}` (GH#74, `merge` GH#205) : interprète la sortie JSON de
   `gh pr view --json state,mergedAt,statusCheckRollup,url` (déjà parsée). Pure, sans réseau ; lève
   `ValueError` sur toute entrée invalide ou valeur inconnue (`STALE` -> `pending`) ; précédence
   `fail` > `pending` > `pass`, `none` si le rollup est vide ou `null` ;
@@ -124,7 +124,10 @@ Bloc optionnel `worktree` (GH#152) : `{path, branch, base, created_at}`, écrit 
 `<racine d'état>/.claude/worktrees/<id>`, `branch` un nom de branche git valide, `base` un sha de 40
 hexa. Absent ou `null` = mode en place. `delivery.head_ref` / `delivery.head_oid` : branche et tip de
 la PR (`headRefName` / `headRefOid` de `gh pr view`), posés par `set-delivery --pr-json` s'ils sont
-fournis, remis à `null` par `--pr-url`.
+fournis, remis à `null` par `--pr-url`. `delivery.merge` (GH#205) : état de fusion (`ok` | `conflict` |
+`unknown` | `null`), dérivé de `mergeable` / `mergeStateStatus` par `pr_status_from_gh`, posé par
+`--pr-json` quand l'une des deux clés est présente, remis à `null` par `--pr-url` ; absent sur une
+battle ancienne.
 
 Battle de bug (GH#201) : champ racine optionnel `kind` (`"bug"` ; absent ou `null` = battle
 ordinaire, flux inchangé), posé par `init --kind bug` ou `set-meta --kind bug` (`--kind ""` le remet à
@@ -186,6 +189,7 @@ AUTOCORRECT_KEYS: tuple[str, ...] = ("build",) + CASCADE_PHASES
 
 PR_STATES: tuple[str, ...] = ("open", "merged", "closed")
 CI_STATES: tuple[str, ...] = ("pass", "fail", "pending", "none")
+MERGE_STATES: tuple[str, ...] = ("ok", "conflict", "unknown")
 
 STATUSES: tuple[str, ...] = ("pending", "in_progress", "done", "blocked")
 ACCEPT_VERDICTS: tuple[str, ...] = ("accept", "accept_with_opportunity")
@@ -1088,6 +1092,8 @@ def validate(battle) -> tuple[list[str], list[str]]:
                 warnings.append(f"delivery.pr_state inconnu : {dl['pr_state']!r}")
             if dl.get("ci") is not None and dl["ci"] not in CI_STATES:
                 warnings.append(f"delivery.ci inconnu : {dl['ci']!r}")
+            if dl.get("merge") is not None and dl["merge"] not in MERGE_STATES:
+                warnings.append(f"delivery.merge inconnu : {dl['merge']!r}")
             if dl.get("checked_at") is not None and not isinstance(dl["checked_at"], str):
                 warnings.append("delivery.checked_at n'est pas une chaîne")
             for key in ("head_ref", "head_oid"):
@@ -1178,12 +1184,35 @@ def _check_verdict(el) -> tuple[str, str | None, str | None]:
     raise ValueError(f"__typename inconnu : {typename!r}")
 
 
+def _merge_state(obj: dict, state: str):
+    """État de fusion (`merge`) d'une sortie `gh` ; table de vérité : cf. `pr_status_from_gh`."""
+    mergeable = obj.get("mergeable")
+    mss = obj.get("mergeStateStatus")
+    for name, val in (("mergeable", mergeable), ("mergeStateStatus", mss)):
+        if val is not None and not isinstance(val, str):
+            raise ValueError(f"{name} n'est ni une chaîne ni null : {val!r}")
+    if _GH_PR_STATES[state] != "open":
+        return None
+    if mergeable == "CONFLICTING" or mss == "DIRTY":
+        return "conflict"
+    if mergeable == "UNKNOWN" or mss == "UNKNOWN":
+        return "unknown"
+    if mergeable == "MERGEABLE":
+        return "ok"
+    return "unknown"
+
+
 def pr_status_from_gh(obj) -> dict:
     """Sortie de `gh pr view --json state,mergedAt,statusCheckRollup,url[,headRefName,headRefOid]`
     (déjà parsée) -> `{"pr_state", "ci", "failing"}` (+ `head_ref` / `head_oid` si `headRefName` /
     `headRefOid` sont des chaînes non vides ; absents ou invalides = clés omises). Pure (ni disque ni réseau). `state` fait foi (`mergedAt` est
     ignoré) ; `ci` : `fail` > `pending` > `pass`, `none` si le rollup est `[]` ou `null` ;
-    `failing` : `[{"name", "url"}]` des checks en échec. `ValueError` sur toute entrée invalide."""
+    `failing` : `[{"name", "url"}]` des checks en échec. `ValueError` sur toute entrée invalide.
+    GH#205 : si `mergeable` ou `mergeStateStatus` est présent, ajoute `merge` (`ok` | `conflict` |
+    `unknown` | `None`) : PR non ouverte -> `None` ; `CONFLICTING`/`DIRTY` -> `conflict` ; `UNKNOWN`
+    -> `unknown` ; `MERGEABLE` -> `ok` (`BEHIND`/`BLOCKED` sans conflit = `ok`) ; autre chaîne ou
+    verdict absent -> `unknown` ; valeur ni chaîne ni `null` -> `ValueError`. Les deux clés absentes
+    = `merge` omis."""
     if not isinstance(obj, dict):
         raise ValueError("la sortie de gh n'est pas un objet JSON")
     state = obj.get("state")
@@ -1214,6 +1243,8 @@ def pr_status_from_gh(obj) -> dict:
         val = obj.get(src)
         if isinstance(val, str) and val:
             out[key] = val
+    if "mergeable" in obj or "mergeStateStatus" in obj:
+        out["merge"] = _merge_state(obj, state)
     return out
 
 
@@ -2039,7 +2070,8 @@ def _mutation(args, battle: dict, root: "Path | None" = None) -> tuple[dict, dic
         if args.pr_url is not None:   # nouvelle PR : l'état de suivi repart de zéro
             out["delivery"] = {**(out["delivery"] if isinstance(out.get("delivery"), dict) else {}),
                                "pr_url": args.pr_url, "pr_state": "open", "ci": None,
-                               "checked_at": None, "head_ref": None, "head_oid": None}
+                               "checked_at": None, "head_ref": None, "head_oid": None,
+                               "merge": None}
             return out, {"pr_url": args.pr_url}
         delivery = out.get("delivery")
         pr_url = delivery.get("pr_url") if isinstance(delivery, dict) else None
@@ -2063,9 +2095,11 @@ def _mutation(args, battle: dict, root: "Path | None" = None) -> tuple[dict, dic
         delivery.update(pr_state=status["pr_state"], ci=status["ci"], checked_at=checked_at)
         heads = {k: status[k] for k in ("head_ref", "head_oid") if k in status}
         delivery.update(heads)
+        merge = {"merge": status["merge"]} if "merge" in status else {}
+        delivery.update(merge)
         return out, {"pr_state": status["pr_state"], "ci": status["ci"],
                      "checked_at": checked_at, "failing": status["failing"],
-                     "ci_fails": ci_fails(status["failing"]), **heads}
+                     "ci_fails": ci_fails(status["failing"]), **heads, **merge}
     if cmd == "set-guard":
         if args.allow is None and args.deny is None and args.careful is None:
             raise _Refuse("set-guard : aucune option (--allow, --deny ou --careful)")
@@ -3219,8 +3253,16 @@ def _t_doc_pr_tracking() -> None:
         return
     battle, retro = battle_md.read_text(encoding="utf-8"), retro_md.read_text(encoding="utf-8")
     for needle in ("set-delivery --pr-json", "statusCheckRollup", "--log-failed",
-                   "bump-autocorrect build"):
+                   "bump-autocorrect build", "mergeable,mergeStateStatus",
+                   "merge --no-ff --no-commit", "merge --abort",
+                   "invalidate --reason rebase"):
         assert needle in battle, f"{needle!r} absent de battle.md"
+    start = battle.find("**Conflict round**")
+    end = battle.find("0. **CI round**", start)
+    assert start != -1 and end > start, "bloc « Conflict round » absent de battle.md"
+    block = battle[start:end]
+    for banned in ("rebase origin", "git rebase", "--force"):
+        assert banned not in block, f"{banned!r} interdit dans le bloc Conflict round"
     assert "set-delivery --pr-json" in retro, "set-delivery --pr-json absent de retro.md"
     for name, text in (("battle.md", battle), ("retro.md", retro)):
         for block in re.findall(r"```.*?```", text, re.S):
@@ -3715,6 +3757,37 @@ def _t_pr_status_invalid() -> None:
         raise AssertionError(f"ValueError attendue : {obj!r} -> {r!r}")
 
 
+def _t_pr_merge_state() -> None:   # GH#205 : une assertion par ligne de la table de vérité
+    def m(state="OPEN", **keys):
+        st = pr_status_from_gh({**_gh(state), **keys})
+        return st["merge"] if "merge" in st else "absent"
+    assert m("MERGED", mergeable="UNKNOWN") is None and m("CLOSED", mergeable="CONFLICTING") is None   # 1
+    assert m(mergeable="CONFLICTING", mergeStateStatus="DIRTY") == "conflict"                           # 2
+    assert m(mergeStateStatus="DIRTY") == "conflict" and m(mergeable="CONFLICTING") == "conflict"
+    assert m(mergeable="CONFLICTING", mergeStateStatus="UNKNOWN") == "conflict"                         # le conflit l'emporte
+    assert m(mergeable="UNKNOWN", mergeStateStatus="UNKNOWN") == "unknown"                              # 3
+    assert m(mergeable="MERGEABLE", mergeStateStatus="UNKNOWN") == "unknown"
+    for mss in ("BEHIND", "BLOCKED", "CLEAN", "UNSTABLE", "HAS_HOOKS", "DRAFT"):                        # 4
+        assert m(mergeable="MERGEABLE", mergeStateStatus=mss) == "ok", mss
+    assert m(mergeable="MERGEABLE") == "ok"
+    assert m(mergeable="FUTURE_VALUE") == "unknown" and m(mergeStateStatus="CLEAN") == "unknown"        # 5
+    assert m(mergeable=None) == "unknown"
+    for bad in (5, [], {}, True):                                                                       # 6
+        for key in ("mergeable", "mergeStateStatus"):
+            try:
+                pr_status_from_gh({**_gh(), key: bad})
+            except ValueError:
+                continue
+            raise AssertionError((key, bad))
+    assert m() == "absent"                                                                              # clés absentes
+    b = _fx()
+    b["delivery"] = {"pr_url": "u", "merge": "weird"}
+    assert any("delivery.merge inconnu" in x for x in validate(b)[1])
+    for ok_val in (None, "ok", "conflict", "unknown"):
+        b["delivery"] = {"pr_url": "u", "merge": ok_val}
+        assert validate(b)[1] == []
+
+
 def _t_validate_delivery() -> None:
     def w(delivery) -> list:
         b = _fx()
@@ -3887,6 +3960,7 @@ _CORE_TESTS = (
     _t_pr_status_states, _t_pr_status_ci_none, _t_pr_status_checkrun,
     _t_pr_status_statuscontext, _t_pr_status_typename_optional, _t_pr_status_precedence,
     _t_pr_status_stale, _t_ci_fails, _t_pr_status_invalid, _t_validate_delivery,
+    _t_pr_merge_state,
 )
 
 
@@ -4826,7 +4900,7 @@ def _t_set_delivery_pr_json_cli() -> None:
         before = r.load()
         assert before["delivery"] == {"pr_url": "https://x.test/pr/1", "pr_state": "open",
                                       "ci": None, "checked_at": None,
-                                      "head_ref": None, "head_oid": None}
+                                      "head_ref": None, "head_oid": None, "merge": None}
         n = len(r.calls)
         res = r.ok("set-delivery", "--pr-json", _write_gh(r, _red_gh()))
         assert res["pr_state"] == "open" and res["ci"] == "fail"
@@ -4884,6 +4958,58 @@ def _t_set_delivery_options_exclusive() -> None:
         r.refused("set-delivery")
 
 
+def _t_set_delivery_merge_cli() -> None:   # GH#205
+    with _Repo() as r:
+        r.init()
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
+
+        def push(**keys):
+            return r.ok("set-delivery", "--pr-json", _write_gh(r, {**_gh(), **keys}))
+        res = push(mergeable="CONFLICTING", mergeStateStatus="DIRTY")
+        assert res["merge"] == "conflict" and r.load()["delivery"]["merge"] == "conflict", res
+        assert "mergeable" not in r.load()["delivery"] and "mergeStateStatus" not in res
+        assert push(mergeable="UNKNOWN", mergeStateStatus="UNKNOWN")["merge"] == "unknown"
+        assert r.load()["delivery"]["merge"] == "unknown"
+        for mss in ("BEHIND", "BLOCKED"):
+            assert push(mergeable="MERGEABLE", mergeStateStatus=mss)["merge"] == "ok", mss
+            assert r.load()["delivery"]["merge"] == "ok"
+        push(mergeable="CONFLICTING", mergeStateStatus="DIRTY")
+        res = push(state="MERGED", mergeable="UNKNOWN")
+        assert res["merge"] is None and r.load()["delivery"]["merge"] is None
+        push(mergeable="CONFLICTING", mergeStateStatus="DIRTY")
+        res = push()   # clés absentes : merge omis, valeur persistée inchangée, reste mis à jour
+        assert "merge" not in res and r.load()["delivery"]["merge"] == "conflict"
+        assert r.load()["delivery"]["pr_state"] == "open" and r.load()["delivery"]["ci"] == "none"
+        before = r.path().read_text(encoding="utf-8")
+        r.refused("set-delivery", "--pr-json", _write_gh(r, {**_gh(), "mergeable": 5}))
+        assert r.path().read_text(encoding="utf-8") == before
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/2")
+        assert r.load()["delivery"]["merge"] is None
+
+
+def _t_invalidate_rebase_post_deliver() -> None:   # GH#205 : la ronde conflit rejoue la cascade après DELIVER
+    with _Repo() as r:
+        r.init()
+        r.ok("set-delivery", "--pr-url", "https://x.test/pr/1")
+        b = r.load()
+        for p in ("build", "deliver"):
+            b["phases"][p]["status"] = "done"
+        for p in ("plan", "lint", "review", "test"):
+            b["phases"][p] = {"status": "done", "verdict": "accept"}
+        r.path().write_text(json.dumps(b), encoding="utf-8")
+        r.ok("check-cascade")
+        autocorrect = copy.deepcopy(r.load()["run"].get("autocorrect"))
+        res = r.ok("invalidate", "--reason", "rebase")
+        assert res["reason"] == "rebase" and res["invalidated"] == ["lint", "review", "test"], res
+        after = r.load()
+        for p in ("lint", "review", "test"):
+            assert after["phases"][p]["status"] == "pending", p
+        assert after["run"].get("autocorrect") == autocorrect
+        code, res = r.run("check-cascade")
+        assert code == 2 and res["ok"] is False and res["missing"], res
+        assert "lint" in r.refused("transition", "address", "done")
+
+
 def _t_set_delivery_pr_url_resets() -> None:
     with _Repo() as r:
         r.init()
@@ -4895,7 +5021,7 @@ def _t_set_delivery_pr_url_resets() -> None:
         r.ok("set-delivery", "--pr-url", "https://x.test/pr/2")
         d = r.load()["delivery"]
         assert d == {"pr_url": "https://x.test/pr/2", "pr_state": "open", "ci": None,
-                     "checked_at": None, "head_ref": None, "head_oid": None}, d
+                     "checked_at": None, "head_ref": None, "head_oid": None, "merge": None}, d
 
 
 def _t_set_delivery_aborted() -> None:
@@ -5119,6 +5245,7 @@ _INTEGRATION_TESTS = (
     _t_set_delivery_options_exclusive, _t_set_delivery_pr_url_resets, _t_set_delivery_aborted,
     _t_merge_reports_cli, _t_merge_reports_aggregated_cli, _t_merge_reports_aborted_cli,
     _t_merge_reports_subcommand,
+    _t_set_delivery_merge_cli, _t_invalidate_rebase_post_deliver,
 )
 
 

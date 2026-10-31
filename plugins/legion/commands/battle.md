@@ -677,13 +677,13 @@ when `battle.json` has a `worktree` block (read both values from it), else `en p
 
 **Refresh the PR state.** For each battle that has `delivery.pr_url` and is neither closed
 (`reflect` done) nor `aborted`, do the following. This is the **only** write of `status`:
-it updates the delivery metadata (`pr_state`, `ci`, `checked_at`) and never changes a phase.
+it updates the delivery metadata (`pr_state`, `ci`, `merge`, `checked_at`) and never changes a phase.
 
 1. Take `<n>` from the tail of `pr_url` and check it matches `^[0-9]+$`. If not, skip the
    call and say so. No free-form string ever reaches the shell.
 2. Run:
    ```bash
-   gh pr view <n> --json state,mergedAt,statusCheckRollup,url,headRefName,headRefOid > "<state>/.legion/battles/<id>/pr-status.json"
+   gh pr view <n> --json state,mergedAt,statusCheckRollup,url,headRefName,headRefOid,mergeable,mergeStateStatus > "<state>/.legion/battles/<id>/pr-status.json"
    ```
 3. Only if `gh` exited `0`, run:
    ```bash
@@ -692,8 +692,11 @@ it updates the delivery metadata (`pr_state`, `ci`, `checked_at`) and never chan
    Exit `2` means the file was refused: relay the `reason`. The JSON printed on stdout
    also carries `failing` (`[{name, url}]`, the failed checks, not persisted).
 
-Add `PR <pr_state> · CI <ci>` to the battle's line. Suggest the next step: `merged` →
-`/legion:retro`; `ci == fail` → `/legion:battle address`; `closed` → report it.
+Add `PR <pr_state> · CI <ci>` to the battle's line, then `· conflit avec la branche par
+défaut` if `merge == "conflict"`, or `· état de fusion indéterminé` if `merge == "unknown"`
+(nothing for `ok` or `null`). Suggest the next step: `merged` →
+`/legion:retro`; `ci == fail` or `merge == "conflict"` → `/legion:battle address`; `closed` →
+report it. `merge == "unknown"` gets **no** merge-related suggestion, no waiting, no polling.
 Without `gh`, or if `gh` fails, keep the plain line and add "état PR non rafraîchi (gh
 indisponible)".
 
@@ -1212,7 +1215,7 @@ Toute correction déterministe se fait sans lui.
 |-----|-------------|--------|
 | **1. `reject`** | Une gate rend un verdict `reject` (régression majeure, redesign requis). | Escalade **immédiate**, zéro tentative de correction. Relayer le verdict + RAISON. |
 | **2. Boucle non convergente** | Aucun FAIL ciblé résolu d'une tentative à l'autre (progrès = identité des FAIL, pas le compte brut), ou plafond atteint (2 tentatives/gate, 6 tentatives au global). | Escalade avec le détail : gate, FAIL résolus/persistants/nouveaux, tentatives effectuées. |
-| **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`). | Escalade : re-planification nécessaire. Ne pas modifier `plan.md` en cours de run. |
+| **3. Déviation du plan** | La correction requise sort du périmètre figé (slices de `plan.md` ou `guard.allow`), y compris une résolution de conflit (ronde conflit d'`address`) hors `guard.allow`. | Escalade : re-planification nécessaire. Ne pas modifier `plan.md` en cours de run. |
 | **4. Filets DELIVER déclenchés** | Base en retard sur `origin` **avec delta d'arbre intersectant** les fichiers touchés (un delta vide ou disjoint est waivé sans escalade — §G.0.a), remote vide, fichier hors whitelist, `.gitignore` auto-induit à arbitrer (§G.0). | Escalade : résoudre le filet d'abord, puis DELIVER peut reprendre. |
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë (§A.preflight). | Escalade : résoudre l'environnement avant toute battle. |
 | **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (§E, contrôle d'intégrité de l'arbre). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. Relayer `changed` / `out_of_scope` ; l'humain diagnostique l'agent (ou son propre éditeur). |
@@ -1236,6 +1239,8 @@ Les deux budgets sont **indépendants et non additionnés** :
   --reason polish`, une seule fois) ne consomme **pas** ce budget.
 - **Round CI d'`address`** (§H étape 0) : il compte sous la clé `build`
   (`bump-autocorrect build`). Un échec CI qui ne vient pas du code ne compte pas.
+- **Ronde conflit d'`address`** : n'appelle pas `bump-autocorrect`, hors budget (comme la
+  ronde de polissage) ; un `revise` pendant la cascade rejouée suit §E et compte.
 
 La boucle orchestrateur opère un cran au-dessus : elle borne les **re-gate**, pas
 les re-builds internes du builder.
@@ -1488,7 +1493,9 @@ The branch of the main checkout never moves. `git fetch origin` can run from eit
 Precondition: `delivery.pr_url` is set **and** the PR is still open. Refresh the state
 with the §C procedure (`pr-status.json`, then `set-delivery --pr-json`; `<n>` validated
 `^[0-9]+$`). If `delivery.pr_state` is not `open`, or there is no `pr_url` → refuse
-(nothing to address, or deliver hasn't happened).
+(nothing to address, or deliver hasn't happened). The §C refresh also brings back
+`delivery.merge`. If it is `unknown`, announce « état de fusion indéterminé, pas de ronde
+conflit » and go on with the flow (no waiting, no polling).
 
 This phase is **optional and repeatable**: the human may comment in several waves.
 Each run is a **round** (`phases.address.round`, incremented). All battle-state
@@ -1497,9 +1504,46 @@ writes stay yours, made through `battle_state.py`; `pr-triage` only returns. Bat
 
 Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWithOwner`.
 
+**Conflict round** (runs before step 0, only if `delivery.merge == "conflict"`, from the
+refresh above). It shares the round number `n` and the single push of the run. Fixed
+sequence:
+
+1. `battle_state.py transition address in_progress --round <n> --battle <id>`.
+2. Preconditions: `git status --porcelain` is empty, and none of `MERGE_HEAD`,
+   `CHERRY_PICK_HEAD`, `REVERT_HEAD` exists (`git rev-parse -q --verify <name>`). Otherwise
+   escalate.
+3. `git fetch --no-tags origin`, resolve `<default>` as in §G.0.a, then
+   `<base_sha>` = `git rev-parse origin/<default>`.
+4. `git merge --no-ff --no-commit origin/<default>` (in worktree mode, `git -C "<worktree>" ...`).
+   A non-zero exit caused by a conflict is expected.
+5. List the unmerged paths with `git diff --name-only --diff-filter=U`. If one of them is
+   outside `guard.allow`: `git merge --abort`, then escalation case 3, writing nothing.
+6. Run `tree-snapshot --guard` (§E), **after** the merge.
+7. The builder resolves the listed files, inline or delegated with the list and the
+   instruction "resolve, write nothing else". It runs the project verification (the
+   stack's build/test). It does **neither** `git add` **nor** `git commit`.
+8. Run `tree-verify --guard`. If `out_of_scope` is not empty: `git merge --abort`, then
+   escalation case 3. A write fault is case 6.
+9. `git diff --name-only --diff-filter=U` must be empty, and `git rev-parse MERGE_HEAD`
+   must equal `<base_sha>`. Then defensive `git reset -q HEAD .legion`,
+   `git add -- <resolved files>` (never `-A`), then `git commit --no-edit`. Capture the
+   short SHA.
+10. `battle_state.py touch-files --files <resolved files only> --battle <id>` (not the files
+    brought in by the base). Relay its `warnings`.
+11. `battle_state.py invalidate --reason rebase --battle <id>`.
+12. Re-run the whole required §E cascade from `lint`.
+13. No push here: the round joins CONFIRM (step 5), then the push (step 6, `check-cascade`
+    first).
+
+If the builder fails (`build_ok: false`, resolution impossible): `git merge --abort`,
+escalation case 3, no `bump-autocorrect` (the conflict round is outside the budget, §F).
+Forbidden: any history rewrite and any forced push.
+
 0. **CI round** (only if `delivery.ci == "fail"`, from the refresh above). One
    `address` run is one round and one push: the CI fix and the review threads share the
-   same round number `n`.
+   same round number `n`. **Skip it for this round if the conflict round produced a
+   commit**: the CI report concerns the old head, the push restarts CI, and the next
+   `address` handles any failure.
    1. `battle_state.py transition address in_progress --round <n> --battle <id>` (`in_progress →
       in_progress` is allowed, so step 2 below stays valid).
    2. For each `failing` entry printed by `set-delivery`: if its URL is a GitHub Actions
@@ -1565,7 +1609,7 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    `unknown` keeps the thread with `access: "unverified"` (listed in `unverified`). The
    script rewrites `_threads.json` and prints `{ok, kept, ignored, unverified, dropped_comments}`.
    **Empty list** (`kept == 0`) → announce "no active review comment" with the `ignored`
-   list, and **stop**, unless a CI-fix commit from step 0 is waiting: then skip to
+   list, and **stop**, unless a commit from the conflict round or from step 0 is waiting: then skip to
    steps 5-6.
 
 2. **Triage.** Invoke the `pr-triage` gate via `Agent` (`subagent_type: pr-triage`),
@@ -1617,7 +1661,8 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    **Resolution**.
 
 5. **CONFIRM (outward effects).** Show the user, for this round: the commits created
-   (SHA + message), and per thread the reply to be posted + whether the thread will
+   (SHA + message), including the merge commit of the conflict round (SHA,
+   `origin/<default>` merged, resolved files), and per thread the reply to be posted + whether the thread will
    be resolved. **Wait for explicit OK.** For any `disagreement` → resolve-as-wontFix,
    require **per-thread** confirmation — never close a disagreement without the
    user's agreement.
@@ -1658,11 +1703,14 @@ Resolve `<owner>`/`<repo>` once: `gh repo view --json nameWithOwner -q .nameWith
    `battle_state.py transition address done --round <n> --threads '<json>' --battle <id>`, where
    `<json>` is the array `[ { "id", "target", "kind", "commit": "<sha|null>",
    "resolution": "fixed|active|wontFix" } ]` using the **re-fetched** statuses from
-   step 7. Delete the temp file (`_threads.json`). `transition address done` carries the
+   step 7. On a round **without threads** (conflict or CI round only), run
+   `transition address done --round <n>` **without** `--threads`, so the thread list of
+   earlier rounds is not overwritten. Delete the temp file (`_threads.json`). `transition address done` carries the
    same precondition as `check-cascade` (every required phase `done`); a refusal
    (exit `2`) means the cascade is incomplete: go back to step 3.
 
-9. **Report** — threads handled / resolved / left open, commits pushed, the threads
+9. **Report** — the conflict round if any (merge commit, resolved files) or an
+   undetermined merge state (`delivery.merge == "unknown"`), threads handled / resolved / left open, commits pushed, the threads
    ignored at step 1 (« ignoré : auteur sans accès en écriture », with `file:line`), the
    threads passed as `unverified` (write access not checked), and the
    reminder: new comments → re-run `/legion:battle address` (next round). Once the
