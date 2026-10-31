@@ -17,11 +17,12 @@ discipliné, sur tes **projets .NET perso hébergés sur GitHub**. Inspirée de
 | **Python 3** (`python`) | exécute les 4 hooks (`guard`, `careful`, `fleet_sync`, `usage_track`) | ✅ obligatoire |
 | **.NET SDK** | `dotnet build` / `dotnet test` / `dotnet format` lancés par le builder et les gates test / lint | ✅ obligatoire |
 | **`gh` (GitHub CLI)** | `/battle start <n>` (lecture d'issue) **et** `/battle deliver` (création de PR) | ⚙️ recommandé |
-| **plugin `dotnet-claude-kit`** | fournit la **MCP Roslyn** dont dépend la gate `reviewer`, + les skills délégués (scaffold, code-review, testing, security-scan…) | ✅ fortement recommandé |
+| **Serveur LSP C#** (ex. `dotnet/skills`) | enrichit la gate `reviewer` via l'outil `LSP` natif ; prérequis SDK .NET 10, NuGet au premier lancement, serveur en préversion | ⚙️ optionnel |
 
-> Sans `dotnet-claude-kit`, la gate `reviewer` perd ses signaux Roslyn (diagnostics,
-> antipatterns, blast radius) et retombe sur de la revue « à l'œil ». Les autres
-> gates fonctionnent, mais la stack est conçue pour s'appuyer dessus.
+> Sans serveur LSP, la gate `reviewer` passe sur un repli tracé (signaux marqués non
+> fiables) ; les autres gates ne changent pas. Aucun plugin tiers n'est requis.
+> Venant d'une version antérieure ? Voir la
+> [note de migration](../../README.md#note-de-migration).
 
 > ⚠️ **Le `python` doit être trouvable.** Les hooks sont lancés par Claude Code via
 > `python "…"` et **échouent en silence** s'il est absent — la battle tourne alors
@@ -31,8 +32,7 @@ discipliné, sur tes **projets .NET perso hébergés sur GitHub**. Inspirée de
 ## Installation
 
 1. **Le plugin** — `/plugin marketplace add mickaelfrancois/legion` (ou un chemin
-   local vers ce dépôt cloné), puis `/plugin install legion`. Installe aussi
-   `dotnet-claude-kit` (sa MCP Roslyn doit être compilée — suis son README).
+   local vers ce dépôt cloné), puis `/plugin install legion`.
 2. **Python** — `python --version`.
 3. **GitHub CLI** — `gh auth login` (scope repo). Vérifie : `gh auth status`.
 4. Ouvre Claude Code **dans le repo .NET** sur lequel tu veux travailler.

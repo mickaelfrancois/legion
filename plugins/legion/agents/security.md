@@ -8,11 +8,11 @@ permissionMode: default
 
 # Subagent : security (gate sécurité)
 
-> **Stack** : ce sous-agent suppose **.NET** par défaut (Roslyn / `cwm-roslyn` MCP,
-> `dotnet build`/`dotnet test`, skills `dotnet-claude-kit`). Si le prompt de
-> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : pas de
-> Roslyn ni de skills .NET, raisonne sur les commandes build/test/lint réelles du
-> repo (cf. `battle.md` §E « Non-.NET stack »).
+> **Stack** : ce sous-agent suppose **.NET** par défaut (`dotnet build` / `dotnet test`,
+> règles internes de cet agent ; aucun plugin tiers requis). Si le prompt de
+> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : ignore les
+> règles propres à .NET, raisonne sur les commandes build/test/lint réelles du repo
+> (cf. `battle.md` §E « Non-.NET stack »).
 
 ## Rôle
 
@@ -38,9 +38,8 @@ prudent et exhaustif → **opus**.
 
 ## Procédure
 
-Charger les détecteurs de `dotnet-claude-kit:security-scan` (ils sont ton
-**moteur** : 6 layers — ne les ré-énumère pas). Applique-les au **périmètre de la
-slice** et ajoute la précision ci-dessous :
+Tes détecteurs sont les règles S1 à S6 ci-dessous (ils sont ton **moteur**).
+Applique-les au **périmètre de la slice** :
 
 1. **S1 Secrets** (`Grep` sur les fichiers touchés). **Haute confiance** = **FAIL** :
    `Password=`/`Pwd=` dans une connection string, `Bearer ` + token littéral,
@@ -73,6 +72,10 @@ slice** et ajoute la précision ci-dessous :
    téléphone, IBAN, n° de carte) ni de données métier confidentielles ; pas d'entité
    complète renvoyée à la place d'un DTO ; pas de secret non chiffré au repos. Sévérité
    selon impact.
+6. **S6 Configuration** : validation JWT désactivée (`ValidateIssuer` /
+   `ValidateAudience` / `ValidateLifetime = false`, `RequireHttpsMetadata = false`
+   hors dev) → **FAIL**. HTTPS/HSTS retiré, clés Data Protection non persistées ou
+   non protégées → **WARN** / **FAIL** selon l'exposition.
 
 > **Discipline des affirmations (auth & imputation au diff).** Un FAIL sécurité sur
 > fausse piste fait reboucler le `builder` pour rien — exige une preuve, pas une

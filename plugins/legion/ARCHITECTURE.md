@@ -12,15 +12,14 @@
 
 ## 1. Principe directeur
 
-`legion` est un **chef d'orchestre, pas une réimplémentation**.
-
-Il n'apporte que la **colonne vertébrale de workflow**, les **agents-gates de
-revue**, l'**orchestration multi-repo** (observabilité) et les **garde-fous
-exécutables**. Tout le travail .NET concret (scaffold, tests, sécu) est **délégué**
-à [`dotnet-claude-kit`](https://github.com/trossitec/dotnet-claude-kit).
-
-Conséquence de design : si une capacité existe déjà comme skill, `legion`
-l'**invoque** — il ne la duplique pas. Sa valeur propre est la *coordination*.
+`legion` est un **chef d'orchestre**. Il apporte la colonne vertébrale de workflow, les
+agents-gates de revue, l'orchestration multi-repo et les garde-fous exécutables. Le
+travail .NET concret repose sur le **SDK .NET seul** (`dotnet build`, `dotnet test`,
+`dotnet format`, `dotnet list package`). Les règles de revue, de sécurité, d'architecture
+et de test vivent **dans les agents**, sous forme de listes de règles.
+**Aucun plugin tiers n'est requis.** L'outil `LSP` natif de Claude Code enrichit la gate `reviewer`
+quand un serveur C# est présent (par exemple via `dotnet/skills`). Sinon, la gate passe
+sur un repli tracé.
 
 ---
 
@@ -163,9 +162,9 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 |---|---|---|---|
 | **architect** | Oui (Read/Grep/Glob) | opus | Scope justifié ? Archi conforme Clean Architecture ? Matrice de tests couvrante ? |
 | **lint** | Oui (exécute `dotnet format --verify-no-changes`, non-mutant) | sonnet | Formatage .NET conforme — première gate de la cascade. **.NET-only** : se retire (verdict neutre) sur stack non-.NET. |
-| **reviewer** | Oui + MCP Roslyn | sonnet | Correction, conformité au plan, performance, lisibilité, antipatterns, dead code. |
+| **reviewer** | Oui + outil `LSP` natif, optionnel, repli tracé | sonnet | Correction, conformité au plan, performance, lisibilité, antipatterns, dead code. |
 | **test-engineer** | Oui sur le code (exécute les tests) | sonnet | Les tests existent, passent, et couvrent la matrice du `plan.md`. |
-| **security** | Oui | opus | OWASP/secrets/NuGet vulnérables/auth — délègue à `security-scan`. |
+| **security** | Oui | opus | OWASP/secrets/NuGet vulnérables/auth — détecteurs internes S1–S6. |
 
 > Chacune **écrit son seul artefact** (`plan.md` / `gate-*.md`), confinée par
 > `guard.py` ; aucune ne touche le code (cf. invariant § 4). `Write` figure donc dans
@@ -175,8 +174,8 @@ fichiers pour challenger l'archi et ne remonter que son verdict.
 
 > **Paliers de modèle.** Opus pour les gates à plus fort discernement et coût
 > d'erreur (`architect`, `security`) ; sonnet pour `lint`/`reviewer`/`test-engineer`
-> où le jugement est borné par des signaux objectifs (`dotnet format`, Roslyn,
-> `dotnet test`).
+> où le jugement est borné par des signaux objectifs (`dotnet format`, diagnostics LSP
+> ou build, `dotnet test`).
 
 ### 4.2 Le producteur `builder` (≠ gate)
 
@@ -426,7 +425,7 @@ plugins/legion/
 │   ├── architect.md             # gate PLAN
 │   ├── builder.md               # PRODUCER BUILD (Edit/Write/Bash, worktree)
 │   ├── lint.md                  # gate LINT (dotnet format --verify-no-changes, .NET-only)
-│   ├── reviewer.md              # gate REVIEW (+ MCP Roslyn)
+│   ├── reviewer.md              # gate REVIEW (+ LSP natif optionnel)
 │   ├── test-engineer.md         # gate TEST
 │   ├── security.md              # gate sécurité
 │   └── pr-triage.md             # gate ADDRESS (triage des retours de PR)

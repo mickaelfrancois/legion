@@ -5,10 +5,13 @@ description: Operational doctrine for the legion battle pipeline (Think→Plan�
 
 # Battle workflow — legion doctrine
 
-`legion` is an **orchestrator, not a reimplementation**. It coordinates a battle
-pipeline and delegates every concrete .NET task to existing skills
-(`dotnet-claude-kit`). If a capability already exists as a skill, **invoke it** —
-never duplicate it.
+`legion` is an **orchestrator**. It provides the workflow backbone, the review-gate
+agents, multi-repo orchestration and executable guardrails. The concrete .NET work
+relies on the **.NET SDK alone** (`dotnet build`, `dotnet test`, `dotnet format`,
+`dotnet list package`). The review, security, architecture and test rules live **in the
+agents**, as rule lists. **No third-party plugin is required.** Claude Code's native
+`LSP` tool enriches the `reviewer` gate when a C# server is present (for example via
+`dotnet/skills`); otherwise the gate passes on a traced fallback.
 
 The full design rationale lives in the plugin's `ARCHITECTURE.md`. This skill is
 the operational summary loaded at run time.
@@ -164,15 +167,15 @@ never invokes another agent; the builder never invokes a gate.
 
 ## Phases and delegation
 
-| Phase | Driver | Artifact | Delegates to |
+| Phase | Driver | Artifact | Tools / rules |
 |---|---|---|---|
 | THINK | `/battle start` | `spec.md` | `gh issue view <n>` (numeric id), else inline |
-| PLAN | `architect` gate | `plan.md` (+ test matrix) | `dotnet-claude-kit:clean-architecture`, `:modern-csharp` |
-| BUILD | `builder` producer | code + `build-report-<slice_id>.md` per slice, consolidated into `build-report.md` | `dotnet-claude-kit:scaffold`, `:build-fix`, `:modern-csharp`, `:testing` |
+| PLAN | `architect` gate | `plan.md` (+ test matrix) | internal architecture rules (`architect`) |
+| BUILD | `builder` producer | code + `build-report-<slice_id>.md` per slice, consolidated into `build-report.md` | `dotnet build` + internal build-fix loop (3 tries), internal code/xUnit conventions |
 | LINT | `lint` gate | `gate-lint.md` | `dotnet format --verify-no-changes` (.NET-only, verify; self-retires on non-.NET) |
-| REVIEW | `reviewer` gate | `gate-review.md` | `dotnet-claude-kit:code-review` (multi-dim: correctness, **plan conformance**, **performance**, conventions, dead code) + Roslyn MCP |
-| TEST | `test-engineer` gate | `gate-test.md` | `dotnet-claude-kit:testing`, `:tdd`, `:verify` |
-| (sec) | `security` gate | `gate-security.md` | `dotnet-claude-kit:security-scan` |
+| REVIEW | `reviewer` gate | `gate-review.md` | internal rules R1–R6 + anti-pattern list; native `LSP` when available, traced fallback otherwise |
+| TEST | `test-engineer` gate | `gate-test.md` | `dotnet test`, internal xUnit conventions |
+| (sec) | `security` gate | `gate-security.md` | internal detectors S1–S6 + `dotnet list package --vulnerable` |
 | DELIVER | `/battle deliver` | `pr-body.md`, `wi-comment.md` | `gh pr create` (PR with `Closes #<n>`), `gh issue comment` |
 | (ADDRESS) | `pr-triage` gate | `pr-feedback.md` | `gh api graphql` (PR review threads); loops fixes back to BUILD/REVIEW/TEST |
 | REFLECT | `/retro` | `retro.md` | Claude memory · `plugin-retex.jsonl` · GitHub issues (`opportunity.py`) |
@@ -354,8 +357,8 @@ projects `tokens_total` + `skills` into the shard for the UI (plus `slices_done`
 `slices_total` when the battle declares slices).
 
 > A skill is recorded **only when invoked via the `Skill` tool**. The gates and
-> the builder therefore carry `Skill` in their tool whitelist so "load
-> `code-review`/`scaffold`/…" actually loads the skill (real instructions) **and**
+> the builder therefore carry `Skill` in their tool whitelist so "load a skill
+> (e.g. `legion:battle-workflow`)" actually loads the skill (real instructions) **and**
 > shows up in the subagent's `skills`. A gate that only applied a skill's method
 > from memory would leave `skills` empty.
 
@@ -452,7 +455,7 @@ differs from the tree (fault `[main-tree]`) and reads the protected state at the
   to `python3` when `python` is absent (Linux/macOS). If neither exists the hooks
   fail silently — the `/battle start` preflight checks it.
 - Iterate in small validated steps; never emit large unvalidated blocks.
-- Delegate, never duplicate — but stay self-contained for core paths.
+- Stay self-contained for core paths: no third-party plugin required.
 
 ## Charte de style des documents
 

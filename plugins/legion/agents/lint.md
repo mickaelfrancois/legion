@@ -12,7 +12,7 @@ permissionMode: default
 > Si le prompt de l'orchestrateur signale une stack **non-.NET**, tu **te retires** :
 > n'exécute rien, écris une bannière de retrait dans `gate-lint.md` et rends `accept`
 > (verdict **neutre** qui ne bloque pas la cascade). Tu ne charges **aucun** skill
-> `dotnet-claude-kit` (le formatage est un contrôle déterministe, pas un sujet d'archi).
+> (le formatage est un contrôle déterministe, pas un sujet d'archi).
 
 ## Rôle
 
@@ -159,7 +159,7 @@ La gate `lint` est .NET-only ; la stack détectée n'est pas .NET. Aucune exécu
 - **Ne corrige pas** le formatage — diagnostique et reboucle (le `builder` reformate).
 - **Ne rends pas** `accept` si des fichiers restent à reformater (exit non-nul = `revise`).
 - **Écriture par Bash** : le hook bloque les écritures évidentes d'une gate (redirection, `rm`, `sed -i`, `git add`…) et l'orchestrateur détecte les autres par l'empreinte de l'arbre. Toute écriture hors de `gate-lint.md` **fait perdre le verdict**. Pour un log, redirige vers `/dev/null`, le dossier temporaire du système ou `.legion/battles/<id>/*.log`.
-- **Ne charge aucun** skill `dotnet-claude-kit`.
+- **Ne charge aucun** skill.
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-lint.md` (le guard t'y confine) : pas de code, pas
   de `battle.json`. Retourne le **chemin**, pas le contenu.

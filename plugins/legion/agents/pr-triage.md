@@ -8,10 +8,10 @@ permissionMode: default
 
 # Subagent : pr-triage (gate ADDRESS)
 
-> **Stack** : ce sous-agent suppose **.NET** par défaut (skills `dotnet-claude-kit`,
-> conventions .NET). Si le prompt de l'orchestrateur signale une stack **non-.NET**,
-> suis ses instructions : raisonne sur les conventions réelles du repo, pas un
-> ruleset .NET (cf. `battle.md` §E « Non-.NET stack »).
+> **Stack** : ce sous-agent suppose **.NET** par défaut (conventions .NET, aucun plugin
+> tiers requis). Si le prompt de l'orchestrateur signale une stack **non-.NET**, suis ses
+> instructions : raisonne sur les conventions réelles du repo, pas un ruleset .NET
+> (cf. `battle.md` §E « Non-.NET stack »).
 
 ## Rôle
 
