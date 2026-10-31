@@ -176,7 +176,7 @@ never invokes another agent; the builder never invokes a gate.
 | REVIEW | `reviewer` gate | `gate-review.md` | internal rules R1–R6 + anti-pattern list; native `LSP` when available, traced fallback otherwise |
 | TEST | `test-engineer` gate | `gate-test.md` | `dotnet test`, internal xUnit conventions |
 | (sec) | `security` gate | `gate-security.md` | internal detectors S1–S6 + `dotnet list package --vulnerable` |
-| DELIVER | `/battle deliver` | `pr-body.md`, `wi-comment.md` | `gh pr create` (PR with `Closes #<n>`), `gh issue comment` |
+| DELIVER | `/battle deliver` | `pr-body.md`, `wi-comment.md` | `release_prep.py` (CHANGELOG + version bump), `gh pr create` (PR with `Closes #<n>`), `gh issue comment` |
 | (ADDRESS) | `pr-triage` gate | `pr-feedback.md` | `gh api graphql` (PR review threads); loops fixes back to BUILD/REVIEW/TEST |
 | REFLECT | `/retro` | `retro.md` | Claude memory · `plugin-retex.jsonl` · GitHub issues (`opportunity.py`) |
 
@@ -201,8 +201,11 @@ exploration that will not ship → `spike`; otherwise `feature`. Whatever the pr
 `battle.json.worktree.branch`, créée par `battle_worktree.py create` ; DELIVER ne fait aucun
 `checkout -b` et part du worktree) → commit (Conventional Commits subject +
 co-author trailer) → compose `pr-body.md` from the artifacts → push → open the PR via
-`gh pr create`. For a numeric issue, the PR body ends with **`Closes #<n>`** so merging
-auto-closes the issue.
+`gh pr create`. Between the subject and the commit, `release_prep.py apply` adds a
+`CHANGELOG.md` entry and a manifest version bump (feat → minor, fix/perf → patch,
+breaking → major; docs/chore/test/refactor/build/ci → nothing); it never creates a
+`CHANGELOG.md`, and `address` does not re-run it. For a numeric issue, the PR body ends with
+**`Closes #<n>`** so merging auto-closes the issue.
 
 **En mode `autonomous` (chemin heureux)** : la PR est composée, poussée et ouverte
 **sans OK bloquant** — l'humain relit le code sur GitHub. Les **filets §G.0** (base en

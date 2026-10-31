@@ -778,7 +778,8 @@ sequential builder gets the **Code root** = `worktree.path` (it runs its tools f
 their directory option, never from the cwd), and still the battle dir and `plan.md` as
 absolute paths under `<state>`. **Parallel builders** write in their own worktree, so their
 deltas must be merged back into the **integration tree** (the **fan-in**, `scripts/fan_in.py`,
-the only script that writes code into the integration tree). The integration tree is
+the only script that merges builder code into the integration tree; `release_prep.py` writes only
+the CHANGELOG and one manifest at DELIVER). The integration tree is
 `worktree.path` in worktree mode, the main checkout otherwise. Every `fan_in.py` call carries
 `--battle <id>`; in worktree mode `base`, `apply` and `cleanup` also carry
 `--root "<wt>"` (`<wt>` = `worktree.path`, the integration tree; `<builder-wt>` = a builder's own worktree, never passed to `--root`). Run them from the main checkout. The
@@ -1384,20 +1385,40 @@ The branch of the main checkout never moves. `git fetch origin` can run from eit
    of this commit (it is repo hygiene this battle introduced). Confirm the choice
    with the user. (RETEX: this self-induced change was ambiguous at commit time.)
 
-   **Version bump grouped in the PR (manifest edit).** If this battle groups a version
-   bump into its PR — editing a manifest such as `.claude-plugin/plugin.json` (or the
-   target repo's package/version file) — note that `guard.allow` is **derived from the
-   plan's slices** and does **not** cover the manifest path, so `guard.py` **blocks** the
-   edit until the perimeter is widened. **Before editing the manifest**, add its glob to
-   the write scope via `/legion:freeze <current globs> <manifest glob>` (or re-run
-   `/legion:guard`), then edit it and add the manifest to this commit's path whitelist.
-   (RETEX: a `0.3.1` bump grouped with the fix was blocked because
-   `plugins/legion/.claude-plugin/**` sat outside the slice-derived perimeter.)
-
    **`<summary>` — English, Conventional Commits format** `type(scope): subject`
    (imperative mood, no trailing period, ≤ ~70 chars). `type` ∈
    `feat|fix|refactor|perf|docs|test|build|ci|chore`; `scope` = the touched area.
    This subject feeds **both** the commit subject **and** the PR title (step 5).
+
+   **CHANGELOG and version bump (release_prep).** Right after `<summary>` is fixed (and after
+   the §G.0 rebase, so the base read is the one that ships), run the deterministic helper. It
+   derives the level from the `<summary>` type (`feat` → minor, `fix`/`perf` → patch, `!` or a
+   `BREAKING CHANGE:` footer → major; `docs`/`chore`/`test`/`refactor`/`build`/`ci` → nothing),
+   then writes a `CHANGELOG.md` entry under « Unreleased » and bumps the one recognized manifest
+   version. It never creates a `CHANGELOG.md` and never calls the network.
+   If the commit body carries a `BREAKING CHANGE:` footer, write the body to
+   `<state>/.legion/battles/<id>/commit-msg.txt` **before** this call, so the footer can be read.
+   Never let a backtick or `$(` from the title reach the shell (pass it escaped or through a file).
+   ```bash
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/release_prep.py" apply --repo "<worktree>" --title "<summary>" --issue <n> --body-file "<state>/.legion/battles/<id>/commit-msg.txt"
+   ```
+   `--repo` is the worktree root; under `--in-place` it is the root of the checkout. `--issue`
+   is for a numeric issue only, and `--body-file` only if a commit-message body exists (the
+   `BREAKING CHANGE:` footer is read there). Read the JSON on stdout:
+   - **`stage[]`** → add these paths to this commit's path whitelist. This is `stage`, not
+     `written[]`: on a resumed DELIVER `written` is empty but `stage` still lists both files, so
+     they stay in the same commit (the `--in-place` resume rule above needs one commit whose
+     paths are all whitelisted).
+   - **`notes[]`** → copy these lines into `pr-body.md` (step 3).
+   The script writes nothing if the PR diff already touches the CHANGELOG or the manifest
+   (`skipped_foreign`), and it is idempotent on a resume. The helper writes from the main
+   session, outside the `guard.py` filter, over a closed set of paths. A slice of the plan that
+   edits a manifest by hand still goes through `/legion:freeze <current globs> <manifest glob>`.
+   §H (`address`) does **not** re-run `release_prep`: a fix commit after DELIVER never raises
+   the bump question a second time.
+   For a PR grouping several battles, run this step **once**, on the battle that delivers the
+   PR, and give the grouped `<summary>` the type of the highest level (breaking > feat >
+   fix/perf).
 
    **Before committing** (defense in depth, see §E): refuse if a merge/cherry-pick/revert is
    pending — `git rev-parse -q --verify MERGE_HEAD`, `CHERRY_PICK_HEAD` or `REVERT_HEAD`
@@ -1435,7 +1456,8 @@ The branch of the main checkout never moves. `git fetch origin` can run from eit
    stay English). Apply the **writing charter**
    (`battle-workflow` § « Charte de style des documents ») — simple, precise language;
    **keep it synthetic, with no separate « En bref »** (the body is short by design),
-   and reread it against the charter before pushing. For a numeric issue, **end the body with `Closes #<n>`** so
+   and reread it against the charter before pushing. Also copy the `notes[]` lines returned by `release_prep.py` (step 2), if any. For a
+   numeric issue, **end the body with `Closes #<n>`** so
    merging the PR auto-closes the issue. **Exception, profile `spike`:** end with
    `Refs #<n>` instead, so merging never closes the issue. This is the payoff of the artifact
    pipeline — the PR documents itself.
