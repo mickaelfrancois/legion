@@ -79,6 +79,8 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 
 ## Exemple complet
 
+**Reset de contexte.** Une longue battle coûte cher : l'orchestrateur relit tout son contexte à chaque tour. Aux transitions de phase (après l'approbation du plan, après le build, après chaque gate), si son contexte dépasse ~120k jetons, il écrit `resume-notes.md` dans le dossier de battle et te **propose** de repartir léger (`/clear` puis `/legion:battle resume <id>`), même en autonome. Tu peux répondre « continuer » : il ne reposera pas la question dans la session. Contexte non mesurable : aucune proposition.
+
 > En mode autonome (défaut), tu lances surtout `start` : après l'approbation du plan,
 > les étapes 3 à 5 **s'enchaînent seules** jusqu'à la PR. Les commandes ci-dessous sont
 > les points de contrôle — à lancer à la main seulement en `--step`, ou pour reprendre
@@ -135,7 +137,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 | `/legion:battle review` / `test` | Lance les gates lint → reviewer → test-engineer → security. |
 | `/legion:battle deliver` | Ajoute l'entrée CHANGELOG et le bump de version quand le type du titre l'exige (`release_prep.py`), commit sur la branche `<moi>/<n>` (créée au `start` en mode worktree, sinon ici), push, PR avec `Closes #<n>` (auto en mode autonome ; confirmation avant push en `--step`). |
 | `/legion:battle address` | *(post-deliver, répétable)* Traite les commentaires de revue de la PR et, si elle est en conflit avec la branche par défaut, résout le conflit : la gate `pr-triage` classe chaque fil, l'orchestrateur corrige (invalide et relance la cascade depuis `lint` si besoin), répond et résout. |
-| `/legion:battle resume <id>` | Reprend une battle existante (respecte son `run.mode`). |
+| `/legion:battle resume <id>` | Reprend une battle existante (respecte son `run.mode`). Lit `resume-notes.md` s'il est à jour, sans relire les artefacts déjà jugés. |
 | `/legion:battle status` | État des phases de la battle courante. |
 | `/legion:battle abort [<id>] [--reason …]` | Abandonne une battle qui ne sera pas livrée : la marque `aborted`, vide le pointeur, retire ton assignation de l'issue (au mieux). Ne ferme ni l'issue ni la PR. |
 | `/legion:retro [<id>]` | Rétrospective + apprentissage en mémoire + opportunités hors-scope → issues GitHub (dédup) + clôture. |

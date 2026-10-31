@@ -214,7 +214,7 @@ Deux niveaux : **par repo** (la battle) et **global** (le fleet).
 ```
 .legion/
 ├── active-battle          # pointeur de repli : id de la dernière battle activée (écrit par le CLI)
-├── sessions/              # liaisons session → battle : <clé>.json {battle, bound_at} (écrites par le hook session_bind.py, effacées par le CLI à close/abort)
+├── sessions/              # liaisons session → battle : <clé>.json {battle, bound_at, transcript?} (écrites par le hook session_bind.py, effacées par le CLI à close/abort)
 └── battles/
     └── 2026-06-08-GH-1234/
         ├── battle.json        # métadonnées + profil + statut des phases (écrit par battle_state.py seul)
@@ -415,12 +415,13 @@ plugins/legion/
 ├── docs/ui-integration.md       # contrat de données figé (pour une UI read-only)
 ├── docs/gate-write-confinement.md # pourquoi une gate écrit son seul artefact (invariant §4)
 ├── commands/
-│   ├── battle.md                # orchestrateur : start|build|review|test|deliver|address|resume|status
+│   ├── battle.md                # orchestrateur (noyau : dispatch, §F, guardrails, reset de contexte) : start|build|review|test|deliver|address|resume|status
 │   ├── retro.md                 # REFLECT
 │   ├── fleet.md                 # vue multi-repo
 │   ├── issues.md                # pré-THINK : liste les issues ouvertes du repo
 │   ├── legatus.md               # lance l'UI web Legatus (http://localhost:5021)
 │   ├── freeze.md / guard.md / careful.md
+├── doctrine/battle/             # parties de `battle.md` lues à la demande : A-start, B-resume, C-status, D-build, E-gates, checks, G-deliver, H-address, I-abort, J-close
 ├── agents/
 │   ├── architect.md             # gate PLAN
 │   ├── builder.md               # PRODUCER BUILD (Edit/Write/Bash, worktree)
@@ -445,6 +446,7 @@ plugins/legion/
 │   ├── release_prep.py          # CHANGELOG + bump de version au DELIVER (§G étape 2 : niveau déduit du titre Conventional Commits, `plan` / `apply`, idempotent, ensemble de chemins fermé : `CHANGELOG.md` racine et un manifeste reconnu ; jamais de réseau ; --self-test)
 │   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`--battle <id>` / `--root <worktree.path>` : `base` fige l'arbre d'intégration, `align` aligne un worktree de builder, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code pour un lot parallèle (`release_prep.py` écrit, lui, deux fichiers au DELIVER) (--self-test)
 │   ├── battle_worktree.py       # worktree dédié d'une battle : `create` / `start-check` / `where` / `close-check` / `close` (refus de cohabitation en place / worktree ; opérations locales, jamais `battle.json`, jamais le réseau) (--self-test)
+│   ├── context_check.py         # mesure du contexte de la session et fraîcheur de `resume-notes.md` (`measure` / `notes`, lecture seule, `--self-test`)
 │   ├── untrusted.py             # nettoyage du contenu tiers (issue, fils de revue) : retire commentaires HTML et caractères invisibles, signale chaque retrait, filtre les fils par accès en écriture (`issue` / `splice-cadrage` / `threads` / `filter-threads`, --self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
@@ -453,10 +455,14 @@ plugins/legion/
     └── recon/SKILL.md           # pré-THINK : cadrage d'une issue floue (section « Cadrage »)
 ```
 
+> **Renvois `battle.md` §X.** Depuis GH#212, « `battle.md` §X » (et « `commands/battle.md` §X ») désigne la
+> **doctrine `/battle`** : le noyau `commands/battle.md` plus ses parties `doctrine/battle/*.md`. Les titres `## §X`
+> sont inchangés, donc ces renvois restent valides. Le reset de contexte (cas 8) est décrit dans le noyau.
+
 > La couche tickets/PR passe par le CLI **`gh`** appelé directement depuis `battle.md`
 > (auth & JSON gérés par `gh`, zéro script réseau). Le dossier `scripts/` ne contient
 > que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness,
-> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates, fan-in des worktrees d'un lot parallèle, nettoyage du contenu tiers, CHANGELOG et bump de version au DELIVER), chacun couvert par
+> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates, fan-in des worktrees d'un lot parallèle, nettoyage du contenu tiers, CHANGELOG et bump de version au DELIVER, mesure du contexte et fraîcheur des notes de reprise), chacun couvert par
 > `--self-test` ; aucun n'appelle le réseau (la couche `gh` — dont la création des issues
 > d'opportunité — reste dans les command-files). **Exception « lanceur local »** :
 > `legatus.py` lance un process (`dotnet run`, détaché) et ouvre un navigateur ; il ne
@@ -584,6 +590,7 @@ Toute correction déterministe se fait sans lui.
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
 | **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (contrôle d'intégrité de l'arbre, `battle.md` §E). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. Relayer `changed` / `out_of_scope`. |
 | **7. Fusion du lot parallèle** | Le fan-in d'un lot `--auto` échoue : conflit (`overlap`, `dirty`, `apply`) rapporté par `fan_in.py apply`, ou vérification du projet rouge après la fusion (`battle.md` §D). Un refus hors périmètre reste en cas 3. | Escalade : slices du lot `blocked`, worktrees conservés ; relayer la slice, le type de conflit et les fichiers. Le lot est à re-découper. |
+| **8. Contexte saturé (proposition de reset)** | À un point de reset (T1, T2 ou T3, section « Reset de contexte »), `context_check.py measure` rend `propose: true` (contexte > 120k, aucune phase ni slice en cours) et l'humain n'a pas déjà refusé dans la session. | Écrire `resume-notes.md`, rendre la main avec la proposition `/clear` puis `/legion:battle resume <id>` ; sur « continuer », reprendre sans nouvelle proposition. Mesure impossible : aucune proposition, aucune erreur. |
 
 Hors liste = pas d'escalade.
 

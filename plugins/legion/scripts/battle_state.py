@@ -38,7 +38,8 @@ pointeur ni le cwd ; lit un seul `battle.json`). Le CLI part de
 
 Battle par session (GH#170), lecture seule sauf mention, jamais d'exception sauf `bind_session` /
 `unbind_battle` (écrivent) : `session_keys(payload) -> list[str]` (clés de session du payload d'un
-hook : `session_id`, sinon dérivée du transcript), `bind_session(state_root, key, battle_id)` et
+hook : `session_id`, sinon dérivée du transcript), `bind_session(state_root, key, battle_id,
+transcript=None)` (GH#212 : `transcript` facultatif, stocké s'il est absolu et nommé `<clé>.jsonl`) et
 `unbind_battle(state_root, battle_id) -> int` (liaisons `.legion/sessions/<clé>.json`),
 `session_battle_of(state_root, payload) -> (id, dict) | None`, `resolve_battle(state_root,
 payload) -> (id, dict, source)` avec `source` ∈ `session | pointer | foreign | none` (ordre :
@@ -239,6 +240,33 @@ SUBCOMMANDS: tuple[str, ...] = ("init", "transition", "approve-plan", "bump-auto
                                 "set-slices", "slice", "next-slice", "check-cascade",
                                 "merge-reports", "activate", "close", "abort", "validate",
                                 "session-status", "touch-files")
+
+# Doctrine `/battle` (GH#212) : le noyau `commands/battle.md` et ses parties `doctrine/battle/<nom>.md`
+# (une partie par section §, lue à la demande par l'orchestrateur). Ordre canonique : celui des
+# sections dans l'ancien fichier unique. `battle_doc` sert aux tests de doctrine, qui lisent la
+# doctrine entière ou une seule partie.
+BATTLE_DOC_PARTS: tuple[str, ...] = ("A-start", "B-resume", "C-status", "D-build", "E-gates",
+                                     "checks", "G-deliver", "H-address", "I-abort", "J-close")
+
+
+def battle_doc(root, part: str | None = None) -> str:
+    """Texte de la doctrine `/battle` sous `root` (dossier du plugin). `part=None` : noyau puis toutes
+    les parties dans l'ordre de `BATTLE_DOC_PARTS` ; `"core"` : le noyau ; un nom de `BATTLE_DOC_PARTS` :
+    cette partie. Lève `FileNotFoundError` si un fichier manque (installation incomplète) et
+    `ValueError` pour un nom inconnu."""
+    root = Path(root)
+    core = root / "commands" / "battle.md"
+    if part == "core":
+        return core.read_text(encoding="utf-8")
+    if part is not None:
+        if part not in BATTLE_DOC_PARTS:
+            raise ValueError(f"partie de doctrine inconnue : {part!r}")
+        return (root / "doctrine" / "battle" / f"{part}.md").read_text(encoding="utf-8")
+    texts = [core.read_text(encoding="utf-8")]
+    texts += [(root / "doctrine" / "battle" / f"{n}.md").read_text(encoding="utf-8")
+              for n in BATTLE_DOC_PARTS]
+    return "\n".join(texts)
+
 
 # Commandes encore permises sur une battle abandonnée (GH#75) : lecture de diagnostic seule.
 ABORT_ALLOWED: tuple[str, ...] = ("validate",)
@@ -1463,11 +1491,27 @@ def _list_bindings(root: Path) -> list[tuple[Path, str | None, dict | None]]:
     return out
 
 
-def bind_session(state_root: Path, key: str, battle_id: str) -> None:
+def _binding_transcript(key: str, transcript) -> str | None:
+    """Chemin de transcript à enregistrer dans la liaison, sinon `None` : absolu et nommé
+    exactement `<key>.jsonl` (transcript du fil principal de cette session, jamais un sous-agent).
+    Pur, sans exception."""
+    try:
+        if not isinstance(transcript, str) or not transcript:
+            return None
+        if not (os.path.isabs(transcript) or re.match(r"[A-Za-z]:[\\/]", transcript)):
+            return None
+        return transcript if _transcript_kind_key(transcript) == ("main", key) else None
+    except Exception:  # noqa: BLE001 - contrat : jamais d'exception
+        return None
+
+
+def bind_session(state_root: Path, key: str, battle_id: str, transcript: str | None = None) -> None:
     """Lie la session `key` à `battle_id` : écrit `.legion/sessions/<key>.json` de façon atomique,
     supprime les autres liaisons vers `battle_id` (une seule session pilote une battle : la
-    dernière activation l'emporte) et celles vers des battles mortes ou illisibles. Lève
-    `ValueError` si `key` ou `battle_id` est invalide, `OSError` si l'écriture échoue."""
+    dernière activation l'emporte) et celles vers des battles mortes ou illisibles. `transcript`
+    (GH#212, facultatif) : chemin du transcript du fil principal, enregistré dans le champ
+    `transcript` seulement s'il est absolu et nommé `<key>.jsonl` ; sinon ignoré sans erreur.
+    Lève `ValueError` si `key` ou `battle_id` est invalide, `OSError` si l'écriture échoue."""
     if not _valid_key(key):
         raise ValueError(f"clé de session invalide : {key!r}")
     if not isinstance(battle_id, str) or not _ID_RE.fullmatch(battle_id):
@@ -1475,7 +1519,11 @@ def bind_session(state_root: Path, key: str, battle_id: str) -> None:
     sdir = _sessions_dir(state_root)
     sdir.mkdir(parents=True, exist_ok=True)
     mine = sdir / f"{key}.json"
-    _atomic_write(mine, {"battle": battle_id, "bound_at": _now_iso()})
+    entry = {"battle": battle_id, "bound_at": _now_iso()}
+    tpath = _binding_transcript(key, transcript)
+    if tpath is not None:
+        entry["transcript"] = tpath
+    _atomic_write(mine, entry)
     for f, bid, _data in _list_bindings(state_root):
         if f == mine:
             continue
@@ -3183,6 +3231,7 @@ def _t_doc_subcommands() -> None:
     known = set(SUBCOMMANDS)
     for d in docs:
         text = d.read_text(encoding="utf-8")
+        full = battle_doc(root) if d.name == "battle.md" else text
         m = re.search(r"(?:[Ss]ubcommands|sous-commandes)[:\s]*`init`.*?`validate`", text, re.S)
         assert m, f"liste de sous-commandes introuvable dans {d.name}"
         cited = set(re.findall(r"`([a-z][a-z-]*)`", m.group(0)))
@@ -3192,12 +3241,14 @@ def _t_doc_subcommands() -> None:
         if d.name == "battle.md":
             assert "session-status" in text, "session-status non cité dans battle.md"
         assert "touch-files" in text, f"touch-files non cité dans {d.name}"
-        assert "set-slices --replace" in text, f"set-slices --replace non cité dans {d.name}"
+        assert "set-slices --replace" in full, f"set-slices --replace non cité dans {d.name}"
 
 
 def _t_doc_plugin_root_braces() -> None:   # GH#172 : seule la forme ${CLAUDE_PLUGIN_ROOT} est substituée
     root = Path(__file__).resolve().parents[1]
     files = sorted((root / "commands").glob("*.md")) + sorted((root / "skills").glob("*/SKILL.md"))
+    parts = sorted((root / "doctrine" / "battle").glob("*.md"))
+    files += parts
     if not files:
         print("SKIP: _t_doc_plugin_root_braces (fichiers de doctrine absents, cache de plugin ?)",
               file=sys.stderr)
@@ -3206,8 +3257,17 @@ def _t_doc_plugin_root_braces() -> None:   # GH#172 : seule la forme ${CLAUDE_PL
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             assert "$CLAUDE_PLUGIN_ROOT" not in line, (
                 f"{f.name}:{n} : $CLAUDE_PLUGIN_ROOT sans accolades (non substitué) : {line.strip()}")
-    assert "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" in (root / "commands/battle.md").read_text(
-        encoding="utf-8"), "battle.md : forme ${CLAUDE_PLUGIN_ROOT} absente"
+    core = battle_doc(root, "core")
+    assert "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" in core, "battle.md : forme ${CLAUDE_PLUGIN_ROOT} absente"
+    # GH#212 : les parties lues avec Read ne sont pas substituées : marqueur <plugin-root>, défini par le noyau
+    assert "`<plugin-root>` = `${CLAUDE_PLUGIN_ROOT}`" in core, "noyau : <plugin-root> non défini"
+    assert [f.stem for f in parts] == sorted(BATTLE_DOC_PARTS), "parties de doctrine inattendues"
+    marked = 0
+    for f in parts:
+        text = f.read_text(encoding="utf-8")
+        assert "CLAUDE_PLUGIN_ROOT" not in text, f"{f.name} : ${{CLAUDE_PLUGIN_ROOT}} dans une partie (non substitué)"
+        marked += text.count("<plugin-root>/scripts/")
+    assert marked >= 40, f"appels <plugin-root>/scripts/ attendus dans les parties, trouvés : {marked}"
 
 
 def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
@@ -3219,13 +3279,14 @@ def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
               file=sys.stderr)
         return
     docs = {n: p.read_text(encoding="utf-8") for n, p in paths.items()}
-    battle = docs["battle"]
+    docs["battle"] = battle = battle_doc(root)
     assert "session-status" in battle, "session-status absent de battle.md"
     assert "concurrent_battle" not in "".join(docs.values()), "concurrent_battle subsiste"
     assert "in_place_live" in battle, "in_place_live non documenté"
     assert 'battle_worktree.py" start-check' in battle, "start-check absent de battle.md"
     assert "worktree_live" in battle, "worktree_live non documenté"
-    a1 = battle[battle.index("### §A.1"):]
+    a_part = battle_doc(root, "A-start")
+    a1 = a_part[a_part.index("### §A.1"):]
     assert a1.index('battle_worktree.py" start-check') < a1.index('battle_state.py" init'), \
         "start-check doit précéder init dans §A.1"
     # appels battle_state.py de freeze / careful / guard / retro : toujours --battle
@@ -3238,7 +3299,8 @@ def _t_doc_concurrent() -> None:   # GH#170 : doctrine des battles concurrentes
                 continue
             assert "--battle" in line, f"{n}.md : appel sans --battle : {line.strip()}"
     # §E : instantané et vérification par battle
-    e_sec = battle[battle.index("## §E — review / test gates"):battle.index("### Gate artifact delivery check")]
+    chk = battle_doc(root, "checks")
+    e_sec = chk[chk.index("### Tree integrity check"):chk.index("### Gate artifact delivery check")]
     assert "tree-snapshot --battle" in e_sec or "tree-snapshot` --battle" in e_sec, "§E : tree-snapshot --battle absent"
     assert "tree-verify --battle" in e_sec, "§E : tree-verify --battle absent"
     assert "git fetch --no-tags origin" in battle, "fetch --no-tags absent de battle.md"
@@ -3251,7 +3313,7 @@ def _t_doc_pr_tracking() -> None:
         print("SKIP: _t_doc_pr_tracking (fichiers de doctrine absents, cache de plugin ?)",
               file=sys.stderr)
         return
-    battle, retro = battle_md.read_text(encoding="utf-8"), retro_md.read_text(encoding="utf-8")
+    battle, retro = battle_doc(root), retro_md.read_text(encoding="utf-8")
     for needle in ("set-delivery --pr-json", "statusCheckRollup", "--log-failed",
                    "bump-autocorrect build", "mergeable,mergeStateStatus",
                    "merge --no-ff --no-commit", "merge --abort",
@@ -3277,7 +3339,7 @@ def _t_doc_profiles() -> None:
               file=sys.stderr)
         return
     for d in docs:
-        text = d.read_text(encoding="utf-8")
+        text = battle_doc(root) if d.name == "battle.md" else d.read_text(encoding="utf-8")
         for prof, gates in PROFILES.items():
             rows = [ln for ln in text.splitlines() if ln.lstrip().startswith(f"| `{prof}`")]
             assert rows, f"profil {prof} absent de la table de {d.name}"
@@ -3294,10 +3356,11 @@ def _t_doc_tree_integrity() -> None:
               file=sys.stderr)
         return
     for d in docs:
-        text = d.read_text(encoding="utf-8")
+        text = battle_doc(root) if d.name == "battle.md" else d.read_text(encoding="utf-8")
         assert "**6. Faute d'écriture d'une gate**" in text, f"cas 6 absent de {d.name}"
         assert "**7. Fusion du lot parallèle**" in text, f"cas 7 absent de {d.name}"
-    battle = docs[0].read_text(encoding="utf-8")
+        assert "**8. Contexte saturé (proposition de reset)**" in text, f"cas 8 absent de {d.name}"
+    battle = battle_doc(root)
     for needle in ("tree-snapshot", "tree-verify", "--fingerprint", "--guard", "--base"):
         assert needle in battle, f"{needle!r} absent de battle.md"
     assert "Bash non couvert" not in docs[2].read_text(encoding="utf-8")
@@ -3309,7 +3372,7 @@ def _t_doc_fan_in() -> None:
         print("SKIP: _t_doc_fan_in (fichiers de doctrine absents, cache de plugin ?)",
               file=sys.stderr)
         return
-    text = battle_md.read_text(encoding="utf-8")
+    text = battle_doc(battle_md.parents[1], "D-build")
     start = text.index("**Mode — `--auto`.**")
     sec = text[start:text.index("After build (either mode)", start)]
     # `fan_in.py` peut être suivi d'un guillemet fermant (`"${CLAUDE_PLUGIN_ROOT}/scripts/fan_in.py" apply`)
@@ -3363,6 +3426,7 @@ def _t_doc_worktree_state_root() -> None:
               file=sys.stderr)
         return
     txt = {n: d.read_text(encoding="utf-8") for n, d in docs.items()}
+    txt["battle"] = battle_doc(root)
     assert "--git-common-dir" in txt["battle"] and "absolute" in txt["battle"], "battle.md"
     assert "absolu" in txt["builder"], "builder.md"
     assert "--git-common-dir" in txt["arch"], "ARCHITECTURE.md"
@@ -3380,6 +3444,7 @@ def _t_doc_isolated_report() -> None:
               file=sys.stderr)
         return
     txt = {n: d.read_text(encoding="utf-8") for n, d in docs.items()}
+    txt["battle"] = battle_doc(root)
     b = txt["builder"]
     assert "<<<BUILD-REPORT" in b and "<<<END BUILD-REPORT>>>" in b and "write_failures" in b, \
         "builder.md : marqueurs / write_failures"
@@ -3405,7 +3470,7 @@ def _t_doc_abort_stale() -> None:
         print("SKIP: _t_doc_abort_stale (fichiers de doctrine absents, cache de plugin ?)",
               file=sys.stderr)
         return
-    battle = battle_md.read_text(encoding="utf-8")
+    battle = battle_doc(root)
     assert re.search(r"^## §I — abort", battle, re.M), "section abort absente de battle.md"
     assert "--remove-assignee" in battle, "désassignation gh absente de battle.md"
     fleet = fleet_md.read_text(encoding="utf-8")
@@ -3419,7 +3484,7 @@ def _t_doc_worktree_mode() -> None:   # GH#152 : doctrine du mode worktree
         print("SKIP: _t_doc_worktree_mode (fichiers de doctrine absents, cache de plugin ?)",
               file=sys.stderr)
         return
-    battle, retro = battle_md.read_text(encoding="utf-8"), retro_md.read_text(encoding="utf-8")
+    battle, retro = battle_doc(root), retro_md.read_text(encoding="utf-8")
     for needle in ("battle_worktree.py\" create", "battle_worktree.py\" close-check",
                    "battle_worktree.py\" close --battle", "battle_worktree.py\" where",
                    "--in-place", "set-meta --worktree-path", "ExitWorktree",
@@ -3434,7 +3499,8 @@ def _t_doc_worktree_mode() -> None:   # GH#152 : doctrine du mode worktree
         "EnterWorktree hors de la ligne de recuperation"
     assert "EnterWorktree" not in retro, "EnterWorktree dans retro.md"
     # §E : instantane et verification sur la racine du worktree ; §G : git -C
-    e_sec = battle[battle.index("## §E — review / test gates"):battle.index("### Gate artifact delivery check")]
+    chk = battle_doc(root, "checks")
+    e_sec = chk[chk.index("### Tree integrity check"):chk.index("### Gate artifact delivery check")]
     assert e_sec.count('--root "<worktree>"') >= 2, '§E : --root "<worktree>" absent (snapshot et verify)'
     g_sec = battle[battle.index("## §G — deliver"):battle.index("## §H — address")]
     assert 'git -C "<worktree>"' in g_sec, "§G : git -C absent"
@@ -3469,9 +3535,9 @@ def _t_doc_worktree_mode() -> None:   # GH#152 : doctrine du mode worktree
     assert "not available in worktree mode" not in d, "§D : lot parallele encore declare indisponible"
     assert "integration tree" in d and "--root \"<wt>\"" in d, "§D : arbre d'integration absent"
     # GH#159 : nettoyage d'une battle abandonnee (preuve unpushed, fetch --prune)
-    i_sec = battle[battle.index("## §I"):battle.index("## §J")]
+    i_sec = battle_doc(root, "I-abort")
     assert "git worktree remove" not in i_sec, "§I : git worktree remove a la main de retour"
-    j_sec = battle[battle.index("## §J"):battle.index("## Guardrails")]
+    j_sec = battle_doc(root, "J-close")
     assert "unpushed" in j_sec and "--prune" in j_sec, "§J : unpushed / --prune absents"
     # options validees par liste fermee
     assert "closed list" in battle and "`--in-place` (no value" in battle, "liste fermee de start"
@@ -3901,6 +3967,7 @@ def _t_doc_bug_battle() -> None:
               file=sys.stderr)
         return
     text = {n: d.read_text(encoding="utf-8") for n, d in docs.items()}
+    text["commands/battle.md"] = battle_doc(root)
     subs = _build_parser_parts()[1].choices
     init_opts = set(subs["init"]._option_string_actions)
     meta_opts = set(subs["set-meta"]._option_string_actions)
@@ -3910,7 +3977,7 @@ def _t_doc_bug_battle() -> None:
     assert cited <= meta_opts and "--kind" in meta_opts, sorted(cited - meta_opts)
     assert "--kind" in init_opts and "init" in battle and "[--kind bug]" in battle
     assert "set-meta --kind bug" in battle and 'set-meta --kind ""' in battle
-    dispatch = [ln for ln in battle.splitlines() if ln.startswith("- `start <issue|slug>")]
+    dispatch = [ln for ln in battle_doc(root, "core").splitlines() if ln.startswith("- `start <issue|slug>")]
     assert dispatch and "`--bug`" in dispatch[0], "--bug absent de la ligne Dispatch"
     hint = [ln for ln in battle.splitlines() if ln.startswith("argument-hint:")]
     assert hint and "[--bug]" in hint[0], "--bug absent de argument-hint"
@@ -3921,6 +3988,70 @@ def _t_doc_bug_battle() -> None:
     for n in ("skills/battle-workflow/SKILL.md", "ARCHITECTURE.md", "docs/ui-integration.md"):
         assert "`kind`" in text[n] or "kind (" in text[n], f"kind absent de {n}"
         assert "regression" in text[n], f"regression absent de {n}"
+
+
+def _t_doc_split() -> None:   # D1 (GH#212) : découpage de la doctrine /battle
+    root = Path(__file__).resolve().parents[1]
+    core_path = root / "commands" / "battle.md"
+    if not core_path.is_file():
+        print("SKIP: _t_doc_split (fichiers de doctrine absents, cache de plugin ?)", file=sys.stderr)
+        return
+    core = battle_doc(root, "core")
+    assert len(core.encode("utf-8")) <= 20_000, f"noyau trop gros : {len(core.encode('utf-8'))} octets"
+    assert "`<plugin-root>` = `${CLAUDE_PLUGIN_ROOT}`" in core, "noyau : <plugin-root> non défini"
+    parts = {n: battle_doc(root, n) for n in BATTLE_DOC_PARTS}   # FileNotFoundError si une partie manque
+    for n, text in parts.items():
+        assert text.strip(), f"partie vide : {n}"
+        assert f"`{n}.md`" in core, f"table du Dispatch : {n}.md non cité dans le noyau"
+        assert "CLAUDE_PLUGIN_ROOT" not in text, f"{n}.md : ${{CLAUDE_PLUGIN_ROOT}} dans une partie"
+    # une partie par section §, titre unique, hors du noyau (§F reste dans le noyau)
+    owner = {"A": "A-start", "B": "B-resume", "C": "C-status", "D": "D-build", "E": "E-gates",
+             "G": "G-deliver", "H": "H-address", "I": "I-abort", "J": "J-close"}
+    everything = battle_doc(root)
+    for letter, part in owner.items():
+        heads = re.findall(rf"^## §{letter} — .*$", everything, re.M)
+        assert len(heads) == 1, f"§{letter} : {len(heads)} titres au lieu d'un"
+        assert re.search(rf"^## §{letter} — ", parts[part], re.M), f"§{letter} absent de {part}.md"
+        assert not re.search(rf"^## §{letter} — ", core, re.M), f"§{letter} dans le noyau"
+    assert len(re.findall(r"^## §F — ", core, re.M)) == 1 and "## Guardrails" in core, "§F / Guardrails hors du noyau"
+    for title in ("### Tree integrity check", "### Gate artifact delivery check",
+                  "### Non-.NET stack — gate adaptation"):
+        assert everything.count(title) == 1 and title in parts["checks"], f"{title} : hors de checks.md"
+    # les parties ne sont pas des commandes : rien sous commands/ à part les fichiers du plugin
+    assert not [f for f in (root / "commands").rglob("*") if f.is_dir()], "sous-dossier dans commands/"
+    assert not [f for f in (root / "commands").glob("*.md") if f.stem in BATTLE_DOC_PARTS], \
+        "partie de doctrine sous commands/"
+
+
+def _t_doc_context_reset() -> None:   # D3 (GH#212) : doctrine du reset de contexte
+    root = Path(__file__).resolve().parents[1]
+    if not (root / "commands" / "battle.md").is_file():
+        print("SKIP: _t_doc_context_reset (fichiers de doctrine absents, cache de plugin ?)", file=sys.stderr)
+        return
+    core = battle_doc(root, "core")
+    sec = core[core.index("## Reset de contexte (transitions de phase)"):core.index("## §F — ")]
+    for needle in ('context_check.py" measure --battle', "resume-notes.md", "propose", "silently",
+                   "escalation case 8", "/legion:battle resume", "T1", "T2", "T3", "RESET_THRESHOLD"):
+        assert needle in sec, f"section « Reset de contexte » : {needle!r} absent"
+    # les trois points de déclenchement renvoient au reset, chacun dans sa partie
+    assert "T1" in battle_doc(root, "A-start") and "avant" in battle_doc(root, "A-start").split("T1", 1)[1][:200]
+    assert "Reset point T2" in battle_doc(root, "D-build")
+    assert re.search(r"reset point\s+T3", battle_doc(root, "E-gates")), "E-gates.md : renvoi T3 absent"
+    # B-resume : notes fraîches, en-tête absent, périmées
+    b = battle_doc(root, "B-resume")
+    for needle in ('context_check.py" notes --battle', "`fresh`", "`no_header`", "`stale`", "notes périmées"):
+        assert needle in b, f"B-resume.md : {needle!r} absent"
+    # le seuil de la doctrine est celui du script (valeur fixe unique)
+    import context_check
+    assert context_check.RESET_THRESHOLD == 120_000 and "120k" in sec
+    # chaque script cité existe, chaque option citée est celle du CLI
+    assert (root / "scripts" / "context_check.py").is_file()
+    # les trois copies de la taxonomie portent le cas 8 (assertion de _t_doc_tree_integrity) et la doc UI
+    ui = (root / "docs" / "ui-integration.md").read_text(encoding="utf-8")
+    assert "resume-notes.md" in ui, "ui-integration.md : resume-notes.md absent"
+    for rel in ("skills/battle-workflow/SKILL.md", "ARCHITECTURE.md", "README.md"):
+        assert "resume-notes.md" in (root / rel).read_text(encoding="utf-8"), f"{rel} : resume-notes.md absent"
+    assert "context_check.py" in (root / "ARCHITECTURE.md").read_text(encoding="utf-8")
 
 
 _CORE_TESTS = (
@@ -3951,7 +4082,7 @@ _CORE_TESTS = (
     _t_replan_then_replace_single_event, _t_set_slices_replace_empty,
     _t_set_slices_replace_empty_refused, _t_subcommands_constant, _t_doc_subcommands,
     _t_slice_report_names, _t_merge_nominal, _t_merge_missing_blank, _t_merge_out_of_scope,
-    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode, _t_doc_concurrent, _t_doc_plugin_root_braces,
+    _t_merge_titles, _t_merge_aggregated_and_invalid, _t_doc_profiles, _t_doc_pr_tracking, _t_doc_tree_integrity, _t_doc_fan_in, _t_doc_worktree_state_root, _t_doc_isolated_report, _t_doc_abort_stale, _t_doc_worktree_mode, _t_doc_concurrent, _t_doc_plugin_root_braces, _t_doc_split, _t_doc_context_reset,
     _t_cascade_refused_during_replan, _t_cascade_legacy_no_approval_key,
     _t_replan_invalidates_in_progress_gate, _t_polish_keeps_in_progress_gate,
     _t_guard_of, _t_validate_guard, _t_is_aborted, _t_abort_core, _t_abort_refused_closed,
@@ -5454,6 +5585,26 @@ def _t_bind_unbind() -> None:
         assert unbind_battle(r.root / "absent", "a") == 0
 
 
+def _t_bind_transcript() -> None:  # B1 (GH#212)
+    base = "/h/.claude/projects/p"
+    with _Repo() as r:
+        r.init("a")
+        f = r.root / ".legion" / "sessions" / "k1.json"
+
+        def bound(key, transcript):
+            bind_session(r.root, key, "a", transcript)
+            return json.loads((r.root / ".legion" / "sessions" / f"{key}.json").read_text(encoding="utf-8"))
+
+        assert bound("k1", f"{base}/k1.jsonl")["transcript"] == f"{base}/k1.jsonl"      # valide
+        assert "transcript" not in bound("k1", f"{base}/k1/subagents/agent-x.jsonl")    # sous-agent
+        assert "transcript" not in bound("k1", "rel/k1.jsonl")                          # relatif
+        assert "transcript" not in bound("k1", f"{base}/autre.jsonl")                   # autre clé
+        assert "transcript" not in bound("k1", None) and "transcript" not in bound("k1", 7)
+        assert bound("k1", "C:\\x\\k1.jsonl")["transcript"] == "C:\\x\\k1.jsonl"       # chemin Windows
+        data = bound("k1", None)                                                       # appel sans transcript
+        assert data["battle"] == "a" and data["bound_at"] and f.is_file()
+
+
 def _t_resolve_battle() -> None:
     with _Repo() as r:
         ka, kb, kc = {"session_id": "sidA"}, {"session_id": "sidB"}, {"session_id": "sidC"}
@@ -5548,7 +5699,7 @@ def _t_probe() -> None:
 
 
 _SESSION_TESTS = (
-    _t_session_keys, _t_bind_unbind, _t_resolve_battle, _t_state_root_sessions,
+    _t_session_keys, _t_bind_unbind, _t_bind_transcript, _t_resolve_battle, _t_state_root_sessions,
     _t_session_status_cli, _t_probe,
 )
 

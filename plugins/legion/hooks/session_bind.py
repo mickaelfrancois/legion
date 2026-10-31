@@ -168,7 +168,7 @@ def _handle(data) -> None:
         # liaison finale = dernier appel reussi (une session = une battle)
         for root, bid, ok in zip(roots, ids, _proofs(data, roots, ids)):
             if ok:
-                _bs.bind_session(root, keys[0], bid)
+                _bs.bind_session(root, keys[0], bid, data.get("transcript_path"))
     except Exception:  # noqa: BLE001 - contrat : un hook ne plante jamais la session
         return
 
@@ -193,7 +193,7 @@ def _self_test() -> int:
     if _IMPORT_ERROR is not None:
         print(f"FAIL: import battle_state : {_IMPORT_ERROR}", file=sys.stderr)
         return 1
-    tests = [_t_init, _t_activate_compound, _t_failure_proofs, _t_per_call, _t_chained, _t_repo, _t_subdir, _t_nothing, _t_probe, _t_hooks_json]
+    tests = [_t_init, _t_activate_compound, _t_failure_proofs, _t_per_call, _t_chained, _t_repo, _t_subdir, _t_nothing, _t_probe, _t_hooks_json, _t_transcript]
     for t in tests:
         t()
     print(f"OK: {len(tests)} tests session_bind")
@@ -239,6 +239,22 @@ def _t_init() -> None:
         cmd = f'python3 "/x/scripts/battle_state.py" init A --ticket GH#1 --title T --profile feature --repo "{root}"'
         _handle(_payload(cmd, root, stdout=_ok("A")))
         assert _binding(root, "sid-1") == "A"
+
+
+def _t_transcript() -> None:  # S1 (GH#212)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _mk(tmp)
+        _init(root, "A")
+        tpath = str(Path(tmp) / "proj" / "sid-1.jsonl")
+        cmd = f'python "/x/scripts/battle_state.py" activate A --repo "{root}"'
+        _handle(_payload(cmd, root, stdout=_ok("A"), transcript_path=tpath))
+        data = json.loads((root / ".legion" / "sessions" / "sid-1.json").read_text(encoding="utf-8"))
+        assert data["battle"] == "A" and data["transcript"] == tpath
+        # transcript au nom d'une autre session : liaison faite, champ absent
+        _handle(_payload(cmd, root, sid="sid-2", stdout=_ok("A"),
+                         transcript_path=str(Path(tmp) / "proj" / "autre.jsonl")))
+        data = json.loads((root / ".legion" / "sessions" / "sid-2.json").read_text(encoding="utf-8"))
+        assert data["battle"] == "A" and "transcript" not in data
 
 
 def _t_activate_compound() -> None:

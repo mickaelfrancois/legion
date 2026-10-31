@@ -622,6 +622,12 @@ def _self_test() -> int:
     root = Path(__file__).resolve().parent.parent
     docs = {name: (root / name).read_text(encoding="utf-8") for name in
             ("commands/battle.md", "skills/recon/SKILL.md", "agents/pr-triage.md")}
+    # GH#212 : la doctrine /battle est un noyau plus des parties (doctrine/battle/*.md) ; on garde la
+    # couverture d'avant le découpage en lisant le tout, et on vise la partie §A / §H pour les coupes.
+    part_files = sorted((root / "doctrine" / "battle").glob("*.md"))
+    assert part_files, "parties de doctrine absentes (doctrine/battle/*.md)"
+    parts = {f.stem: f.read_text(encoding="utf-8") for f in part_files}
+    docs["commands/battle.md"] += "\n" + "\n".join(parts[k] for k in sorted(parts))
     calls = 0
     for name in ("commands/battle.md", "skills/recon/SKILL.md"):
         for m in re.finditer(r"untrusted\.py\"?\s+([a-z-]+)([^\n`|]*)", docs[name]):
@@ -631,9 +637,8 @@ def _self_test() -> int:
                 assert flag in SUBCOMMANDS[sub], f"{name} : option `{flag}` inconnue pour `{sub}`"
             calls += 1
     assert calls >= 5, f"appels untrusted.py attendus dans la doctrine, trouvés : {calls}"
-    battle = docs["commands/battle.md"]
-    intake = battle[battle.index("3. **THINK"):battle.index("4. **Complete")]
-    address = battle[battle.index("## §H"):battle.index("## §I")]
+    intake = parts["A-start"][parts["A-start"].index("3. **THINK"):parts["A-start"].index("4. **Complete")]
+    address = parts["H-address"]
     for where, text in (("battle.md §A.1 étape 3", intake), ("battle.md §H", address),
                         ("recon/SKILL.md", docs["skills/recon/SKILL.md"])):
         assert "untrusted data" in text, f"déclaration « untrusted data » absente : {where}"

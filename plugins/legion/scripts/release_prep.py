@@ -889,13 +889,19 @@ def _t_cli(tmp: str) -> None:
 
 def _t_doc_deliver_release() -> None:
     """Doctrine §G étape 2 : l'appel release_prep, stage, notes, ordre."""
-    battle_md = Path(__file__).resolve().parents[1] / "commands" / "battle.md"
-    if not battle_md.is_file():
-        print("SKIP: _t_doc_deliver_release (commands/battle.md absent, cache de plugin ?)",
+    plugin = Path(__file__).resolve().parents[1]
+    battle_md = plugin / "commands" / "battle.md"
+    deliver_md = plugin / "doctrine" / "battle" / "G-deliver.md"
+    if not (battle_md.is_file() and deliver_md.is_file()):
+        print("SKIP: _t_doc_deliver_release (doctrine /battle absente, cache de plugin ?)",
               file=sys.stderr)
         return
-    battle = battle_md.read_text(encoding="utf-8")
-    g = battle[battle.index("2. **Commit**"):battle.index("3. **Compose the PR body**")]
+    # GH#212 : doctrine = noyau + parties ; l'ancien paragraphe ne doit subsister nulle part,
+    # la coupe §G cible la partie G-deliver.
+    parts = sorted((plugin / "doctrine" / "battle").glob("*.md"))
+    battle = "\n".join([battle_md.read_text(encoding="utf-8")] + [f.read_text(encoding="utf-8") for f in parts])
+    deliver = deliver_md.read_text(encoding="utf-8")
+    g = deliver[deliver.index("2. **Commit**"):deliver.index("3. **Compose the PR body**")]
     call = 'release_prep.py" apply --repo "<worktree>"'
     for needle in (call, "`stage[]`", "`notes[]`", "does **not** re-run `release_prep`"):
         assert needle in g, f"§G étape 2 : aiguille absente : {needle}"
@@ -904,7 +910,7 @@ def _t_doc_deliver_release() -> None:
     i_before = g.index("**Before committing**")
     assert i_sum < i_call < i_before, "§G étape 2 : ordre summary < release_prep < Before committing"
     assert "Version bump grouped in the PR" not in battle, "ancien paragraphe de bump encore présent"
-    step3 = battle[battle.index("3. **Compose the PR body**"):battle.index("4. **CONFIRM")]
+    step3 = deliver[deliver.index("3. **Compose the PR body**"):deliver.index("4. **CONFIRM")]
     assert "notes[]" in step3, "§G étape 3 : notes[] absent"
     assert " -I " not in g, "release_prep appelé avec python -I"
 

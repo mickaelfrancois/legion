@@ -101,6 +101,7 @@ L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants :
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
 | **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (contrôle d'intégrité, `battle.md` §E). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. |
 | **7. Fusion du lot parallèle** | Le fan-in d'un lot `--auto` échoue : conflit (`overlap`, `dirty`, `apply`) ou vérification du projet rouge après la fusion (`battle.md` §D). Un refus hors périmètre reste en cas 3. | Escalade : slices du lot `blocked`, worktrees conservés ; relayer la slice, le type de conflit et les fichiers. |
+| **8. Contexte saturé (proposition de reset)** | À un point de reset (T1, T2 ou T3, section « Reset de contexte »), `context_check.py measure` rend `propose: true` (contexte > 120k, aucune phase ni slice en cours) et l'humain n'a pas déjà refusé dans la session. | Écrire `resume-notes.md`, rendre la main avec la proposition `/clear` puis `/legion:battle resume <id>` ; sur « continuer », reprendre sans nouvelle proposition. Mesure impossible : aucune proposition, aucune erreur. |
 
 Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiquement.
 
@@ -373,6 +374,19 @@ projects `tokens_total` + `skills` into the shard for the UI (plus `slices_done`
 
 A new session **resumes** a battle by reading `battle.json` — no conversational
 context required. A battle is resolved **by target** first (a path under `.claude/worktrees/<id>/`), then **by session** (`.legion/sessions/<key>.json`, written by the `session_bind.py` hook), then by the `.legion/active-battle` pointer, which is only a fallback (a session with no binding, an old harness). Several battles can therefore run in parallel, each in its own worktree. Doctrine always passes `--battle <id>` to `battle_state.py`; `session-status --battle <id>` tells whether the session is bound.
+
+**Doctrine chargée par parties (GH#212).** `commands/battle.md` n'est plus qu'un noyau (dispatch, §F,
+Guardrails, reset de contexte) : les sections §A à §J vivent sous `doctrine/battle/` (`A-start.md`,
+`D-build.md`, `E-gates.md`, `checks.md`…) et l'orchestrateur ne lit que celles de la phase demandée.
+Les renvois « `battle.md` §X » désignent la doctrine entière, noyau plus parties.
+
+**Reset de contexte (GH#212).** Aux transitions de phase (après l'approbation du plan, après `build
+done`, après chaque gate `accept*`), si `scripts/context_check.py measure` rend `propose: true`
+(contexte > 120k jetons, aucune phase ni slice en cours), l'orchestrateur écrit `resume-notes.md` dans
+le dossier de battle et **propose** `/clear` puis `/legion:battle resume <id>`, y compris en
+`autonomous` (cas 8). Au resume, `context_check.py notes` dit si les notes sont fraîches : oui →
+l'orchestrateur lit les notes au lieu des artefacts déjà jugés ; sinon reprise classique. Contexte non
+mesurable : aucune proposition, aucune erreur.
 
 **Mode worktree (défaut, `--in-place` pour l'ancien flux).** `/battle start` crée un worktree
 dédié `<repo>/.claude/worktrees/<id>` sur la branche `<me>/<token>` (`battle_worktree.py create`,
