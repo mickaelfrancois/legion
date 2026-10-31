@@ -718,9 +718,41 @@ class _Fx:
         return res
 
 
+def _leaked_shards(fleet_dir: Path, root: str) -> list[str]:
+    """Shards de `fleet_dir` dont une valeur texte désigne `root` ou un chemin dessous (GH#214).
+    Un dossier absent ou un shard illisible ne compte pas comme une fuite."""
+    top = os.path.normcase(_real(root))
+
+    def under(value: object) -> bool:
+        if isinstance(value, str):
+            p = os.path.normcase(_real(value)) if os.path.isabs(value) else ""
+            return p == top or p.startswith(top + os.sep)
+        if isinstance(value, dict):
+            return any(under(v) for v in value.values())
+        if isinstance(value, list):
+            return any(under(v) for v in value)
+        return False
+
+    leaks = []
+    for shard in sorted(fleet_dir.glob("*.json")):
+        try:
+            data = json.loads(shard.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if under(data):
+            leaks.append(shard.name)
+    return leaks
+
+
 def _self_test() -> int:
-    saved = {k: os.environ.get(k) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM")}
-    os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    keys = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "LEGION_FLEET")
+    saved = {k: os.environ.get(k) for k in keys}
+    real_fleet = bs._load_fleet_sync()._fleet_dir()  # le vrai index, résolu avant l'isolation
+    run_root = _real(tempfile.mkdtemp(prefix="bwt-run-"))
+    saved_tempdir = tempfile.tempdir
+    tempfile.tempdir = run_root  # tout dossier temporaire du run vit sous `run_root`
+    os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                      LEGION_FLEET=os.path.join(run_root, "fleet.json"))
     try:
         names = [n for n in sorted(globals()) if n.startswith("_t_")]
         failed = 0
@@ -735,13 +767,32 @@ def _self_test() -> int:
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
         print(f"{len(names) - failed}/{len(names)} tests passés")
-        return 1 if failed else 0
+        leaks = _leaked_shards(real_fleet, run_root)
+        if leaks:
+            print(f"FAIL fuite fleet : {len(leaks)} shard(s) du vrai {real_fleet} pointent vers {run_root} : "
+                  f"{', '.join(leaks)}")
+        return 1 if failed or leaks else 0
     finally:
+        tempfile.tempdir = saved_tempdir
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        shutil.rmtree(run_root, ignore_errors=True)
+
+
+def _t_leak_check_detects(tmp: str) -> None:
+    fleet = Path(tmp) / "fleet.d"
+    root = os.path.join(tmp, "run")
+    assert _leaked_shards(fleet, root) == []                       # dossier absent
+    fleet.mkdir()
+    (fleet / "in.json").write_text(json.dumps({"id": "B", "repo": {"path": os.path.join(root, "main")}}),
+                                   encoding="utf-8")
+    (fleet / "near.json").write_text(json.dumps({"repo": os.path.join(tmp, "run-x", "main")}), encoding="utf-8")
+    (fleet / "out.json").write_text(json.dumps({"repo": os.path.join(tmp, "other", "main")}), encoding="utf-8")
+    (fleet / "bad.json").write_text("{", encoding="utf-8")
+    assert _leaked_shards(fleet, root) == ["in.json"], _leaked_shards(fleet, root)
 
 
 def _snapshot(fx: _Fx) -> tuple:
