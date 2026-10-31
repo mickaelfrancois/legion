@@ -1581,6 +1581,39 @@ def _t_tree_guard() -> None:
         assert rc == 2 and out["refused"] is True, out
 
 
+def _t_tree_conflict_merge_baseline() -> None:
+    """GH#205 : un merge en conflit réel (MERGE_HEAD) pris AVANT `tree-snapshot` fait partie de la
+    référence ; résoudre dans `allow` puis `tree-verify --guard` sort 0, hors `allow` sort 2."""
+    def conflicted(r: "_TreeRepo") -> None:
+        main = r.git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        r.git("checkout", "-q", "-b", "other")
+        r.write("src/a.txt", "other\n")
+        r.git("commit", "-aq", "-m", "other")
+        r.git("checkout", "-q", main)
+        r.write("src/a.txt", "main\n")
+        r.git("commit", "-aq", "-m", "main")
+        p = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff",
+                            "--no-commit", "other"], cwd=r.root, env=r.env, capture_output=True, text=True)
+        assert p.returncode != 0, p.stdout
+        assert os.path.exists(os.path.join(r.root, ".git", "MERGE_HEAD"))
+        assert r.git("diff", "--name-only", "--diff-filter=U").split() == ["src/a.txt"]
+    with _TreeRepo() as r:                                   # résolution dans allow
+        r.battle({"allow": ["src/**"]})
+        conflicted(r)
+        r.snapshot()
+        r.write("src/a.txt", "resolved\n")
+        rc, out = r.verify("--guard")
+        assert rc == 0 and "[git-state]" not in out.get("changed", []), out
+    with _TreeRepo() as r:                                   # écriture hors allow
+        r.battle({"allow": ["src/**"]})
+        conflicted(r)
+        r.snapshot()
+        r.write("src/a.txt", "resolved\n")
+        r.write("docs/b.txt", "hors\n")
+        rc, out = r.verify("--guard")
+        assert rc == 2 and out["out_of_scope"] == ["docs/b.txt"], out
+
+
 def _t_tree_usage() -> None:
     with _TreeRepo() as r:                                                            # T16
         r.snapshot()
@@ -2416,7 +2449,7 @@ _TREE_TESTS = (
     _t_tree_diff_pure, _t_tree_changes, _t_tree_dirty_start, _t_tree_index_and_head,
     _t_tree_ignored_and_legion, _t_tree_state, _t_tree_index_mask, _t_tree_crlf,
     _t_tree_allow_filter, _t_tree_guard, _t_tree_usage, _t_tree_refusals, _t_tree_no_git,
-    _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree, _t_tree_guard_from_subdir,
+    _t_tree_special_files, _t_tree_worktrees, _t_tree_base_ancestry, _t_tree_guard_from_worktree, _t_tree_guard_from_subdir, _t_tree_conflict_merge_baseline,
     _t_tree_worktree_battle, _t_tree_wt_from_main, _t_tree_battle_pure, _t_tree_battle,
     _t_tree_batch_battle,
     _t_tree_stdout_bounded, _t_tree_nested_repo, _t_is_legion_case,

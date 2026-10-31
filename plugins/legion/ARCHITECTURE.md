@@ -228,7 +228,7 @@ Deux niveaux : **par repo** (la battle) et **global** (le fleet).
         ├── gate-security.md   # (sécurité)
         ├── pr-body.md         # DELIVER (corps de PR)
         ├── wi-comment.md      # DELIVER (note postée sur l'issue)
-        ├── pr-status.json     # ADDRESS/status : sortie de `gh pr view` (état PR + CI)
+        ├── pr-status.json     # ADDRESS/status : sortie de `gh pr view` (état PR + CI + fusion)
         ├── ci-failed-<run-id>.log  # ADDRESS : log du run CI en échec (donnée non fiable)
         ├── usage.jsonl        # transverse (append-only) : tokens + skills réels
         └── retro.md           # REFLECT
@@ -250,7 +250,7 @@ fermé) est inchangée. Deux ajouts rétrocompatibles dans `battle.json` : le bl
 `worktree {path, branch, base, created_at}` (écrit par `battle_state.py set-meta --worktree-path
 --worktree-branch --worktree-base`, les trois ensemble ; absent ou `null` = en place), et
 `delivery.head_ref` / `delivery.head_oid` (lus du JSON de `gh pr view`, posés par `set-delivery
---pr-json`). `scripts/battle_worktree.py` (`create`, `start-check`, `where`, `close-check`, `close`) fait les
+--pr-json`) et `delivery.merge` (`conflict` | `unknown` | `ok` | `null`, GH#205). `scripts/battle_worktree.py` (`create`, `start-check`, `where`, `close-check`, `close`) fait les
 opérations git locales sans jamais écrire `battle.json`. `close` exige `phases.reflect` `done`, la
 PR mergée et la branche contenue dans `origin/<default>` (ou PR mergée avec `head_oid` == tip
 local), un worktree propre et un cwd hors du worktree ; il n'emploie jamais `--force`. Une battle abandonnée avec bloc `worktree` passe en mode abandonné : `unpushed` (aucun commit absent de `refs/remotes/origin`, ou tip == base) et `worktree_on_branch` remplacent `pr_merged` et `contained`, `reflect` n'est pas exigé et le principal n'est pas mis à jour.
@@ -275,7 +275,7 @@ elle était active. Il porte aussi la **source
 unique** des profils (`PROFILES`, dont `init` dérive `required_gates`) et de
 l'heuristique qui ajoute `security` à `required_gates` sur slice sensible
 (`security_hits`, `mark_security_auto`), ainsi que des tables `PHASES` / `GATE_PHASE` / `GATE_ARTIFACT` / `PRODUCER_ARTIFACT`, dont
-dérivent `guard.py`, `fleet_sync.py` et `eval.py`. `set-delivery --pr-json <fichier>` interprète la sortie de `gh pr view` sans réseau : le
+dérivent `guard.py`, `fleet_sync.py` et `eval.py`. `set-delivery --pr-json <fichier>` interprète la sortie de `gh pr view` sans réseau (état de la PR, CI et état de fusion `mergeable` / `mergeStateStatus`) : le
 command-file appelle `gh`, le script ne fait que lire le fichier. `merge-reports` (GH#129) consolide les `build-report-<slice_id>.md` en `build-report.md` ; c'est la seule sous-commande qui écrit un artefact de battle (jamais `battle.json`). Les command-files l'appellent ; ils
 n'éditent plus `battle.json` à la main.
 
@@ -596,6 +596,9 @@ Les deux budgets sont **non additionnés** : un `build_ok: false` du builder apr
 essais **compte pour 1 tentative** de la boucle orchestrateur. La boucle interne repart
 de 0 à chaque nouvelle demande de correction.
 
+La **ronde conflit** d'`address` (résolution d'un conflit avec la branche par défaut, GH#205) est
+**hors budget** : elle n'appelle pas `bump-autocorrect` et ne touche pas `run.autocorrect`.
+
 **Détection de progrès (par identité, pas par compte) :** compare l'**ensemble** des
 FAIL du `gate-*.md` entre deux tentatives, par cible (`fichier:ligne` + dimension).
 Progrès = au moins un FAIL ciblé au run précédent a **disparu** (résolu), même si le
@@ -612,7 +615,7 @@ présentes (`lint`, `review`, `test`, `security`) qui sont `done` ou `blocked` :
 `invalidated_at` posé, et une entrée `{at, reason, phases}` ajoutée à `run.invalidations`
 si au moins une phase a changé. Après le BUILD correctif, l'orchestrateur relance **toute
 la cascade requise depuis `lint`**. La sous-commande `invalidate [--reason R]` applique la
-même règle hors boucle (raisons : `rebase`, `address:<n>`, `polish`, `manual`). Un nouveau
+même règle hors boucle (raisons : `rebase`, `address:<n>`, `polish`, `manual` ; `rebase` sert aussi à la ronde conflit d'`address`). Un nouveau
 passage `transition plan in_progress` (re-plan) invalide aussi la cascade (raison `replan`), y compris une gate `in_progress`
 (les autres raisons ne touchent que `done`/`blocked`) ; tant que le plan n'est pas ré-approuvé,
 toute transition de cascade (`in_progress`/`done`) est refusée, comme `build`.

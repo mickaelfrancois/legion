@@ -57,7 +57,7 @@ prérequis SDK .NET 10, NuGet au premier lancement, serveur en préversion.
    En mode autonome (défaut), `build` → `review` → `deliver` **s'enchaînent seuls**
    après l'approbation du plan : ces commandes ne sont à lancer à la main qu'en
    `--step`, ou pour reprendre après un blocage. Les retours de revue sur la PR
-   se traitent avec `/legion:battle address` (répétable).
+   se traitent avec `/legion:battle address` (répétable ; elle résout aussi un conflit de fusion de la PR).
 3. **(optionnel) Visualiser** avec Legatus, l'UI web locale read-only :
    `/legion:legatus` la lance depuis n'importe quel repo. Détails :
    [`ui/legatus/README.md`](ui/legatus/README.md).

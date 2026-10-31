@@ -228,6 +228,10 @@ thread → `target` builder/architect/none, `kind`, `requires_regate` + drafts a
 reply), then the orchestrator applies the fixes (one commit per thread; `code-logic`/`test`
 invalidate the gates and re-run the cascade from `lint`; `code-trivial` re-runs `lint` only), runs `check-cascade` before pushing, pushes, and **replies + resolves** each
 thread — verifying the resolution actually stuck server-side before persisting.
+Une PR en **conflit** avec la branche par défaut (`delivery.merge == "conflict"`) déclenche aussi
+`address` : une **ronde conflit** fusionne la branche par défaut sans réécrire l'historique, résout
+les conflits, invalide la cascade (`invalidate --reason rebase`) puis pousse sans force ; elle est
+**hors budget** d'auto-correction (pas de `bump-autocorrect`).
 Repeatable: one **round** per comment wave (`phases.address.round`). Artifact:
 `pr-feedback.md`. GitHub has no `fixed`/`wontFix` distinction — both resolve the
 thread; a `question` is left unresolved for the author. Review comments, like the issue
@@ -336,7 +340,9 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
   // `pr_state` ∈ open | merged | closed ; `ci` ∈ pass | fail | pending | none ; `checked_at` : ISO de la dernière lecture.
   // Écrits par `set-delivery --pr-url <url>` (remet `pr_state` à open, `ci` et `checked_at` à null)
   // ou `set-delivery --pr-json <fichier>` (lit la sortie de `gh pr view`, sans réseau). Absents sur une battle ancienne.
-  "delivery": { "pr_url": null, "pr_state": null, "ci": null, "checked_at": null }
+  // `merge` ∈ conflict | unknown | ok | null : état de fusion avec la branche par défaut (GH#205), calculé depuis `mergeable` / `mergeStateStatus`
+  // d'une PR ouverte ; `null` = non calculé (PR mergée/fermée, clés absentes, ou nouvelle PR via `--pr-url`). Absent sur une battle ancienne.
+  "delivery": { "pr_url": null, "pr_state": null, "ci": null, "merge": null, "checked_at": null }
   // aborted (optionnel) — { "at": ISO, "reason": str|null }, posé par `abort` ; toute commande sauf `validate` est alors refusée
   // kind (optionnel, GH#201) — "bug" : battle de bug, orthogonale au profil ; absent ou null = battle ordinaire.
   //   Posé par `init --kind bug` (start --bug) ou `set-meta --kind bug` (label `bug` de l'issue) ; `--kind ""` le remet à null.

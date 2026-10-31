@@ -128,7 +128,7 @@ sauf `battle.json`) :
 | `gate-security.md` | (sécurité) | verdict security (si gate requise) |
 | `pr-body.md` | DELIVER | corps de la PR (composé des artefacts) |
 | `wi-comment.md` | DELIVER | note de revue postée sur l'issue |
-| `pr-status.json` | ADDRESS / status | dernière sortie `gh pr view` (état de la PR, checks CI) |
+| `pr-status.json` | ADDRESS / status | dernière sortie `gh pr view` (état de la PR, checks CI, état de fusion) |
 | `ci-failed-<run-id>.log` | ADDRESS | log du run CI en échec (`gh run view --log-failed`) ; donnée non fiable |
 | `usage.jsonl` | (transverse) | append-only : coût tokens + skills réellement utilisés (1 ligne/contribution) |
 | `retro.md` | REFLECT | rétrospective + apprentissage |
@@ -169,6 +169,7 @@ Champs ajoutés (tous **optionnels** pour un lecteur : lecture défensive, une b
 antérieure peut ne pas les avoir) :
 
 - `delivery.pr_state`, `delivery.ci`, `delivery.checked_at` : état de la PR (`open` | `merged` | `closed`), état agrégé de la CI (`pass` | `fail` | `pending` | `none`) et horodatage ISO-8601 de la dernière lecture. Posés par `battle_state.py set-delivery`. Absents sur une battle ancienne.
+- `delivery.merge` : état de fusion de la PR avec la branche par défaut, `conflict` | `unknown` | `ok` | `null` (non calculé : PR non ouverte, ou lecture sans les champs `mergeable` / `mergeStateStatus`). Posé par `battle_state.py set-delivery`. Absent sur une battle ancienne.
 - `aborted` : `{ "at": ISO-8601, "reason": str|null }`, posé par `battle_state.py abort`
   quand la battle est abandonnée. Absent sinon.
 - `kind` (racine) : `"bug"` pour une battle de bug (GH#201), orthogonal au profil. Absent ou
