@@ -442,7 +442,8 @@ plugins/legion/
 │   ├── artifact_check.py        # delivery check d'artefact de gate §E (snapshot/verify métadonnées-seules) + empreinte de l'arbre (tree-snapshot/tree-verify, --self-test)
 │   ├── legatus.py               # lanceur Legatus multi-OS (`/legion:legatus` : dotnet, port 5021, détaché, navigateur ; --dry-run, --self-test)
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
-│   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`--battle <id>` / `--root <worktree.path>` : `base` fige l'arbre d'intégration, `align` aligne un worktree de builder, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
+│   ├── release_prep.py          # CHANGELOG + bump de version au DELIVER (§G étape 2 : niveau déduit du titre Conventional Commits, `plan` / `apply`, idempotent, ensemble de chemins fermé : `CHANGELOG.md` racine et un manifeste reconnu ; jamais de réseau ; --self-test)
+│   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`--battle <id>` / `--root <worktree.path>` : `base` fige l'arbre d'intégration, `align` aligne un worktree de builder, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code pour un lot parallèle (`release_prep.py` écrit, lui, deux fichiers au DELIVER) (--self-test)
 │   ├── battle_worktree.py       # worktree dédié d'une battle : `create` / `start-check` / `where` / `close-check` / `close` (refus de cohabitation en place / worktree ; opérations locales, jamais `battle.json`, jamais le réseau) (--self-test)
 │   ├── untrusted.py             # nettoyage du contenu tiers (issue, fils de revue) : retire commentaires HTML et caractères invisibles, signale chaque retrait, filtre les fils par accès en écriture (`issue` / `splice-cadrage` / `threads` / `filter-threads`, --self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
@@ -455,7 +456,7 @@ plugins/legion/
 > La couche tickets/PR passe par le CLI **`gh`** appelé directement depuis `battle.md`
 > (auth & JSON gérés par `gh`, zéro script réseau). Le dossier `scripts/` ne contient
 > que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness,
-> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates, fan-in des worktrees d'un lot parallèle, nettoyage du contenu tiers), chacun couvert par
+> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates, fan-in des worktrees d'un lot parallèle, nettoyage du contenu tiers, CHANGELOG et bump de version au DELIVER), chacun couvert par
 > `--self-test` ; aucun n'appelle le réseau (la couche `gh` — dont la création des issues
 > d'opportunité — reste dans les command-files). **Exception « lanceur local »** :
 > `legatus.py` lance un process (`dotnet run`, détaché) et ouvre un navigateur ; il ne
@@ -491,6 +492,7 @@ La source de tickets et la couche PR passent par le CLI GitHub :
 | THINK (intake) | `gh issue view <n> --json number,title,body,labels,author \| untrusted.py issue` (jamais sans le pipe) |
 | THINK (accès de l'auteur) | `gh api repos/<owner>/<repo>/collaborators/<login>/permission --jq .permission` |
 | THINK (marquer démarré) | `gh issue edit <n> --add-assignee @me` |
+| DELIVER (CHANGELOG / bump) | `release_prep.py apply` : écrit l'entrée `CHANGELOG.md` et le bump du manifeste, ajoutés au même commit (local, sans réseau) |
 | DELIVER (PR) | `gh pr create --title <conv> --body-file pr-body.md` (corps avec `Closes #<n>`) |
 | DELIVER (note issue) | `gh issue comment <n> --body-file wi-comment.md` |
 | ADDRESS (fils) | `gh api graphql … reviewThreads { isResolved comments } \| untrusted.py threads` (REST n'expose pas `isResolved`) |

@@ -3,8 +3,9 @@
 En mode parallèle, chaque builder travaille dans un worktree git isolé. Une fois le lot
 vérifié, l'orchestrateur doit **réintégrer** les deltas dans l'**arbre d'intégration** : le dépôt principal, ou, pour une battle en
 mode worktree, son `worktree.path` (`--root`). Ce script est le
-**seul** qui écrit dans l'arbre de code (`battle_state.py` écrit `battle.json`, `artifact_check.py`
-vérifie) ; il n'écrit jamais `battle.json` ni rien sous `.legion/`.
+**seul** qui réintègre du code dans l'arbre (`release_prep.py` écrit, lui, le CHANGELOG et le
+manifeste au DELIVER ; `battle_state.py` écrit `battle.json`, `artifact_check.py` vérifie) ;
+il n'écrit jamais `battle.json` ni rien sous `.legion/`.
 
 Contexte explicite (GH#157) : `--battle <id>` lit cette battle au lieu du pointeur ; `--root <wt>`
 désigne l'arbre d'intégration. Une battle en worktree exige les deux, et `--root` doit être son

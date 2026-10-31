@@ -104,7 +104,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 /legion:battle review              ← lint → reviewer → test-engineer → security
 
 # 5. Livrer (auto en mode autonome ; confirmé en --step)
-/legion:battle deliver             ← commit → push de la branche <moi>/<n> (celle du worktree) → PR (Closes #<n>)
+/legion:battle deliver             ← CHANGELOG + bump de version (si applicable) → commit → push de la branche <moi>/<n> (celle du worktree) → PR (Closes #<n>)
 
 # 5b. (optionnel) Traiter les retours de revue sur la PR — répétable
 /legion:battle address             ← triage des commentaires → corrige → répond → résout
@@ -133,7 +133,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 | `/legion:battle close [<id>]` | Clôt une battle livrée, depuis le dépôt principal : vérifie que la PR est mergée et la branche contenue dans `origin/<default>`, puis supprime le worktree et la branche locale (jamais `--force`). |
 | `/legion:battle build [slice\|all] [--auto]` | Code une slice (toi en direct, ou l'agent builder). |
 | `/legion:battle review` / `test` | Lance les gates lint → reviewer → test-engineer → security. |
-| `/legion:battle deliver` | Commit sur la branche `<moi>/<n>` (créée au `start` en mode worktree, sinon ici),  push, PR avec `Closes #<n>` (auto en mode autonome ; confirmation avant push en `--step`). |
+| `/legion:battle deliver` | Ajoute l'entrée CHANGELOG et le bump de version quand le type du titre l'exige (`release_prep.py`), commit sur la branche `<moi>/<n>` (créée au `start` en mode worktree, sinon ici), push, PR avec `Closes #<n>` (auto en mode autonome ; confirmation avant push en `--step`). |
 | `/legion:battle address` | *(post-deliver, répétable)* Traite les commentaires de revue de la PR et, si elle est en conflit avec la branche par défaut, résout le conflit : la gate `pr-triage` classe chaque fil, l'orchestrateur corrige (invalide et relance la cascade depuis `lint` si besoin), répond et résout. |
 | `/legion:battle resume <id>` | Reprend une battle existante (respecte son `run.mode`). |
 | `/legion:battle status` | État des phases de la battle courante. |

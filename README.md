@@ -51,7 +51,7 @@ prérequis SDK .NET 10, NuGet au premier lancement, serveur en préversion.
    /legion:battle start 42        # 42 = numéro d'issue GitHub (tirée via gh)
    /legion:battle build           # code la slice (toi en direct, ou --auto)
    /legion:battle review          # gates lint → reviewer → test → security
-   /legion:battle deliver         # branche, commit, push, PR (Closes #42)
+   /legion:battle deliver         # CHANGELOG/bump si applicable, branche, commit, push, PR (Closes #42)
    /legion:retro                  # rétro + apprentissage, ferme la battle
    ```
    En mode autonome (défaut), `build` → `review` → `deliver` **s'enchaînent seuls**
