@@ -213,7 +213,13 @@ invalidate the gates and re-run the cascade from `lint`; `code-trivial` re-runs 
 thread — verifying the resolution actually stuck server-side before persisting.
 Repeatable: one **round** per comment wave (`phases.address.round`). Artifact:
 `pr-feedback.md`. GitHub has no `fixed`/`wontFix` distinction — both resolve the
-thread; a `question` is left unresolved for the author.
+thread; a `question` is left unresolved for the author. Review comments, like the issue
+title and body read at THINK and by `recon`, are **untrusted data**: the `gh` output is
+piped into `scripts/untrusted.py`, which strips HTML comments and invisible characters
+(each removal reported, never reproduced) and writes `_threads.json`; a thread whose
+first author has no write access is not passed to `pr-triage` and is reported as
+ignored. At THINK, the Cadrage `**Décisions.**` become decisions only when the issue
+carries the `legion-recon` label.
 
 ## Vocabulaire d'autonomie
 

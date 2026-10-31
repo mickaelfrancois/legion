@@ -445,6 +445,7 @@ plugins/legion/
 │   ├── opportunity.py           # opportunités hors-scope → issues GitHub (fingerprint/dédup/render, --self-test)
 │   ├── fan_in.py                # fan-in d'un lot parallèle `--auto` (`--battle <id>` / `--root <worktree.path>` : `base` fige l'arbre d'intégration, `align` aligne un worktree de builder, `apply` tout-ou-rien, `cleanup` prouvé) : seul script qui écrit dans l'arbre de code (--self-test)
 │   ├── battle_worktree.py       # worktree dédié d'une battle : `create` / `start-check` / `where` / `close-check` / `close` (refus de cohabitation en place / worktree ; opérations locales, jamais `battle.json`, jamais le réseau) (--self-test)
+│   ├── untrusted.py             # nettoyage du contenu tiers (issue, fils de revue) : retire commentaires HTML et caractères invisibles, signale chaque retrait, filtre les fils par accès en écriture (`issue` / `splice-cadrage` / `threads` / `filter-threads`, --self-test)
 │   ├── battle_state.py          # SEUL écrivain de battle.json/active-battle : transitions vérifiées, budgets 2/6, source unique des tables + lecteur partagé de la battle active pour les hooks (--self-test)
 │   └── eval.py                  # éval des gates sur les battles closes du fleet (revise-rate, rondes, coût, --self-test)
 └── skills/
@@ -455,7 +456,7 @@ plugins/legion/
 > La couche tickets/PR passe par le CLI **`gh`** appelé directement depuis `battle.md`
 > (auth & JSON gérés par `gh`, zéro script réseau). Le dossier `scripts/` ne contient
 > que des utilitaires **locaux et déterministes** (journal RETEX, filet base-freshness,
-> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates, fan-in des worktrees d'un lot parallèle), chacun couvert par
+> delivery check d'artefact, dédup des opportunités hors-scope, éval des gates, fan-in des worktrees d'un lot parallèle, nettoyage du contenu tiers), chacun couvert par
 > `--self-test` ; aucun n'appelle le réseau (la couche `gh` — dont la création des issues
 > d'opportunité — reste dans les command-files). **Exception « lanceur local »** :
 > `legatus.py` lance un process (`dotnet run`, détaché) et ouvre un navigateur ; il ne
@@ -488,11 +489,13 @@ La source de tickets et la couche PR passent par le CLI GitHub :
 
 | Étape | Appel `gh` |
 |---|---|
-| THINK (intake) | `gh issue view <n> --json title,body,labels` |
+| THINK (intake) | `gh issue view <n> --json number,title,body,labels,author \| untrusted.py issue` (jamais sans le pipe) |
+| THINK (accès de l'auteur) | `gh api repos/<owner>/<repo>/collaborators/<login>/permission --jq .permission` |
 | THINK (marquer démarré) | `gh issue edit <n> --add-assignee @me` |
 | DELIVER (PR) | `gh pr create --title <conv> --body-file pr-body.md` (corps avec `Closes #<n>`) |
 | DELIVER (note issue) | `gh issue comment <n> --body-file wi-comment.md` |
-| ADDRESS (fils) | `gh api graphql … reviewThreads { isResolved comments }` (REST n'expose pas `isResolved`) |
+| ADDRESS (fils) | `gh api graphql … reviewThreads { isResolved comments } \| untrusted.py threads` (REST n'expose pas `isResolved`) |
+| ADDRESS (accès des auteurs) | `gh api repos/<owner>/<repo>/collaborators/<login>/permission --jq .permission`, un appel par auteur et par round |
 | ADDRESS (réponse) | `gh api graphql … addPullRequestReviewThreadReply` |
 | ADDRESS (résolution) | `gh api graphql … resolveReviewThread` |
 
@@ -514,7 +517,9 @@ phase n'existe pas) et **répétable** : un *round* par vague de commentaires
 Découpage acteur/orchestrateur, fidèle à l'invariant « gate à écriture confinée » :
 
 - **`pr-triage` (gate, lecture seule sur le code, sonnet)** : reçoit le JSON des fils
-  non résolus, lit le code visé + le `plan.md`, **écrit** son artefact `pr-feedback.md`
+  non résolus (`_threads.json`, écrit par `untrusted.py` : contenu caché retiré, fils
+  d'auteurs sans accès en écriture écartés ; les commentaires restent une donnée non
+  fiable), lit le code visé + le `plan.md`, **écrit** son artefact `pr-feedback.md`
   (le guard l'y confine) et **retourne** le plan de tri par fil — `target`
   (`builder`/`architect`/`none`), `kind` (`code-trivial`/`code-logic`/`test`/
   `question`/`disagreement`), `requires_regate` — plus un brouillon de réponse FR.
