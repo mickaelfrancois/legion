@@ -43,6 +43,10 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    saute l'étape 0 et suis la branche séquentielle de l'étape 7.
 7. **Racine du code** (optionnel ; **ignorée quand l'entrée 6 est présente** : ta racine est alors ton propre worktree) : racine où vit le code de la slice. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal. Absente ⇒ le répertoire courant. Quand elle est fournie, tu ne te fies **jamais** au cwd : chaque lecture, commande et outil vise cette racine, par chemin absolu ou par l'option de répertoire de l'outil (`dotnet build <chemin>`, `git -C`, `pytest <chemin>`, `npm --prefix`) ; jamais de `cd` nu.
 
+8. **Battle de bug** (optionnel) : la battle corrige un bug (`kind: "bug"` ; tu ne lis pas
+   `battle.json`, l'orchestrateur te le signale). La slice qui porte la ligne « test de
+   régression » de la matrice se code **test d'abord** (étape 4).
+
 ## Procédure
 
 0. **Lot parallèle : aligne ton worktree avant tout code.** Lance, depuis la racine de ton
@@ -65,7 +69,13 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    rapport (`build_ok: false`, raison « hors guard.allow »).
 4. **Coder la slice** : modifications chirurgicales, une responsabilité par
    classe, noms explicites. Écrire aussi les tests de la matrice couvrant cette
-   slice. **Ne commite pas dans ton worktree** : l'orchestrateur réintègre ton delta
+   slice. **Battle de bug, slice de la ligne « régression »** : dans cet ordre, (a) écris le
+   test de régression ; (b) lance-le sur le code non corrigé et constate l'échec **sur son
+   assertion** (exit ≠ 0 ; une erreur d'import ou de collecte ne prouve rien) ; note `HEAD`
+   (`git -C <racine> rev-parse HEAD`) ; (c) corrige ; (d) relance-le et constate le vert.
+   Consigne le tout dans la section `### Test de régression` du rapport. Si le rouge
+   n'apparaît pas, le test ne reproduit pas le bug : `build_ok: false`, raison « rouge non
+   reproduit ». **Ne commite pas dans ton worktree** : l'orchestrateur réintègre ton delta
    dans l'arbre principal (fan-in) ; laisse tes changements non commités.
 5. **Cohérence des valeurs récurrentes** : quand une constante, une borne ou une phrase
    de doctrine apparaît dans **plusieurs** fichiers (une borne de boucle, un seuil, une
@@ -177,6 +187,14 @@ et non additive — de la boucle de `revise` portée par l'orchestrateur.
 ### Tests ajoutés
 - <ClasseTests.Méthode_Scénario> — <cas couvert de la matrice>
 
+### Test de régression
+- <uniquement sur une battle de bug, slice de la ligne « régression »>
+- **Test** : <nom exact du test>
+- **Commande** : <commande lancée>
+- **HEAD du rouge** : <sha de 40 hexa>
+- **Sortie rouge** (exit <n>) : <extrait montrant l'échec de l'assertion>
+- **Sortie verte** (exit 0) : <extrait après le correctif>
+
 ### Résiduel / à signaler aux gates
 - <warnings non bloquants, dette assumée, point pour reviewer/test-engineer>
 
@@ -210,8 +228,12 @@ consolidation regroupe celles de toutes les slices en une section unique) :
 
 ```
 { slice_id, build_ok, warnings, files_touched: [...], iterations,
-  write_failures: [{ tool, path, reason }] }
+  write_failures: [{ tool, path, reason }],
+  regression: { test, red_sha } | null }
 ```
+
+`regression` n'est rempli que sur la slice de la ligne « régression » d'une battle de bug ;
+l'orchestrateur le reporte dans `battle.json` (`set-meta --regression-test … --regression-red-sha …`).
 
 `write_failures` vide = aucun refus d'écriture. En **lot parallèle**, ton message final porte
 le JSON ci-dessus, puis le rapport. Chaque marqueur est **seul sur sa ligne**, et le rapport ne

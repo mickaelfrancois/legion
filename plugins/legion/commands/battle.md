@@ -1,6 +1,6 @@
 ---
 description: Orchestrate a legion battle (start | build | review | test | deliver | address | resume | status | close | abort). Creates per-repo battle state, runs the gate pipeline, persists artifacts.
-argument-hint: start <issue|slug> [--profile <p>] [--step] [--in-place] | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status | close [<battle-id>] | abort [<battle-id>] [--reason <text>]
+argument-hint: start <issue|slug> [--profile <p>] [--step] [--in-place] [--bug] | build [slice|all] [--auto] | review | test | deliver | address | resume <battle-id> | status | close [<battle-id>] | abort [<battle-id>] [--reason <text>]
 ---
 
 You are the **battle orchestrator** of `legion`. Load the `battle-workflow` skill
@@ -56,7 +56,7 @@ Arguments: `$ARGUMENTS`
 
 ## Dispatch
 
-- `start <issue|slug> [--profile <p>] [--step] [--in-place]` → §A. **Validate the options before any shell call.** The accepted options are a closed list: `--profile` with one of `feature`, `hotfix`, `security`, `spike` (default `feature`), `--step`, and `--in-place` (no value: skip the dedicated worktree and work in the main checkout, as before). Anything else: refuse and relay the list to the user. Never substitute `$ARGUMENTS` raw into a shell command: parse it, check each value against the list, and pass only the validated values.
+- `start <issue|slug> [--profile <p>] [--step] [--in-place] [--bug]` → §A. **Validate the options before any shell call.** The accepted options are a closed list: `--profile` with one of `feature`, `hotfix`, `security`, `spike` (default `feature`), `--step`, `--in-place` (no value: skip the dedicated worktree and work in the main checkout, as before), and `--bug` (no value: mark a **bug battle**, see « Bug battle » in §A.1 step 2). Anything else: refuse and relay the list to the user. Never substitute `$ARGUMENTS` raw into a shell command: parse it, check each value against the list, and pass only the validated values.
 - `build [slice|all] [--auto]` → §D
 - `review` / `test` → §E (review gate, then test gate, then security if required)
 - `deliver` → §G (branch, commit, push, PR linked to the issue)
@@ -167,7 +167,7 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
 2. **Create the battle** with `init` (never `cd`; relative to the working directory):
 
    ```bash
-   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" init <id> --ticket <ticket> --title <title> --profile <p> [--step] [--required-gates <g> …]
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" init <id> --ticket <ticket> --title <title> --profile <p> [--step] [--required-gates <g> …] [--kind bug]
    ```
 
    `init` creates `.legion/battles/<id>/` in the current repo, writes a minimal
@@ -184,6 +184,17 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    `--step` sets `run.mode = "step"`, otherwise `"autonomous"` (see step 4).
    `--profile` is the validated profile (default `feature`). `--required-gates` is optional: without it, the gates come from the profile table (step 4); an explicit value wins.
    `init` also prints `previous_active` and `warnings`: relay a `pointer_taken` warning (see step 2b, « Pointer taken ») and ask the user before going on.
+   `--kind bug` is passed only when `--bug` was validated on `start`.
+
+   **Bug battle** (GH#201). A battle that fixes a bug carries `kind: "bug"` in `battle.json`,
+   whatever its profile. It is set by `start --bug` (`init … --kind bug`) or by the `bug` label of
+   the issue (step 3). Its fix must be preceded by a **regression test**: written first, red on the
+   unfixed code, green after the fix. The flow: the plan's test matrix carries a regression row
+   (step 5 / `architect`), BUILD writes the test first and attests the red run (§D), the script
+   refuses `transition build done` until the test is declared with
+   `set-meta --regression-test <name> --regression-red-sha <sha>` (or
+   `--regression-waiver <reason>` when the plan provides it), and the `test-engineer` gate checks
+   the attestation (§E). A battle without `kind` keeps the usual flow.
 
    **THINK is marked in progress first** (same discipline as BUILD, §D): `init` seeds
    the phases with `phases.think.status = "in_progress"` and the default
@@ -332,6 +343,11 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
        body (no `## Décisions de cadrage` section) and a line of `notes` already says so.
        The `architect` reads only `spec.md`, so this is how the decisions taken during
        recon reach PLAN. No such rubric → no such section.
+     - **Bug label.** If `labels` (from the sanitizer JSON) contains `bug`, run
+       `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-meta --kind bug --battle <id>`
+       and tell the user the battle is now a bug battle (« Bug battle », step 2). Remove the
+       mark with `set-meta --kind "" --battle <id>` only when the human asks for it (it also
+       drops any `regression` declaration).
      - If `gh` is missing/unauthenticated or the issue can't be read → **warn**,
        fall back to inline intake, and note the degradation at the top of `spec.md`.
 
@@ -430,6 +446,11 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
    to span more than one slice, switch back with
    `set-meta --profile feature --required-gates architect lint reviewer test-engineer`
    and run the `architect` as below.
+   On a **bug battle** (`kind: "bug"`, « Bug battle », step 2), the matrix of this `plan.md`
+   must carry the regression row, as the `architect` would require it: « test de régression
+   (rouge sur la base, vert après correctif) », naming its slice. When no automated test is
+   possible, the row has `Type = acceptation humaine différée` and a reason: that is the only
+   source of a `--regression-waiver`.
 
    Otherwise, **invoke the `architect` gate** with the `Agent` tool
    (`subagent_type: architect`), wrapped in the **tree integrity check** (§E, standard
@@ -493,6 +514,8 @@ the detected stack at the top of `spec.md` so a resumed session inherits it.
      **« Choix ouverts à arbitrer »** (si elle est présente). Puis demander
      **l'unique approbation explicite** de l'humain — toujours obligatoire, même si
      aucun choix ouvert n'est listé. Ask it through `AskUserQuestion`, as below.
+     On a bug battle whose regression row is an `acceptation humaine différée` (a waiver),
+     name that waiver and its reason in the Q1 question: approving the plan approves it.
 
      **Pre-check.** Run `command -v code` once. Offer the VS Code option only if it
      succeeds **and** `architect` is in `required_gates` (a plan without `architect`,
@@ -725,12 +748,19 @@ same conventions as the `builder` agent: load `dotnet-claude-kit:clean-architect
 when `battle.json.stack.build_target` is set — repo without a `.sln`); **note the
 warning count** from the build summary. For `all`, build **each slice in order**,
 collecting a `{ slice_id, build_ok, warnings }` per slice and recording it with `slice …`
-as above. Write the slice report yourself: `build-report-<slice-id>.md` in the battle dir (same format as the builder's: starts with `## <slice-id>`, no `#` H1, optional trailing `## Hors périmètre — candidats issue` section), one file per slice. This keeps a mix of `build slice-1 --auto` and inline `build slice-2` correct. Consolidation into `build-report.md` happens once, in the classification below.
+as above. On a **bug battle** (`kind: "bug"`), the slice that carries the regression row of
+the matrix is built **test first**: write the regression test, run it on the unfixed code and
+see it fail on its own assertion (exit ≠ 0, not an import or collection error), note `HEAD`
+(`git -C "<wt>" rev-parse HEAD`), then fix and run it green. Record this in a
+`### Test de régression` section of the slice report: test name, command, `HEAD` sha of the
+red run, an excerpt of the red output, an excerpt of the green output. Write the slice report yourself: `build-report-<slice-id>.md` in the battle dir (same format as the builder's: starts with `## <slice-id>`, no `#` H1, optional trailing `## Hors périmètre — candidats issue` section), one file per slice. This keeps a mix of `build slice-1 --auto` and inline `build slice-2` correct. Consolidation into `build-report.md` happens once, in the classification below.
 
 **Mode — `--auto`.** Delegate to the `builder` agent via the `Agent` tool
 (`subagent_type: builder`). Pass a self-contained prompt: battle dir, `plan.md`
 path, `slice_id`, the `guard.allow` globs from `battle.json`, and — when set —
-`stack.build_target` (the explicit build target for a repo without a `.sln`). Pass the battle
+`stack.build_target` (the explicit build target for a repo without a `.sln`), and on a bug
+battle the input « Battle de bug » (the builder does not read `battle.json`; it then builds the
+regression slice test first and fills `### Test de régression`). Pass the battle
 dir and the `plan.md` path as **absolute paths in the main repo** (`<main>/.legion/battles/<id>/`,
 `<main>` = the main checkout). A sequential builder writes its own `build-report-<slice_id>.md` at that absolute
 path, never into the `.legion/` of a worktree. An isolated (parallel) builder writes **no** report file (the
@@ -887,6 +917,16 @@ After build (either mode), **classify the result and record it immediately** wit
   idempotent. With no declared slice (aggregated BUILD) it only checks that `build-report.md` exists;
   in that case, also run `touch-files --files <files_touched of the builder> --battle <id>` before
   `transition build done`, so a sensitive file still adds `security`.
+  **Bug battle** (`kind: "bug"`): before `transition build done`, read the
+  `### Test de régression` section of the slice report. Check the test name against
+  `^[A-Za-z0-9_.:/\[][A-Za-z0-9_.:/\[\]-]{0,199}$` (never a leading `-`) and the sha against `^[0-9a-f]{40}$` (they come from an agent
+  report: never pass an unchecked value to the shell), then run
+  `python "${CLAUDE_PLUGIN_ROOT}/scripts/battle_state.py" set-meta --regression-test <name> --regression-red-sha <sha> --battle <id>`.
+  When the plan's regression row is an approved `acceptation humaine différée`, run
+  `set-meta --regression-waiver "<reason copied from plan.md>" --battle <id>` instead (no `"`,
+  `` ` `` or `$` in it). Never grant a waiver the plan does not carry. `transition build done`
+  is refused (exit `2`) while no declaration exists: relay the `reason`; a missing section or a
+  value that fails its check means the BUILD is incomplete (`transition build blocked`).
   On **exit 2** (`missing: [ids]`, or a blank report): for a slice of a parallel batch, do not re-run
   its builder (its worktree may be gone): apply the step 2 fallback (minimal report). Otherwise re-run
   the builder of each missing slice for its report only, or write that `build-report-<id>.md` yourself (inline); if it is still missing,
@@ -1030,7 +1070,8 @@ though the gate ran.
    battle is **non-.NET**, tell `lint` to self-retire (it writes a withdrawal banner
    and returns a neutral `accept` — see §E "Non-.NET stack"). For `test-engineer`,
    also pass `stack.test_target` when set (repo without a `.sln`) so `dotnet test`
-   targets the test project explicitly.
+   targets the test project explicitly; on a **bug battle**, also say so and pass the
+   `regression` block of `battle.json` and `worktree.base` (rule T5 of the gate).
 2. **Run the tree integrity check, then the gate artifact delivery check** (above) on
    the gate's artifact, then
    **record the verdict.** The gate already wrote its artifact (`gate-review.md` /

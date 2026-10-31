@@ -15,6 +15,7 @@ Source unique des listes de phases / gates / artefacts (importée par `fleet_syn
 - `VERDICT_PHASES`, `CASCADE_PHASES`, `AUTOCORRECT_KEYS` ;
 - `STATUSES`, `VERDICTS`, `ACCEPT_VERDICTS`, `DEFAULT_REQUIRED_GATES` ;
 - `PROFILES`, `DEFAULT_PROFILE` (gates requises par profil ; `init` en dérive `required_gates`) ;
+- `BATTLE_KINDS` (nature d'une battle, orthogonale au profil ; champ racine `kind`, GH#201) ;
 - `CAP_PER_PHASE`, `CAP_TOTAL` ;
 - `PR_STATES`, `CI_STATES` (état de la PR et agrégat CI, GH#74 ; champs `delivery.pr_state` / `delivery.ci`) ;
 - `SLICE_REPORT_PREFIX`, `slice_report_name(id)` et `slice_report_id(nom)` (GH#129 : nom du rapport de
@@ -96,6 +97,7 @@ Usage (options globales `--battle <id>` défaut : pointeur `.legion/active-battl
 depuis un worktree lié, dépôt principal — battle active pour les lectures/mutations, toujours
 pour `init`/`activate` (GH#128) — sinon cette racine, ou le cwd hors dépôt) :
     python battle_state.py init <id> --ticket T --title T --profile P [--step] [--required-gates g…]
+                                [--kind bug]
     python battle_state.py transition <phase> <status> [--verdict v] [--fails json]
                                       [--round n] [--threads json]
     python battle_state.py approve-plan | close | validate
@@ -107,6 +109,8 @@ pour `init`/`activate` (GH#128) — sinon cette racine, ou le cwd hors dépôt) 
     python battle_state.py set-meta [--title] [--profile] [--required-gates …] [--stack-kind]
                                     [--build-target] [--test-target]
                                     [--worktree-path P --worktree-branch B --worktree-base SHA]
+                                    [--kind bug|""] [--regression-test N --regression-red-sha SHA
+                                    | --regression-waiver R]
     python battle_state.py set-slices <id> [<id>…] | set-slices --replace [<id>…]
     python battle_state.py slice <id> <in_progress|done|blocked> [--warnings N] [--files [f…]]
     python battle_state.py next-slice                  # lecture seule (ni écriture ni synchro)
@@ -121,6 +125,14 @@ Bloc optionnel `worktree` (GH#152) : `{path, branch, base, created_at}`, écrit 
 hexa. Absent ou `null` = mode en place. `delivery.head_ref` / `delivery.head_oid` : branche et tip de
 la PR (`headRefName` / `headRefOid` de `gh pr view`), posés par `set-delivery --pr-json` s'ils sont
 fournis, remis à `null` par `--pr-url`.
+
+Battle de bug (GH#201) : champ racine optionnel `kind` (`"bug"` ; absent ou `null` = battle
+ordinaire, flux inchangé), posé par `init --kind bug` ou `set-meta --kind bug` (`--kind ""` le remet à
+`null` et retire `regression`). Bloc optionnel `regression {test, red_sha, waiver, at}`, écrit par `set-meta
+--regression-test N --regression-red-sha SHA` (ensemble) ou `--regression-waiver R` (seul, prévu au
+plan), seulement sur une battle `kind: bug`. `regression_declared(battle)` (pur) dit si la déclaration
+est valide ; `build done` d'une battle de bug l'exige. `--kind bug` est refusé sur un `build` déjà
+`done` sans déclaration (anti-contournement).
 
 Sortie : un objet JSON sur stdout (`ok`, `reason` si refus). Écriture atomique ; après chaque
 mutation, le shard fleet est réécrit (échec = `warnings`, jamais bloquant).
@@ -186,6 +198,12 @@ PROFILES: dict[str, tuple[str, ...]] = {
     "security": ("architect", "lint", "reviewer", "test-engineer", "security"),
     "spike": ("architect",),
 }
+# Nature d'une battle (GH#201), orthogonale au profil : champ racine `kind` (absent ou null = ordinaire).
+BATTLE_KINDS: tuple[str, ...] = ("bug",)
+# Déclaration du test de régression d'une battle de bug (`set-meta --regression-*`).
+# Premier caractère hors `-` : un nom collé dans une commande de test ne devient jamais une option.
+_REGRESSION_TEST_RE = re.compile(r"[A-Za-z0-9_.:/\[][A-Za-z0-9_.:/\[\]-]{0,199}")
+_WAIVER_BAD_CHARS = ('"', "`", "$")
 
 SECURITY_DEP_NAMES: frozenset[str] = frozenset({
     "directory.packages.props", "packages.lock.json", "package.json", "package-lock.json",
@@ -413,6 +431,10 @@ def check_transition(battle: dict, phase: str, status: str, verdict: str | None 
             todo = [str(s.get("id")) for s in _slices(battle) if s.get("status") != "done"]
             if todo:
                 return False, f"build done exige toutes les slices done (restantes : {', '.join(todo)})"
+            if battle.get("kind") == "bug" and not regression_declared(battle):
+                return False, ("build done exige un test de régression déclaré (battle de bug) : "
+                               "set-meta --regression-test <nom> --regression-red-sha <sha>, "
+                               "ou --regression-waiver <raison> prévue au plan")
     elif phase in CASCADE_PHASES:
         if _status(battle, "build") != "done":
             return False, f"{phase} exige build done"
@@ -976,6 +998,31 @@ def _worktree_problem(wt, battle_id=None) -> "str | None":
     return None
 
 
+def regression_problem(reg) -> "str | None":
+    """Contrôle pur du bloc `regression` (GH#201). `None` si c'est une déclaration valide :
+    `test` + `red_sha` valides, ou `waiver` seul non vide."""
+    if not isinstance(reg, dict):
+        return "regression n'est pas un objet"
+    test, sha, waiver = reg.get("test"), reg.get("red_sha"), reg.get("waiver")
+    if waiver is not None:
+        if test is not None or sha is not None:
+            return "regression.waiver est exclusif avec test / red_sha"
+        if not isinstance(waiver, str) or not waiver.strip() \
+                or any(c in waiver for c in _WAIVER_BAD_CHARS):
+            return f"regression.waiver invalide : {waiver!r}"
+        return None
+    if not isinstance(test, str) or not _REGRESSION_TEST_RE.fullmatch(test):
+        return f"regression.test invalide : {test!r}"
+    if not isinstance(sha, str) or not _SHA40_RE.fullmatch(sha):
+        return f"regression.red_sha n'est pas un sha de 40 hexa : {sha!r}"
+    return None
+
+
+def regression_declared(battle: dict) -> bool:
+    """Vrai si la battle porte une déclaration de régression valide (GH#201). Pur."""
+    return "regression" in battle and regression_problem(battle["regression"]) is None
+
+
 def validate(battle) -> tuple[list[str], list[str]]:
     """Valide la structure. Champs inconnus tolérés. Retourne (errors, warnings)."""
     errors: list[str] = []
@@ -1050,6 +1097,15 @@ def validate(battle) -> tuple[list[str], list[str]]:
         problem = _worktree_problem(battle["worktree"], battle.get("id"))
         if problem:
             errors.append(problem)
+    kind = battle.get("kind")
+    if kind is not None and kind not in BATTLE_KINDS:
+        warnings.append(f"kind inconnu : {kind!r} (attendu : {', '.join(BATTLE_KINDS)} ou null)")
+    if battle.get("regression") is not None:
+        problem = regression_problem(battle["regression"])
+        if problem:
+            warnings.append(problem)
+    if kind == "bug" and _status(battle, "build") == "done" and not regression_declared(battle):
+        warnings.append("battle de bug : build done sans test de régression déclaré")
     ab = battle.get("aborted")
     if ab is not None and not (isinstance(ab, dict) and ab.get("at")):
         warnings.append("aborted n'est pas un objet avec `at`")
@@ -1761,6 +1817,7 @@ def _build_parser_parts():
     s.add_argument("--profile", required=True)
     s.add_argument("--step", action="store_true")
     s.add_argument("--required-gates", nargs="+", default=None)
+    s.add_argument("--kind", choices=BATTLE_KINDS, default=None, help="battle de bug (GH#201)")
     s = add("transition")
     s.add_argument("phase")
     s.add_argument("status")
@@ -1797,6 +1854,10 @@ def _build_parser_parts():
     s.add_argument("--worktree-path")
     s.add_argument("--worktree-branch")
     s.add_argument("--worktree-base")
+    s.add_argument("--kind", help="bug, ou \"\" pour null (GH#201)")
+    s.add_argument("--regression-test")
+    s.add_argument("--regression-red-sha")
+    s.add_argument("--regression-waiver")
     s = add("set-slices")
     s.add_argument("ids", nargs="*")  # le refus « au moins un id » vit dans le cœur (--replace : vide permis)
     s.add_argument("--replace", action="store_true",
@@ -1835,7 +1896,7 @@ def _new_battle(root: Path, args) -> dict:
     for name in PHASES[1:]:
         if name not in ("security", "address"):
             phases[name] = {"status": "pending"}
-    return {
+    battle = {
         "id": args.id, "repo": root.name, "ticket": args.ticket, "title": args.title,
         "profile": args.profile,
         "required_gates": list(args.required_gates or PROFILES[args.profile]),
@@ -1846,6 +1907,9 @@ def _new_battle(root: Path, args) -> dict:
         "run": {"mode": "step" if args.step else "autonomous",
                 "autocorrect": {"per_gate": {}, "total": 0}},
     }
+    if args.kind is not None:   # GH#201 : clé absente sur une battle ordinaire
+        battle["kind"] = args.kind
+    return battle
 
 
 def _git_branch_check(name: str) -> None:
@@ -1857,6 +1921,46 @@ def _git_branch_check(name: str) -> None:
         return
     if res.returncode != 0:
         raise _Refuse(f"set-meta : worktree.branch refusée par git check-ref-format : {name!r}")
+
+
+def _set_meta_bug(args, out: dict) -> list[str]:
+    """`set-meta --kind` / `--regression-*` (GH#201) appliqués sur `out` (copie). Retourne les
+    clés touchées ; `_Refuse` sur toute combinaison invalide. `--kind` s'applique d'abord."""
+    touched: list[str] = []
+    test, sha, waiver = args.regression_test, args.regression_red_sha, args.regression_waiver
+    declares = any(v is not None for v in (test, sha, waiver))
+    if args.kind is not None:
+        if args.kind and args.kind not in BATTLE_KINDS:
+            raise _Refuse(f"set-meta : kind inconnu {args.kind!r} (attendu : "
+                          f"{', '.join(BATTLE_KINDS)} ou \"\")")
+        if args.kind == "bug" and _status(out, "build") == "done" \
+                and not declares and not regression_declared(out):
+            raise _Refuse("set-meta : --kind bug refusé, build déjà done sans test de régression "
+                          "déclaré (ajouter --regression-* dans le même appel)")
+        out["kind"] = args.kind or None
+        touched.append("kind")
+        if out["kind"] is None and "regression" in out:   # retrait du marquage : déclaration caduque
+            del out["regression"]
+            touched.append("regression")
+    if not declares:
+        return touched
+    if out.get("kind") != "bug":
+        raise _Refuse("set-meta : --regression-* refusé, battle non marquée bug (--kind bug)")
+    if waiver is not None:
+        if test is not None or sha is not None:
+            raise _Refuse("set-meta : --regression-waiver est exclusif avec "
+                          "--regression-test / --regression-red-sha")
+        reg = {"test": None, "red_sha": None, "waiver": waiver}
+    else:
+        if test is None or sha is None:
+            raise _Refuse("set-meta : --regression-test et --regression-red-sha vont ensemble")
+        reg = {"test": test, "red_sha": sha, "waiver": None}
+    problem = regression_problem(reg)
+    if problem:
+        raise _Refuse(f"set-meta : {problem}")
+    out["regression"] = {**reg, "at": _now_iso()}
+    touched.append("regression")
+    return touched
 
 
 def _mutation(args, battle: dict, root: "Path | None" = None) -> tuple[dict, dict]:
@@ -2020,6 +2124,7 @@ def _mutation(args, battle: dict, root: "Path | None" = None) -> tuple[dict, dic
             _git_branch_check(args.worktree_branch)
             out["worktree"] = wt
             touched.append("worktree")
+        touched += _set_meta_bug(args, out)
         if not touched:
             raise _Refuse("set-meta : aucune option")
         return out, {"updated": touched}
@@ -3640,7 +3745,116 @@ def _t_glob_match() -> None:
     assert not m("x", []) and m("anything/deep/x", ["**"])
 
 
+# --- Battle de bug (GH#201) ---
+
+_RED_SHA = "a" * 40
+
+
+def _bug(*pairs, regression=None, build="in_progress") -> dict:
+    b = _sl(*(pairs or (("slice-1", "done"),)), build=build, kind="bug")
+    if regression is not None:
+        b["regression"] = regression
+    return b
+
+
+def _t_bug_build_done_with_regression() -> None:
+    b = _bug(regression={"test": "_t_foo_regression", "red_sha": _RED_SHA, "waiver": None, "at": "T"})
+    assert check_transition(b, "build", "done")[0] is True
+    assert regression_declared(b)
+
+
+def _t_bug_build_done_with_waiver() -> None:
+    b = _bug(regression={"test": None, "red_sha": None, "waiver": "effet de bord", "at": "T"})
+    assert check_transition(b, "build", "done")[0] is True
+
+
+def _t_bug_build_done_refused() -> None:
+    reason = _refused(_bug(), "build", "done")
+    assert "test de régression" in reason and "--regression-test" in reason
+
+
+def _t_bug_regression_malformed() -> None:
+    for reg in ({"test": "", "red_sha": _RED_SHA}, {"test": "t", "red_sha": "abc"},
+                {"test": "a b", "red_sha": _RED_SHA}, {"test": "t$x", "red_sha": _RED_SHA},
+                {"waiver": ""}, {"waiver": "  "}, {"waiver": 'a"b'}, {"waiver": "a`b"},
+                {"waiver": "a$b"}, {"test": "t", "red_sha": _RED_SHA, "waiver": "w"},
+                {"test": "--collect-only", "red_sha": _RED_SHA}, {"test": "-t", "red_sha": _RED_SHA},
+                {"test": "t"}, "texte", None, []):
+        assert regression_problem(reg), reg
+        assert "test de régression" in _refused(_bug(regression=reg), "build", "done"), reg
+
+
+def _t_bug_lock_only_on_done() -> None:
+    b = _bug()
+    assert check_transition(b, "build", "blocked")[0] is True
+    assert check_transition(b, "build", "in_progress")[0] is True
+
+
+def _t_bug_lock_after_slices() -> None:
+    reason = _refused(_bug(("slice-1", "done"), ("slice-2", "pending")), "build", "done")
+    assert "slice-2" in reason and "régression" not in reason
+
+
+def _t_bug_absent_unchanged() -> None:
+    b = _sl(("slice-1", "done"))
+    assert check_transition(b, "build", "done")[0] is True
+    b["kind"] = None
+    assert check_transition(b, "build", "done")[0] is True and not regression_declared(b)
+
+
+def _t_validate_bug() -> None:
+    b = _fx({"think": "done", "build": "done"}, kind="feature")
+    errors, warnings = validate(b)
+    assert errors == [] and any("kind inconnu" in w for w in warnings), warnings
+    b = _fx({"think": "done", "build": "done"}, kind="bug", regression={"test": "t", "red_sha": "x"})
+    errors, warnings = validate(b)
+    assert errors == [] and any("red_sha" in w for w in warnings), warnings
+    assert any("sans test de régression" in w for w in warnings), warnings
+    b = _fx({"think": "done", "build": "done"}, kind="bug",
+            regression={"test": "t", "red_sha": _RED_SHA, "waiver": None, "at": "T"})
+    assert validate(b) == ([], [])
+    assert validate(_fx({"think": "done"})) == ([], [])
+
+
+def _t_doc_bug_battle() -> None:
+    """Test croisé doc ↔ CLI (GH#201) : options citées = options réelles, aiguilles du flux."""
+    root = Path(__file__).resolve().parents[1]
+    names = ("commands/battle.md", "skills/battle-workflow/SKILL.md", "ARCHITECTURE.md",
+             "docs/ui-integration.md", "agents/architect.md", "agents/builder.md",
+             "agents/test-engineer.md")
+    docs = {n: root / n for n in names}
+    if not all(d.is_file() for d in docs.values()):
+        print("SKIP: _t_doc_bug_battle (fichiers de doctrine absents, cache de plugin ?)",
+              file=sys.stderr)
+        return
+    text = {n: d.read_text(encoding="utf-8") for n, d in docs.items()}
+    subs = _build_parser_parts()[1].choices
+    init_opts = set(subs["init"]._option_string_actions)
+    meta_opts = set(subs["set-meta"]._option_string_actions)
+    battle = text["commands/battle.md"]
+    cited = set(re.findall(r"--regression-[a-z-]+", battle))
+    assert cited == {"--regression-test", "--regression-red-sha", "--regression-waiver"}, cited
+    assert cited <= meta_opts and "--kind" in meta_opts, sorted(cited - meta_opts)
+    assert "--kind" in init_opts and "init" in battle and "[--kind bug]" in battle
+    assert "set-meta --kind bug" in battle and 'set-meta --kind ""' in battle
+    dispatch = [ln for ln in battle.splitlines() if ln.startswith("- `start <issue|slug>")]
+    assert dispatch and "`--bug`" in dispatch[0], "--bug absent de la ligne Dispatch"
+    hint = [ln for ln in battle.splitlines() if ln.startswith("argument-hint:")]
+    assert hint and "[--bug]" in hint[0], "--bug absent de argument-hint"
+    for n in ("agents/builder.md", "agents/test-engineer.md", "commands/battle.md"):
+        assert "### Test de régression" in text[n], f"section absente de {n}"
+    assert "**RÉGRESSION**" in text["agents/architect.md"]
+    assert "**T5 Régression**" in text["agents/test-engineer.md"]
+    for n in ("skills/battle-workflow/SKILL.md", "ARCHITECTURE.md", "docs/ui-integration.md"):
+        assert "`kind`" in text[n] or "kind (" in text[n], f"kind absent de {n}"
+        assert "regression" in text[n], f"regression absent de {n}"
+
+
 _CORE_TESTS = (
+    _t_doc_bug_battle,
+    _t_bug_build_done_with_regression, _t_bug_build_done_with_waiver, _t_bug_build_done_refused,
+    _t_bug_regression_malformed, _t_bug_lock_only_on_done, _t_bug_lock_after_slices,
+    _t_bug_absent_unchanged, _t_validate_bug,
     _t_glob_match,
     _t_source_consistency, _t_unknown_phase_status, _t_verdict_status_coherence,
     _t_plan_requires_think, _t_build_refused_without_approval,
@@ -4779,7 +4993,116 @@ def _t_merge_reports_subcommand() -> None:        # M16
     assert parser.parse_args(["merge-reports"]).cmd == "merge-reports"
 
 
+def _to_build_slice_done(r: "_Repo", bid="b1") -> None:
+    """Battle `bid` (déjà initialisée) amenée à build in_progress, slice-1 done."""
+    for argv in (("transition", "think", "done"), ("transition", "plan", "in_progress"),
+                 ("transition", "plan", "done", "--verdict", "accept"),
+                 ("set-slices", "--replace", "slice-1"), ("approve-plan",),
+                 ("transition", "build", "in_progress"), ("slice", "slice-1", "in_progress"),
+                 ("slice", "slice-1", "done")):
+        r.ok(*argv, "--battle", bid)
+
+
+def _t_bug_init_cli() -> None:
+    with _Repo() as r:
+        r.init("b1", "--kind", "bug")
+        assert r.load("b1")["kind"] == "bug"
+        r.init("b2")
+        assert "kind" not in r.load("b2") and "regression" not in r.load("b2")
+        code, res = r.run("init", "b3", "--ticket", "GH#1", "--title", "T", "--profile", "feature",
+                          "--kind", "x")
+        assert code == 2 and res["ok"] is False, res
+        assert not (r.root / ".legion" / "battles" / "b3").exists()
+
+
+def _t_bug_build_done_cli() -> None:
+    with _Repo() as r:
+        r.init("b1", "--kind", "bug")
+        _to_build_slice_done(r)
+        reason = r.refused("transition", "build", "done")
+        assert "test de régression" in reason and "--regression-red-sha" in reason
+        res = r.ok("set-meta", "--regression-test", "_t_foo", "--regression-red-sha", _RED_SHA)
+        assert res["updated"] == ["regression"]
+        r.ok("transition", "build", "done")
+        reg = r.load()["regression"]
+        assert reg["test"] == "_t_foo" and reg["red_sha"] == _RED_SHA and reg["waiver"] is None
+        code, res = r.run("validate")
+        assert code == 0 and res["errors"] == [] and res["warnings"] == [], res
+
+
+def _t_bug_set_meta_pairs_cli() -> None:
+    with _Repo() as r:
+        r.init("b1", "--kind", "bug")
+        raw = r.path().read_bytes()
+        assert "ensemble" in r.refused("set-meta", "--regression-test", "t")
+        assert "ensemble" in r.refused("set-meta", "--regression-red-sha", _RED_SHA)
+        assert "exclusif" in r.refused("set-meta", "--regression-test", "t", "--regression-waiver", "w")
+        assert "exclusif" in r.refused("set-meta", "--regression-red-sha", _RED_SHA,
+                                       "--regression-waiver", "w")
+        assert r.path().read_bytes() == raw
+        r.ok("set-meta", "--regression-waiver", "pas de test automatisable")
+        reg = r.load()["regression"]
+        assert reg["waiver"] == "pas de test automatisable" and reg["test"] is None
+
+
+def _t_bug_set_meta_kind_order_cli() -> None:
+    with _Repo() as r:
+        r.init()
+        assert "non marquée bug" in r.refused("set-meta", "--regression-test", "t",
+                                              "--regression-red-sha", _RED_SHA)
+        res = r.ok("set-meta", "--kind", "bug", "--regression-test", "t", "--regression-red-sha", _RED_SHA)
+        assert res["updated"] == ["kind", "regression"]
+        assert r.load()["kind"] == "bug"
+        assert "kind inconnu" in r.refused("set-meta", "--kind", "feature")
+
+
+def _t_bug_set_meta_invalid_cli() -> None:
+    with _Repo() as r:
+        r.init("b1", "--kind", "bug")
+        raw = r.path().read_bytes()
+        for argv in (("--regression-test", "a b", "--regression-red-sha", _RED_SHA),
+                     ("--regression-test=-t", "--regression-red-sha", _RED_SHA),
+                     ("--regression-test", "a$b", "--regression-red-sha", _RED_SHA),
+                     ("--regression-test", "", "--regression-red-sha", _RED_SHA),
+                     ("--regression-test", "t", "--regression-red-sha", "z" * 40),
+                     ("--regression-test", "t", "--regression-red-sha", "abc"),
+                     ("--regression-waiver", 'a"b'), ("--regression-waiver", "a`b"),
+                     ("--regression-waiver", "a$b"), ("--regression-waiver", "")):
+            r.refused("set-meta", *argv)
+        assert r.path().read_bytes() == raw
+
+
+def _t_bug_set_meta_late_kind_cli() -> None:
+    with _Repo() as r:
+        r.init()
+        _to_build_slice_done(r)
+        r.ok("transition", "build", "done")
+        assert "build déjà done" in r.refused("set-meta", "--kind", "bug")
+        assert "kind" not in r.load()
+        r.ok("set-meta", "--kind", "bug", "--regression-test", "t", "--regression-red-sha", _RED_SHA)
+        assert r.load()["kind"] == "bug"
+        r.ok("set-meta", "--kind", "bug")   # déclaration déjà valide : permis
+        r.ok("set-meta", "--kind", "")
+        assert r.load()["kind"] is None and "regression" not in r.load()
+
+
+def _t_bug_regression_replaced_cli() -> None:
+    with _Repo() as r:
+        r.init("b1", "--kind", "bug")
+        r.ok("set-meta", "--regression-test", "t1", "--regression-red-sha", _RED_SHA)
+        first = r.load()["regression"]
+        r.ok("set-meta", "--regression-test", "t2", "--regression-red-sha", "b" * 40)
+        second = r.load()["regression"]
+        assert second["test"] == "t2" and second["red_sha"] == "b" * 40 and second["at"] >= first["at"]
+        r.ok("set-meta", "--regression-waiver", "w")
+        reg = r.load()["regression"]
+        assert reg["test"] is None and reg["red_sha"] is None and reg["waiver"] == "w"
+
+
 _INTEGRATION_TESTS = (
+    _t_bug_init_cli, _t_bug_build_done_cli, _t_bug_set_meta_pairs_cli,
+    _t_bug_set_meta_kind_order_cli, _t_bug_set_meta_invalid_cli, _t_bug_set_meta_late_kind_cli,
+    _t_bug_regression_replaced_cli,
     _t_security_hits, _t_security_auto_slice, _t_touch_files,
     _t_init_profiles, _t_set_meta_profile, _t_set_meta_worktree, _t_set_delivery_head_fields,
     _t_validate_profile, _t_hotfix_e2e,

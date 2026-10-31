@@ -171,6 +171,11 @@ antérieure peut ne pas les avoir) :
 - `delivery.pr_state`, `delivery.ci`, `delivery.checked_at` : état de la PR (`open` | `merged` | `closed`), état agrégé de la CI (`pass` | `fail` | `pending` | `none`) et horodatage ISO-8601 de la dernière lecture. Posés par `battle_state.py set-delivery`. Absents sur une battle ancienne.
 - `aborted` : `{ "at": ISO-8601, "reason": str|null }`, posé par `battle_state.py abort`
   quand la battle est abandonnée. Absent sinon.
+- `kind` (racine) : `"bug"` pour une battle de bug (GH#201), orthogonal au profil. Absent ou
+  `null` : battle ordinaire. Posé par `battle_state.py init --kind bug` ou `set-meta --kind`.
+- `regression` (racine) : `{ "test": str|null, "red_sha": sha|null, "waiver": str|null, "at": ISO-8601 }`,
+  test de régression déclaré d'une battle de bug (`set-meta --regression-*`). Absent sinon.
+  Legatus ne l'affiche pas encore.
 - `phases.plan.approved_at` : horodatage ISO-8601 de l'approbation humaine du plan
   (`null` tant que non approuvé). Posé par `battle_state.py approve-plan`.
 - `phases.<phase>.fails` : FAILs ciblés du dernier passage (`{target, dimension}`) ;
