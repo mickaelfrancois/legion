@@ -127,6 +127,7 @@ L'orchestrateur fournit dans le prompt :
 | **CONTRAT** | Un contrat public / DTO / endpoint change-t-il ? Si oui, est-ce rétrocompatible, et sinon le versioning est-il prévu ? | **FAIL** si breaking change sans stratégie de versioning ; WARN si rétrocompat non démontrée. |
 | **TESTABLE** | Chaque critère d'acceptation est-il vérifiable par un test nommé ? | **FAIL** — sans critère testable, la matrice de tests est creuse et la gate TEST aval est désarmée → `revise`. |
 | **LIMITES** | Les cas limites / erreurs sont-ils énoncés, ou seulement le chemin nominal ? | **WARN** (FAIL si un cas limite non traité a un impact données ou sécurité). |
+| **RÉGRESSION** | Battle de bug (`kind: "bug"`, signalée par la spec ou le prompt) : la matrice porte-t-elle une ligne « test de régression (rouge sur la base, vert après correctif) » qui nomme sa slice ? | **FAIL** si la ligne manque. Un bug sans test automatisable passe par une ligne `Type` = « acceptation humaine différée » avec sa raison : c'est la seule source d'un waiver. Sans objet hors battle de bug. |
 | **DÉCOUPE** | Livrable en une slice de valeur plus petite ? Qu'est-ce qui est reportable sans perdre l'acceptation ? | **WARN / opportunity** — une découpe ignorée donne souvent `accept_with_opportunity`. |
 
 ## Output (format strict)
@@ -180,6 +181,7 @@ réutilise l'embryon « approche + Choix ouverts à arbitrer », ne duplique pas
 |-----|------|---------|
 | nominal ... | unit/integration | ... |
 | limite ...  | ... | ... |
+| test de régression (battle de bug) : rouge sur la base, vert après correctif — [slice-1] | régression | le test nommé échoue sur son assertion avant le correctif, passe après |
 | démarrage du serveur ... | acceptation humaine différée | vérif structurelle + prérequis ; bout-en-bout = test humain |
 
 > **Livrable à effet de bord.** Quand un critère ne peut être vérifié en run autonome

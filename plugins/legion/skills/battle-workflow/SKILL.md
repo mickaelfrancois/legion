@@ -54,6 +54,20 @@ it touches no `.legion/` state and starts no battle — it just makes the issue 
 reads already sharp, so `spec.md` seeds rich and the `architect` gate has less to push
 back on. No phase of its own in the diagram; it feeds THINK.
 
+**Battle de bug (GH#201).** A battle that fixes a bug carries `kind: "bug"` (orthogonal to
+the profile), set by `start --bug` or by the issue's `bug` label. Its flow, end to end:
+- **PLAN**: the test matrix carries a « test de régression » row (red on the base, green after
+  the fix) naming its slice — the `architect` FAILs without it (question RÉGRESSION). A bug with
+  no automatable test uses an « acceptation humaine différée » row with a reason, the only source
+  of a waiver, approved with the plan.
+- **BUILD**: that slice is built **test first** — the test fails on its own assertion on the
+  unfixed code, then passes after the fix — and its report carries a `### Test de régression`
+  section (name, command, `HEAD` sha of the red run, red and green excerpts).
+- **Lock**: `battle_state.py` refuses `transition build done` until the orchestrator declares the
+  test (`set-meta --regression-test <name> --regression-red-sha <sha>`, or `--regression-waiver`).
+- **TEST**: the `test-engineer` gate FAILs (rule T5) when the test is missing or its red run is
+  not attested. It does not replay the red run (no checkout, no worktree: `[git-state]` fault).
+
 **ADDRESS is optional and repeatable.** It runs only when the open PR draws human
 review comments: `/battle address` triages them (the `pr-triage` gate), loops fixes
 back through BUILD/REVIEW/TEST, replies and resolves the threads — one round per
@@ -321,6 +335,11 @@ single source shared by `guard.py`, `fleet_sync.py` and `eval.py`:
   // ou `set-delivery --pr-json <fichier>` (lit la sortie de `gh pr view`, sans réseau). Absents sur une battle ancienne.
   "delivery": { "pr_url": null, "pr_state": null, "ci": null, "checked_at": null }
   // aborted (optionnel) — { "at": ISO, "reason": str|null }, posé par `abort` ; toute commande sauf `validate` est alors refusée
+  // kind (optionnel, GH#201) — "bug" : battle de bug, orthogonale au profil ; absent ou null = battle ordinaire.
+  //   Posé par `init --kind bug` (start --bug) ou `set-meta --kind bug` (label `bug` de l'issue) ; `--kind ""` le remet à null.
+  // regression (optionnel) — { "test": str|null, "red_sha": sha40|null, "waiver": str|null, "at": ISO } :
+  //   test de régression déclaré par `set-meta --regression-test N --regression-red-sha SHA` (ensemble)
+  //   ou `--regression-waiver R` (seul, prévu au plan). `build done` d'une battle de bug l'exige.
 }
 ```
 

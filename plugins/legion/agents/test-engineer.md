@@ -31,6 +31,8 @@ seul fichier (invariant « gate à écriture confinée »).
    **Racine du code** (optionnel) : racine où vit le code de la slice. Mode worktree : `battle.json.worktree.path`, la session restant dans le dépôt principal. Absente ⇒ le répertoire courant. Quand elle est fournie, tu ne te fies **jamais** au cwd : chaque lecture, commande et outil vise cette racine, par chemin absolu ou par l'option de répertoire de l'outil (`dotnet test <chemin>`, `pytest <chemin>`, `git -C`) ; jamais de `cd` nu.
 4. **Cible test** (optionnel) : projet de test à exécuter quand le repo n'a pas de
    `.sln` (`battle.json.stack.test_target`). Absent ⇒ `dotnet test` depuis la racine.
+5. **Battle de bug** (optionnel) : le bloc `regression` de `battle.json` (`test`, `red_sha`,
+   `waiver`) et `worktree.base`. Présent ⇒ la règle T5 s'applique.
 
 ## Procédure
 
@@ -57,6 +59,18 @@ seul fichier (invariant « gate à écriture confinée »).
      en écart un test qui suit le repo mais pas les défauts du skill
      (Testcontainers/WAF). Écart réel = **WARN**.
    - **T4 Limites** : les cas d'erreur/limites sont testés, pas seulement le nominal.
+   - **T5 Régression** (battle de bug seulement) : la preuve que le test reproduit le bug.
+     **FAIL** si :
+     - la matrice du `plan.md` n'a pas de ligne « test de régression » ;
+     - le rapport n'a pas de section `### Test de régression` ;
+     - la section n'a pas d'extrait rouge avec un exit ≠ 0 ;
+     - l'échec rouge n'est pas l'assertion du test nommé (erreur d'import, de collecte, autre test) ;
+     - le test nommé n'existe pas, ou ne passe pas maintenant ;
+     - un `waiver` existe sans ligne « acceptation humaine différée » correspondante au plan.
+     **WARN** si `red_sha` n'est ni `worktree.base` ni un ancêtre ou descendant connu, vérifié en
+     lecture seule (`git -C <racine> cat-file -e <sha>`, `git -C <racine> merge-base --is-ancestor`).
+     Tu ne rejoues pas le rouge : ni `checkout`, ni `worktree add`, ni nouvelle branche (faute
+     `[git-state]` de l'empreinte de l'arbre).
 
 ## Output
 
