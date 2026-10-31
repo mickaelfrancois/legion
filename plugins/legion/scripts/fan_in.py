@@ -90,6 +90,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1918,6 +1919,48 @@ def _t_cross_worktree_batch() -> None:
         assert rc == 2, (rc, out)                                     # B in-place : chemin actuel, refuse ce worktree
 
 
+def _leaked_shards(fleet_dir: Path, root: str) -> list[str]:
+    """Shards de `fleet_dir` dont une valeur texte désigne `root` ou un chemin dessous (GH#214).
+    Un dossier absent ou un shard illisible ne compte pas comme une fuite."""
+    top = os.path.normcase(os.path.realpath(root))
+
+    def under(value: object) -> bool:
+        if isinstance(value, str):
+            p = os.path.normcase(os.path.realpath(value)) if os.path.isabs(value) else ""
+            return p == top or p.startswith(top + os.sep)
+        if isinstance(value, dict):
+            return any(under(v) for v in value.values())
+        if isinstance(value, list):
+            return any(under(v) for v in value)
+        return False
+
+    leaks = []
+    for shard in sorted(fleet_dir.glob("*.json")):
+        try:
+            data = json.loads(shard.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if under(data):
+            leaks.append(shard.name)
+    return leaks
+
+
+def _t_leak_check_detects() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fleet = Path(tmp) / "fleet.d"
+        root = os.path.join(tmp, "run")
+        assert _leaked_shards(fleet, root) == []                   # dossier absent
+        fleet.mkdir()
+        (fleet / "in.json").write_text(json.dumps({"id": "B", "repo": {"path": os.path.join(root, "main")}}),
+                                       encoding="utf-8")
+        (fleet / "near.json").write_text(json.dumps({"repo": os.path.join(tmp, "run-x", "main")}),
+                                         encoding="utf-8")
+        (fleet / "out.json").write_text(json.dumps({"repo": os.path.join(tmp, "other", "main")}),
+                                        encoding="utf-8")
+        (fleet / "bad.json").write_text("{", encoding="utf-8")
+        assert _leaked_shards(fleet, root) == ["in.json"], _leaked_shards(fleet, root)
+
+
 _TESTS = (_t_import_smoke, _t_f1_nominal, _t_f2_order, _t_f3_overlap, _t_f4_dirty_main,
           _t_f5_untracked_present, _t_f6_out_of_scope_and_deny, _t_f7_legion_forced,
           _t_f8_committed_and_dirty, _t_f9_head_not_descendant, _t_f10_invalid_worktrees,
@@ -1932,10 +1975,30 @@ _TESTS = (_t_import_smoke, _t_f1_nominal, _t_f2_order, _t_f3_overlap, _t_f4_dirt
           _t_w8_battle_unusable, _t_w9_battle_worktrees_refused,
           _t_w10_align_refused_in_battle_worktree, _t_w11_w12_align_main_head,
           _t_w13_cleanup_keeps_battle_branch, _t_w14_cwd, _t_w15_inplace_explicit,
-          _t_cross_worktree_batch)
+          _t_cross_worktree_batch, _t_leak_check_detects)
 
 
 def _self_test() -> int:
+    keys = ("LEGION_FLEET",)
+    saved = {k: os.environ.get(k) for k in keys}
+    real_fleet = bs._load_fleet_sync()._fleet_dir()  # le vrai index, résolu avant l'isolation
+    run_root = os.path.realpath(tempfile.mkdtemp(prefix="fan-in-run-"))
+    saved_tempdir = tempfile.tempdir
+    tempfile.tempdir = run_root  # tout dossier temporaire du run vit sous `run_root`
+    os.environ["LEGION_FLEET"] = os.path.join(run_root, "fleet.json")
+    try:
+        return _run_self_test(real_fleet, run_root)
+    finally:
+        tempfile.tempdir = saved_tempdir
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(run_root, ignore_errors=True)
+
+
+def _run_self_test(real_fleet: Path, run_root: str) -> int:
     failed = 0
     for fn in _TESTS:
         try:
@@ -1943,6 +2006,11 @@ def _self_test() -> int:
         except Exception as exc:  # noqa: BLE001 - on rapporte puis on continue
             failed += 1
             print(f"FAIL: {fn.__name__}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    leaks = _leaked_shards(real_fleet, run_root)
+    if leaks:
+        failed += 1
+        print(f"FAIL: fuite fleet : {len(leaks)} shard(s) du vrai {real_fleet} pointent vers {run_root} : "
+              f"{', '.join(leaks)}", file=sys.stderr)
     if failed:
         print(f"FAIL: fan_in self-test ({failed}/{len(_TESTS)} en échec)", file=sys.stderr)
         return 1
