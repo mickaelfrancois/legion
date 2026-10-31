@@ -76,7 +76,7 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
 
    ## Cost (approximate)
    - Tokens: ~<tokens_total> (subagents <Σ>, main <Σ>) — input <n>, output <n>, cache_read <n>, cache_creation <n>
-   - Skills used: <scaffold, code-review, build-fix, …> (or "none recorded")
+   - Skills used: <e.g. battle-workflow, …> (or "none recorded")
 
    ## What worked
    - ...
@@ -97,10 +97,10 @@ Run the **REFLECT** phase. Arguments: `$ARGUMENTS`
    ```
 
    **Scope of "the plugin"**: `legion` first (orchestrator, gates, hooks,
-   commands); each item may instead name a **delegated** plugin
-   (`dotnet-claude-kit`) when it is the source of the friction. `severity` ∈
+   commands); each item may instead name a **third-party** plugin
+   the battle relied on (e.g. `dotnet/skills` for the C# LSP) when it is the source of the friction. `severity` ∈
    `blocker|friction|annoyance|idea`; `area` like `gate:reviewer`, `hook:guard`,
-   `command:/battle deliver`, `skill:scaffold`.
+   `command:/battle deliver`, `skill:battle-workflow`.
 
 4. **Close the battle first** (release the guard before writing out-of-repo):
    ```bash

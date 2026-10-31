@@ -7,8 +7,8 @@
 Inspirée de [gstack](https://github.com/garrytan/gstack). `legion` n'écrit (presque)
 pas de code lui-même : c'est un **chef d'orchestre**. Il séquence des sous-agents
 « gates » en lecture seule sur le code (qui rendent un verdict `accept` / `revise` / `reject`),
-garde l'état de chaque tâche par repo, et **délègue** tout le travail .NET concret à
-[`dotnet-claude-kit`](https://github.com/trossitec/dotnet-claude-kit).
+garde l'état de chaque tâche par repo, et s'appuie sur le **SDK .NET seul** pour le
+travail .NET concret : aucun plugin tiers n'est requis.
 
 ```
 THINK → PLAN → BUILD → LINT → REVIEW → TEST → DELIVER → REFLECT
@@ -37,7 +37,9 @@ Un `revise` déclenche une boucle d'auto-correction bornée. Force le pas-à-pas
 
 **Prérequis** : [Claude Code](https://claude.com/claude-code), **Python 3**
 (`python` — exécute les hooks), **.NET SDK**, la **GitHub CLI** (`gh auth login`),
-et le plugin **`dotnet-claude-kit`** (fournit la MCP Roslyn + les skills délégués).
+(aucun plugin tiers requis).
+*Optionnel* : un serveur LSP C# (ex. `dotnet/skills`) enrichit la gate `reviewer` ;
+prérequis SDK .NET 10, NuGet au premier lancement, serveur en préversion.
 
 1. **Installer le plugin** dans Claude Code :
    ```
@@ -82,3 +84,15 @@ Conception & doctrine : [`plugins/legion/ARCHITECTURE.md`](plugins/legion/ARCHIT
 ## Licence
 
 [MIT](LICENSE).
+
+## Note de migration
+
+Les versions précédentes de `legion` demandaient d'installer le plugin
+[`dotnet-claude-kit`](https://github.com/trossitec/dotnet-claude-kit). Ce n'est plus
+nécessaire :
+
+- le kit n'est plus requis ; tu peux le désinstaller sans effet sur `legion` ;
+- les skills `scaffold` et `modern-csharp` sont abandonnés ;
+- les règles de revue, de sécurité, d'architecture et de test sont internalisées dans
+  les agents ;
+- le serveur LSP C# reste optionnel : sans lui, la gate `reviewer` passe sur un repli tracé.

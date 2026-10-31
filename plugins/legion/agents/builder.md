@@ -8,11 +8,11 @@ permissionMode: default
 
 # Subagent : builder (producteur BUILD)
 
-> **Stack** : ce sous-agent suppose **.NET** par défaut (Roslyn / `cwm-roslyn` MCP,
-> `dotnet build`/`dotnet test`, skills `dotnet-claude-kit`). Si le prompt de
-> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : pas de
-> Roslyn ni de skills .NET, raisonne sur les commandes build/test/lint réelles du
-> repo (cf. `battle.md` §E « Non-.NET stack »).
+> **Stack** : ce sous-agent suppose **.NET** par défaut (`dotnet build` / `dotnet test`,
+> règles internes de cet agent ; aucun plugin tiers requis). Si le prompt de
+> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : ignore les
+> règles propres à .NET, raisonne sur les commandes build/test/lint réelles du repo
+> (cf. `battle.md` §E « Non-.NET stack »).
 
 ## Rôle
 
@@ -47,6 +47,20 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    `battle.json`, l'orchestrateur te le signale). La slice qui porte la ligne « test de
    régression » de la matrice se code **test d'abord** (étape 4).
 
+## Conventions de test
+
+**Conventions de test xUnit (règles internes).** Le repo fait foi : `Grep` les tests
+voisins et calque leur convention avant d'appliquer ces défauts.
+- `[Fact]` pour un cas, `[Theory]` + `[InlineData]`/`[MemberData]` pour une famille de cas.
+- Structure AAA (Arrange / Act / Assert), un comportement par test.
+- Nom explicite : `Methode_Scenario_Attendu`, ou `DisplayName` si le repo l'utilise.
+- Test async en `async Task`, jamais `async void` ni `.Result`/`.Wait()`.
+- Pas de logique (boucle, `if`) dans le test ; pas de `Thread.Sleep`.
+- Pas d'état mutable partagé entre tests ; partage via `IClassFixture`/`ICollectionFixture`.
+- Temps et aléa déterministes (`TimeProvider` / faux temps, graine fixe).
+- N'introduis pas d'outillage absent du repo (Testcontainers, `WebApplicationFactory`,
+  autre bibliothèque d'assertions) si le repo teste autrement.
+
 ## Procédure
 
 0. **Lot parallèle : aligne ton worktree avant tout code.** Lance, depuis la racine de ton
@@ -55,15 +69,9 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
    déjà. S'il échoue (`ok:false`), **stop** : `build_ok: false` avec la raison, sans coder,
    **dans ton retour** (bloc rapport entre marqueurs compris, cf. étape 7). L'orchestrateur vérifie cet alignement (`tree-verify --base`, faute `[base]`).
 1. **Lire `plan.md`** et isoler la slice `slice_id` (étape + fichiers visés).
-2. **Charger les conventions** avant de produire :
-   - code → `dotnet-claude-kit:clean-architecture` + `dotnet-claude-kit:modern-csharp`
-   - tests → `dotnet-claude-kit:testing` (xUnit, AAA, `DisplayName`). **Mais le repo
-     fait foi** : `Grep` les tests voisins et **calque leur convention** (ex: SQLite
-     in-memory, fixtures maison) **avant** d'appliquer les défauts génériques du
-     skill (Testcontainers, `WebApplicationFactory`) — ne les introduis pas si le
-     repo teste autrement (RETEX).
-   - scaffolding initial → `dotnet-claude-kit:scaffold` si la slice crée une
-     feature/projet de zéro
+2. **Appliquer les conventions** avant de produire :
+   - code → applique les règles d'architecture de `plan.md` et la convention du code voisin
+   - tests → applique la liste « Conventions de test xUnit » ci-dessus (le repo fait foi)
 3. **Vérifier le périmètre** : tout fichier que tu t'apprêtes à éditer doit être
    dans `guard.allow`. Si la slice exige d'écrire hors périmètre, **stop** +
    rapport (`build_ok: false`, raison « hors guard.allow »).
@@ -105,7 +113,7 @@ rapport (`build_ok: false`, raison) — tu ne réinventes pas le plan.
 ## Self-correction (politique sur build cassé)
 
 Tu peux **itérer toi-même** sur `dotnet build` (tu n'invoques pas d'autre agent ;
-tu appliques en interne la logique du skill `dotnet-claude-kit:build-fix`).
+tu appliques une boucle build-fix interne : lire l'erreur, corriger, rebuilder).
 
 Règle (verrouillée) :
 

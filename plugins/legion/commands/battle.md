@@ -116,9 +116,9 @@ Arguments: `$ARGUMENTS`
 
 ### §A.preflight — detect the stack (.NET by default)
 
-This plugin is built for **.NET** battles: the gates assume Roslyn (the
-`cwm-roslyn-navigator` MCP), `dotnet build` / `dotnet test`, and the
-`dotnet-claude-kit` skills. That is the default and needs no extra step. But a repo
+This plugin is built for **.NET** battles: the gates assume
+`dotnet build` / `dotnet test` / `dotnet format` and their own internal rule lists (the
+`reviewer` also uses the native `LSP` tool when available). That is the default and needs no extra step. But a repo
 may not be .NET (RETEX: a non-.NET battle had to neutralize these assumptions by
 hand in every gate prompt). **Detect once per session** and record the result in
 `battle.json.stack` (written at §A.1) for the gates and `deliver`:
@@ -741,9 +741,8 @@ case 3** with `out_of_scope`. The same wrap applies to every corrective BUILD (�
 §H steps 0 and 3), with `tree-verify --guard` before the commit.
 
 **Mode — inline (default).** Code the slice yourself in this session, applying the
-same conventions as the `builder` agent: load `dotnet-claude-kit:clean-architecture`
-+ `dotnet-claude-kit:modern-csharp` (code) and `dotnet-claude-kit:testing` (tests);
-`dotnet-claude-kit:scaffold` for from-scratch scaffolding. Verify with
+same conventions as the `builder` agent: its internal code rules and xUnit conventions, the repo's neighbouring code and tests
+first. Verify with
 `dotnet build` from the current directory (worktree mode: `dotnet build "<wt>/…"`, see the block « Worktree mode — working from the main checkout »; or `dotnet build <stack.build_target>`
 when `battle.json.stack.build_target` is set — repo without a `.sln`); **note the
 warning count** from the build summary. For `all`, build **each slice in order**,
@@ -1186,12 +1185,12 @@ When the battle is flagged **non-.NET** (§A.preflight stack detection), the def
 `architect` gate in §A.1), make the deviation explicit so the subagent does not
 fall back to .NET tooling:
 
-- **Drop the .NET tooling assumptions** from the prompt: no Roslyn / `cwm-roslyn`
-  MCP, no `dotnet build` / `dotnet test`. State the repo's **actual** build/test/lint
+- **Drop the .NET tooling assumptions** from the prompt: no native C# `LSP`,
+  no `dotnet build` / `dotnet test`. State the repo's **actual** build/test/lint
   commands instead (read them from `package.json` scripts, `Makefile`, CI config —
   whatever the repo uses) and pass them in the prompt.
-- **Tell the subagent not to load `dotnet-claude-kit` skills** (RETEX: subagents
-  loaded .NET skills for lack of an equivalent). Instruct it to reason from the
+- **Tell the subagent to skip its .NET-specific rule lists** (RETEX: subagents
+  applied .NET rules for lack of an equivalent). Instruct it to reason from the
   repo's own conventions and the generic review/test lenses, not a .NET ruleset.
 - **Keep the verdict contract unchanged** (`accept` / `accept_with_opportunity` /
   `revise` / `reject`) — only the *toolchain* the gate reasons over changes, not the
@@ -1797,5 +1796,5 @@ proof with a proof that no commit is lost. Same steps, with these differences:
   review-cascade gate (lint/reviewer/test-engineer/security) → in `autonomous` mode,
   the bounded auto-correction loop (§E, budgets §F); in `step` mode, hand back. A PLAN
   (`architect`) `revise` **always** hands back to adjust the spec (§A.1 step 6).
-- Delegate concrete .NET reasoning to `dotnet-claude-kit` skills; do not duplicate
-  them here.
+- Do the concrete .NET work with the .NET SDK and the agents' internal rule lists;
+  never require a third-party plugin, and ignore one if installed.

@@ -8,11 +8,11 @@ permissionMode: default
 
 # Subagent : test-engineer (gate TEST)
 
-> **Stack** : ce sous-agent suppose **.NET** par défaut (Roslyn / `cwm-roslyn` MCP,
-> `dotnet build`/`dotnet test`, skills `dotnet-claude-kit`). Si le prompt de
-> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : pas de
-> Roslyn ni de skills .NET, raisonne sur les commandes build/test/lint réelles du
-> repo (cf. `battle.md` §E « Non-.NET stack »).
+> **Stack** : ce sous-agent suppose **.NET** par défaut (`dotnet build` / `dotnet test`,
+> règles internes de cet agent ; aucun plugin tiers requis). Si le prompt de
+> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : ignore les
+> règles propres à .NET, raisonne sur les commandes build/test/lint réelles du repo
+> (cf. `battle.md` §E « Non-.NET stack »).
 
 ## Rôle
 
@@ -34,11 +34,25 @@ seul fichier (invariant « gate à écriture confinée »).
 5. **Battle de bug** (optionnel) : le bloc `regression` de `battle.json` (`test`, `red_sha`,
    `waiver`) et `worktree.base`. Présent ⇒ la règle T5 s'applique.
 
+## Conventions de test
+
+**Conventions de test xUnit (règles internes).** Le repo fait foi : `Grep` les tests
+voisins et calque leur convention avant d'appliquer ces défauts.
+- `[Fact]` pour un cas, `[Theory]` + `[InlineData]`/`[MemberData]` pour une famille de cas.
+- Structure AAA (Arrange / Act / Assert), un comportement par test.
+- Nom explicite : `Methode_Scenario_Attendu`, ou `DisplayName` si le repo l'utilise.
+- Test async en `async Task`, jamais `async void` ni `.Result`/`.Wait()`.
+- Pas de logique (boucle, `if`) dans le test ; pas de `Thread.Sleep`.
+- Pas d'état mutable partagé entre tests ; partage via `IClassFixture`/`ICollectionFixture`.
+- Temps et aléa déterministes (`TimeProvider` / faux temps, graine fixe).
+- N'introduis pas d'outillage absent du repo (Testcontainers, `WebApplicationFactory`,
+  autre bibliothèque d'assertions) si le repo teste autrement.
+
 ## Procédure
 
 1. **Lire** la matrice de tests du `plan.md` (cas nominal + limites).
 2. **Mapper** chaque ligne de matrice → un test nommé existant (`Grep` sur les
-   `[Fact]`/`[Theory]` + `DisplayName`). Conventions : charger `dotnet-claude-kit:testing`.
+   `[Fact]`/`[Theory]` + `DisplayName`). Conventions : liste « Conventions de test xUnit » ci-dessus.
 3. **Exécuter** depuis la **Racine du code** fournie (en mode worktree : `worktree.path`) via l'option de répertoire de l'outil ; jamais le cwd quand une racine est fournie, jamais de `cd` nu : `dotnet test` (ou
    `dotnet test <cible test>` si l'orchestrateur l'a fournie — repo sans `.sln`).
 4. **Évaluer** :
@@ -53,11 +67,10 @@ seul fichier (invariant « gate à écriture confinée »).
      humain », pas ❌ FAIL). (RETEX : une commande qui démarre un serveur persistant et
      ouvre un navigateur n'a pas de vérification bout-en-bout sûre en run autonome.)
    - **T2 Verts** : tous les tests passent. Rouge = **FAIL** (diagnostic, pas correctif).
-   - **T3 Conventions** : AAA, `DisplayName` explicite. La référence est d'abord la
-     **convention du repo** (calque les tests voisins : ex. SQLite in-memory,
-     fixtures maison), puis `dotnet-claude-kit:testing` (xUnit). Ne signale **pas**
-     en écart un test qui suit le repo mais pas les défauts du skill
-     (Testcontainers/WAF). Écart réel = **WARN**.
+   - **T3 Conventions** : la référence est d'abord la **convention du repo** (calque les
+     tests voisins : ex. SQLite in-memory, fixtures maison), puis la liste « Conventions
+     de test xUnit » ci-dessus. Ne signale **pas** en écart un test qui suit le repo mais
+     pas ces défauts (Testcontainers/WAF). Écart réel = **WARN**.
    - **T4 Limites** : les cas d'erreur/limites sont testés, pas seulement le nominal.
    - **T5 Régression** (battle de bug seulement) : la preuve que le test reproduit le bug.
      **FAIL** si :

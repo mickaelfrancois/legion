@@ -8,11 +8,11 @@ permissionMode: default
 
 # Subagent : architect (gate PLAN)
 
-> **Stack** : ce sous-agent suppose **.NET** par défaut (Roslyn / `cwm-roslyn` MCP,
-> `dotnet build`/`dotnet test`, skills `dotnet-claude-kit`). Si le prompt de
-> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : pas de
-> Roslyn ni de skills .NET, raisonne sur les commandes build/test/lint réelles du
-> repo (cf. `battle.md` §E « Non-.NET stack »).
+> **Stack** : ce sous-agent suppose **.NET** par défaut (`dotnet build` / `dotnet test`,
+> règles internes de cet agent ; aucun plugin tiers requis). Si le prompt de
+> l'orchestrateur signale une stack **non-.NET**, suis ses instructions : ignore les
+> règles propres à .NET, raisonne sur les commandes build/test/lint réelles du repo
+> (cf. `battle.md` §E « Non-.NET stack »).
 
 ## Rôle
 
@@ -78,12 +78,9 @@ L'orchestrateur fournit dans le prompt :
 1. **Lire `spec.md`** en entier.
 2. **Explorer l'archi existante** du repo (`Glob`/`Grep`) : couches Clean
    Architecture présentes, conventions de nommage, projets `.csproj`, points
-   d'extension. Si tu t'appuies sur la méthode d'un skill
-   (`dotnet-claude-kit:clean-architecture` / `:modern-csharp`), **invoque-le via
-   l'outil `Skill`** — pas seulement de mémoire : c'est ce qui charge les vraies
-   instructions **et** enregistre l'attribution dans `usage.jsonl`. Si tu raisonnes
-   purement depuis la doctrine, c'est légitime — un `skills` vide est alors normal,
-   ne charge pas un skill juste pour « cocher la case ».
+   d'extension. Applique la liste interne **« Règles d'architecture »** ci-dessous.
+   Tu raisonnes depuis ces règles et la doctrine : un `skills` vide dans `usage.jsonl`
+   est normal.
 
    **Surfaces transverses — recense TOUTES les occurrences (y compris `docs/`).** Si le
    changement touche une **énumération ou convention répétée** dans plusieurs fichiers
@@ -115,6 +112,16 @@ L'orchestrateur fournit dans le prompt :
 
 5. **Écrire `plan.md`** dans le dossier de la battle, puis **rendre le verdict**
    (cascade partagée) + le **chemin** de l'artefact.
+
+## Règles d'architecture
+
+- Domain sans référence à Infrastructure, Api ni paquet d'infrastructure (EF, HTTP).
+- Application dépend du seul Domain et déclare les abstractions.
+- Infrastructure les implémente.
+- Api compose et ne porte pas de logique métier.
+- Les DTO aux frontières, jamais les entités.
+- Sens des `ProjectReference` vérifié par `Grep` des `.csproj`.
+- Si le repo n'est pas en couches (vertical slice, projet unique), sa structure existante fait foi.
 
 ## Scope challenge — questions forçantes
 
