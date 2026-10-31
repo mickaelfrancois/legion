@@ -126,6 +126,7 @@ sauf `battle.json`) :
 | `gate-review.md` | REVIEW | verdict reviewer + détail (qualité, antipatterns) |
 | `gate-test.md` | TEST | verdict test-engineer (tests verts + couverture) |
 | `gate-security.md` | (sécurité) | verdict security (si gate requise) |
+| `resume-notes.md` | toute transition | notes de reprise écrites quand l'orchestrateur propose un reset de contexte (en-tête `battle` / `written_at` / `context_tokens` / `phases`, puis État, Prochaine action, Décisions, Pièges, Artefacts). Optionnel : l'UI peut l'ignorer. |
 | `pr-body.md` | DELIVER | corps de la PR (composé des artefacts) |
 | `wi-comment.md` | DELIVER | note de revue postée sur l'issue |
 | `pr-status.json` | ADDRESS / status | dernière sortie `gh pr view` (état de la PR, checks CI, état de fusion) |
