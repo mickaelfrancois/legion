@@ -101,7 +101,7 @@ L'orchestrateur rend la main à l'humain **uniquement** dans les cas suivants :
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë. | Escalade : résoudre l'environnement. |
 | **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (contrôle d'intégrité, `battle.md` §E). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. |
 | **7. Fusion du lot parallèle** | Le fan-in d'un lot `--auto` échoue : conflit (`overlap`, `dirty`, `apply`) ou vérification du projet rouge après la fusion (`battle.md` §D). Un refus hors périmètre reste en cas 3. | Escalade : slices du lot `blocked`, worktrees conservés ; relayer la slice, le type de conflit et les fichiers. |
-| **8. Contexte saturé (proposition de reset)** | À un point de reset (T1, T2 ou T3, section « Reset de contexte »), `context_check.py measure` rend `propose: true` (contexte > 120k, aucune phase ni slice en cours) et l'humain n'a pas déjà refusé dans la session. | Écrire `resume-notes.md`, rendre la main avec la proposition `/clear` puis `/legion:battle resume <id>` ; sur « continuer », reprendre sans nouvelle proposition. Mesure impossible : aucune proposition, aucune erreur. |
+| **8. Contexte saturé (proposition de reset)** | À un point de reset (T1, T2 ou T3, section « Reset de contexte »), `context_check.py measure` rend `propose: true` (contexte > 400k, aucune phase ni slice en cours) et l'humain n'a pas déjà refusé dans la session. | Écrire `resume-notes.md`, rendre la main avec la proposition `/clear` puis `/legion:battle resume <id>` ; sur « continuer », reprendre sans nouvelle proposition. Mesure impossible : aucune proposition, aucune erreur. |
 
 Hors liste = pas d'escalade. Tout ce qui est déterministe se corrige automatiquement.
 
@@ -382,7 +382,7 @@ Les renvois « `battle.md` §X » désignent la doctrine entière, noyau plus pa
 
 **Reset de contexte (GH#212).** Aux transitions de phase (après l'approbation du plan, après `build
 done`, après chaque gate `accept*`), si `scripts/context_check.py measure` rend `propose: true`
-(contexte > 120k jetons, aucune phase ni slice en cours), l'orchestrateur écrit `resume-notes.md` dans
+(contexte > 400k jetons, aucune phase ni slice en cours), l'orchestrateur écrit `resume-notes.md` dans
 le dossier de battle et **propose** `/clear` puis `/legion:battle resume <id>`, y compris en
 `autonomous` (cas 8). Au resume, `context_check.py notes` dit si les notes sont fraîches : oui →
 l'orchestrateur lit les notes au lieu des artefacts déjà jugés ; sinon reprise classique. Contexte non

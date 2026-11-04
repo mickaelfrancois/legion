@@ -50,7 +50,21 @@ if _SCRIPTS_DIR not in sys.path:
 
 import battle_state as bs  # noqa: E402
 
-RESET_THRESHOLD = 120_000
+RESET_RATIO = 0.40
+DEFAULT_WINDOW = 1_000_000
+
+
+def _env_int(name: str) -> int | None:
+    try:
+        v = int(os.environ.get(name, ""))
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+# 40 % de la fenêtre (1M par défaut) ; `LEGION_CONTEXT_WINDOW` change la fenêtre,
+# `LEGION_RESET_THRESHOLD` fixe le seuil en jetons.
+RESET_THRESHOLD = _env_int("LEGION_RESET_THRESHOLD") or int((_env_int("LEGION_CONTEXT_WINDOW") or DEFAULT_WINDOW) * RESET_RATIO)
 TAIL_BYTES = 8 * 1024 * 1024
 NOTES_NAME = "resume-notes.md"
 _USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
@@ -315,9 +329,9 @@ class _Fx:
 
 def _t_measure() -> None:
     with tempfile.TemporaryDirectory() as tmp:  # M1 : nominal, 100k + 30k + 5k
-        fx = _Fx(tmp, transcript_lines=[_line(inp=100_000, cr=30_000, cc=5_000)])
+        fx = _Fx(tmp, transcript_lines=[_line(inp=300_000, cr=100_000, cc=5_000)])
         res = fx.measure()
-        assert res["measurable"] and res["context_tokens"] == 135_000 and res["propose"], res
+        assert res["measurable"] and res["context_tokens"] == 405_000 and res["propose"], res
         assert res["reason"] == "ok" and res["header"].startswith("---\nbattle: B\n"), res
     with tempfile.TemporaryDirectory() as tmp:  # M2 : sous le seuil
         res = _Fx(tmp, transcript_lines=[_line(inp=50_000)]).measure()
@@ -355,19 +369,19 @@ def _t_measure() -> None:
                                       encoding="utf-8")
         res = fx.measure()
         assert not res["measurable"] and res["reason"] == "transcript_mismatch", res
-    with tempfile.TemporaryDirectory() as tmp:  # M9 : > 120k mais travail en cours
-        lines = [_line(cr=300_000)]
+    with tempfile.TemporaryDirectory() as tmp:  # M9 : > 400k mais travail en cours
+        lines = [_line(cr=500_000)]
         fx = _Fx(tmp, phases={"think": {"status": "done"}, "build": {"status": "in_progress"}},
                  transcript_lines=lines)
         res = fx.measure()
         assert res["measurable"] and not res["propose"] and res["reason"] == "phase_in_progress", res
     with tempfile.TemporaryDirectory() as tmp:
         fx = _Fx(tmp, slices=[{"id": "slice-1", "status": "done"}, {"id": "slice-2", "status": "in_progress"}],
-                 transcript_lines=[_line(cr=300_000)])
+                 transcript_lines=[_line(cr=500_000)])
         res = fx.measure()
         assert not res["propose"] and res["reason"] == "slice_in_progress", res
     with tempfile.TemporaryDirectory() as tmp:  # M10 : id invalide, battle absente
-        fx = _Fx(tmp, transcript_lines=[_line(cr=300_000)])
+        fx = _Fx(tmp, transcript_lines=[_line(cr=500_000)])
         res = measure(str(fx.root), "../x", str(fx.root))
         assert not res["measurable"] and res["reason"] == "invalid_battle", res
         res = measure(str(fx.root), "Z", str(fx.root))
@@ -380,18 +394,18 @@ def _t_measure() -> None:
         assert fx.measure()["propose"] is True
     with tempfile.TemporaryDirectory() as tmp:  # M12 : transcript plus grand que la fenêtre
         filler = _line(cr=1_000, message={"pad": "x" * 400})
-        lines = [_line(cr=999_999)] + [filler] * 40 + [_line(cr=222_222)]
+        lines = [_line(cr=999_999)] + [filler] * 40 + [_line(cr=422_222)]
         fx = _Fx(tmp, transcript_lines=lines)
         res = fx.measure(tail_bytes=2_000)
-        assert res["context_tokens"] == 222_222, res
+        assert res["context_tokens"] == 422_222, res
         res = fx.measure(tail_bytes=250)   # fenêtre au milieu de la dernière ligne : ligne partielle ignorée
         assert res["reason"] in ("ok", "no_usage"), res
-        assert res["context_tokens"] in (None, 222_222), res
+        assert res["context_tokens"] in (None, 422_222), res
 
 
 def _t_notes() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        fx = _Fx(tmp, transcript_lines=[_line(cr=300_000)])
+        fx = _Fx(tmp, transcript_lines=[_line(cr=500_000)])
         npath = fx.root / ".legion" / "battles" / "B" / NOTES_NAME
         res = fx.notes()  # N1
         assert res["ok"] and not res["present"] and res["reason"] == "absent", res
