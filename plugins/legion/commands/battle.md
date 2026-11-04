@@ -117,14 +117,14 @@ anyway); in §B, §C, §I and §J. `measure` also answers `propose: false` while
 **Procedure.**
 
 1. Run `python "${CLAUDE_PLUGIN_ROOT}/scripts/context_check.py" measure --battle <id>` (read-only, JSON
-   on stdout, threshold `RESET_THRESHOLD = 120000` fixed in the script). If the exit code is not `0`,
+   on stdout, threshold `RESET_THRESHOLD`: 40 % of a 1M window = 400000, overridable via `LEGION_CONTEXT_WINDOW` or `LEGION_RESET_THRESHOLD`). If the exit code is not `0`,
    the JSON is unreadable, `measurable` is `false` or `propose` is not `true`: **go on silently**, no
    message and no error. A context that cannot be measured never blocks a battle.
 2. If `propose` is `true` **and** the user has not already declined in this session (see 3): write
    `<state>/.legion/battles/<id>/resume-notes.md` with `Write` (the `header` field of the JSON verbatim
    as the first lines, then the template below; 8 KB at most; never copy an artifact), then **hand
    back**, even in `autonomous` mode (escalation case 8, §F). Message, in French:
-   « Contexte ≈ N k jetons (> 120k) à la transition X → Y. Notes : `<chemin>`. Pour repartir léger :
+   « Contexte ≈ N k jetons (> 400k) à la transition X → Y. Notes : `<chemin>`. Pour repartir léger :
    `/clear` puis `/legion:battle resume <id>`. Pour continuer ici : « continuer ». »
 3. On « continuer »: resume the cascade where it stopped. Make **no new proposal** in this session
    (the refusal lives in this session's context; a new session starts clean).
@@ -180,7 +180,7 @@ Toute correction déterministe se fait sans lui.
 | **5. Préflight défaillant** | `python` absent, `gh` absent/non authentifié, stack ambiguë (§A.preflight). | Escalade : résoudre l'environnement avant toute battle. |
 | **6. Faute d'écriture d'une gate** | `tree-verify` détecte une écriture d'une gate dans l'arbre (§E, contrôle d'intégrité de l'arbre). Le verdict ne compte pas. | Escalade : phase `blocked` sans verdict, ni nouvelle tentative ni restauration. Relayer `changed` / `out_of_scope` ; l'humain diagnostique l'agent (ou son propre éditeur). |
 | **7. Fusion du lot parallèle** | Le fan-in d'un lot `--auto` échoue : conflit (`overlap`, `dirty`, `apply`) rapporté par `fan_in.py apply`, ou vérification du projet rouge après la fusion (§D). Un refus hors périmètre reste en cas 3. | Escalade : slices du lot `blocked`, worktrees **conservés**. Relayer la slice, le type de conflit et les fichiers ; le lot est à re-découper (slices en réalité dépendantes), pas le périmètre à élargir. |
-| **8. Contexte saturé (proposition de reset)** | À un point de reset (T1, T2 ou T3, section « Reset de contexte »), `context_check.py measure` rend `propose: true` (contexte > 120k, aucune phase ni slice en cours) et l'humain n'a pas déjà refusé dans la session. | Écrire `resume-notes.md`, rendre la main avec la proposition `/clear` puis `/legion:battle resume <id>` ; sur « continuer », reprendre sans nouvelle proposition. Mesure impossible : aucune proposition, aucune erreur. |
+| **8. Contexte saturé (proposition de reset)** | À un point de reset (T1, T2 ou T3, section « Reset de contexte »), `context_check.py measure` rend `propose: true` (contexte > 400k, aucune phase ni slice en cours) et l'humain n'a pas déjà refusé dans la session. | Écrire `resume-notes.md`, rendre la main avec la proposition `/clear` puis `/legion:battle resume <id>` ; sur « continuer », reprendre sans nouvelle proposition. Mesure impossible : aucune proposition, aucune erreur. |
 
 > **Hors liste = pas d'escalade.** Toute autre situation (warning de build,
 > `accept_with_opportunity`, opportunité de découpe) est résolue automatiquement.

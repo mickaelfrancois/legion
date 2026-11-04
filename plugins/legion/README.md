@@ -79,7 +79,7 @@ le premier pilote la *cadence d'arrêt*, le second la *délégation du code* à 
 
 ## Exemple complet
 
-**Reset de contexte.** Une longue battle coûte cher : l'orchestrateur relit tout son contexte à chaque tour. Aux transitions de phase (après l'approbation du plan, après le build, après chaque gate), si son contexte dépasse ~120k jetons, il écrit `resume-notes.md` dans le dossier de battle et te **propose** de repartir léger (`/clear` puis `/legion:battle resume <id>`), même en autonome. Tu peux répondre « continuer » : il ne reposera pas la question dans la session. Contexte non mesurable : aucune proposition.
+**Reset de contexte.** Une longue battle coûte cher : l'orchestrateur relit tout son contexte à chaque tour. Aux transitions de phase (après l'approbation du plan, après le build, après chaque gate), si son contexte dépasse ~400k jetons (40 % d’une fenêtre 1M ; réglable via `LEGION_CONTEXT_WINDOW` ou `LEGION_RESET_THRESHOLD`), il écrit `resume-notes.md` dans le dossier de battle et te **propose** de repartir léger (`/clear` puis `/legion:battle resume <id>`), même en autonome. Tu peux répondre « continuer » : il ne reposera pas la question dans la session. Contexte non mesurable : aucune proposition.
 
 > En mode autonome (défaut), tu lances surtout `start` : après l'approbation du plan,
 > les étapes 3 à 5 **s'enchaînent seules** jusqu'à la PR. Les commandes ci-dessous sont

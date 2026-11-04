@@ -61,7 +61,7 @@ et retenter.
 > |------|------------------------|-------------|-------------------|------------------------|
 > | `autonomous` | Oui (point d'arbitrage) | Non — cascade | Non — cascade | Non (filets = barrière) |
 > | `step` | Oui | Oui | Oui | Oui (CONFIRM §G.4) |
-> | contexte > 120k (les deux modes) | Oui (proposition, T1) | Oui (proposition, T2) | Oui (proposition, T3) | Non |
+> | contexte > 400k (les deux modes) | Oui (proposition, T1) | Oui (proposition, T2) | Oui (proposition, T3) | Non |
 >
-> La ligne « contexte > 120k » est le reset de contexte du noyau (cas 8, §F) : une proposition,
+> La ligne « contexte > 400k » est le reset de contexte du noyau (cas 8, §F) : une proposition,
 > jamais un reset automatique.

@@ -4043,7 +4043,7 @@ def _t_doc_context_reset() -> None:   # D3 (GH#212) : doctrine du reset de conte
         assert needle in b, f"B-resume.md : {needle!r} absent"
     # le seuil de la doctrine est celui du script (valeur fixe unique)
     import context_check
-    assert context_check.RESET_THRESHOLD == 120_000 and "120k" in sec
+    assert context_check.RESET_THRESHOLD == 400_000 and "400k" in sec
     # chaque script cité existe, chaque option citée est celle du CLI
     assert (root / "scripts" / "context_check.py").is_file()
     # les trois copies de la taxonomie portent le cas 8 (assertion de _t_doc_tree_integrity) et la doc UI
