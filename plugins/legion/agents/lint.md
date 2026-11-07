@@ -48,14 +48,15 @@ formaté, avant les gates de raisonnement plus coûteuses.
 ## Procédure
 
 1. **Retrait non-.NET** : si l'orchestrateur signale une stack non-.NET, écris la
-   bannière de retrait dans `gate-lint.md`, rends `accept` (neutre) et **arrête-toi**.
+   bannière de retrait dans `gate-lint.md`, rends `accept` (neutre) et **arrête-toi** —
+   mais seulement après l'**étape 7** (écriture + relecture du fichier).
 2. **Déterminer le périmètre = le diff de la slice.** Établis la liste des fichiers
    touchés par la slice (depuis `build-report.md`, ou la liste passée par
    l'orchestrateur ; à défaut `git diff --name-only <base>...HEAD`), puis **filtre aux
    fichiers source .NET** (`*.cs`, `*.vb`, `*.razor`, `*.cshtml`…). **Si le diff ne
    contient AUCUN fichier .NET** (slice purement Markdown/Python/config) → rien à
    vérifier dans le périmètre : écris-le dans `gate-lint.md`, rends `accept` et
-   **arrête-toi**.
+   **arrête-toi** — mais seulement après l'**étape 7** (écriture + relecture du fichier).
 3. **Résoudre la cible** (contexte de compilation pour `dotnet format`) : `<cible>` =
    la cible de format fournie (`stack.build_target`), sinon la **Racine du code** fournie
    (en mode worktree : `worktree.path`), sinon le répertoire courant (**jamais de `cd`** ;
@@ -80,6 +81,12 @@ formaté, avant les gates de raisonnement plus coûteuses.
      ajouter un pour figer le style du repo) — **pas** un échec dur.
    - **L3 Non-mutation** : atteste qu'aucun fichier n'a été modifié (c'est le contrat
      de `--verify-no-changes` ; ne lance jamais `dotnet format` **sans** ce drapeau).
+7. **Écrire l'artefact, puis le relire — OBLIGATOIRE, y compris sur les sorties
+   anticipées (étapes 1 et 2).** Dérive le verdict (section ci-dessous), **écris**
+   `gate-lint.md` dans le dossier de la battle, puis **relis-le** (`Read`) pour confirmer
+   qu'il existe et n'est pas vide. **Ce n'est qu'après cette relecture** que tu rends le
+   bloc `VERDICT`. Un verdict rendu sans fichier est perdu : la gate reste bloquée sans
+   verdict.
 
 ### Dérivation du verdict
 
@@ -163,5 +170,6 @@ La gate `lint` est .NET-only ; la stack détectée n'est pas .NET. Aucune exécu
 - **Ne pas** appeler d'autres sous-agents.
 - **N'écris QUE** ton artefact `gate-lint.md` (le guard t'y confine) : pas de code, pas
   de `battle.json`. Retourne le **chemin**, pas le contenu.
-- **Avant de rendre** : vérifie que `gate-lint.md` est **écrit et non vide** (un artefact
-  0 octet échoue au delivery check §E de l'orchestrateur et te fait re-solliciter).
+- **Ne rends jamais** le bloc `VERDICT` avant l'étape 7 : `gate-lint.md` doit être **écrit,
+  relu et non vide** (un artefact absent ou 0 octet échoue au delivery check §E de
+  l'orchestrateur et te fait re-solliciter).
